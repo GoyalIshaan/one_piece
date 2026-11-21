@@ -9,13 +9,14 @@ def run(code, timeout):
     return r
 
 check = textwrap.dedent(f"""
-import random, sys, json
+import itertools, random, sys, json
 sys.path.insert(0, {hidden!r})
-import reference as R
+import reference_slow as R
 import algos as A
 rng = random.Random(1234)
 fails = []
 cases = [[], [1], [2, 2, 2], [5, 4, 3, 2, 1], [1, 2, 3, 4], [-3, -1, -2, 0, -5], [0.5, 0.25, 0.75]]
+cases += [list(case) for case in itertools.product([0, 1, float("nan")], repeat=3)]
 cases += [[rng.randrange(-50, 50) for _ in range(rng.randrange(0, 60))] for _ in range(300)]
 for c in cases:
     if A.lis_length(list(c)) != R.lis_length(list(c)): fails.append(("lis_length", c[:20]))
