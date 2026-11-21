@@ -53,9 +53,10 @@ function listTree(root: string, dir: string, depth: number, out: string[]): void
 	}
 }
 
-export function workspaceModule(options: { maxCommandSeconds?: number } = {}): HarnessModule {
+export function workspaceModule(options: { maxCommandSeconds?: number; defaultFileLines?: number } = {}): HarnessModule {
 	let harness: HarnessApi;
 	const commandLimit = options.maxCommandSeconds ?? 3600;
+	const defaultFileLines = options.defaultFileLines ?? 400;
 	const timeoutMs = (seconds: number | undefined) => Math.min(seconds ?? 300, commandLimit) * 1000;
 	const limitText = options.maxCommandSeconds ? ` Commands have a ${commandLimit}-second limit per call. Save intermediate results for longer searches.` : "";
 	return {
@@ -90,13 +91,13 @@ export function workspaceModule(options: { maxCommandSeconds?: number } = {}): H
 			const read = [
 				defineTool({
 					name: "read_file",
-					description: "Read a text file from the workspace (optionally a line range).",
+					description: `Read a text file from the workspace (up to ${defaultFileLines} lines by default, or specify an exact line range). For large data, use a shell command to return a small excerpt or summary.`,
 					parameters: obj({ path: str(), start_line: opt(num()), end_line: opt(num()) }),
 					async execute(params) {
 						const text = readFileSync(inside(root(), params.path), "utf8");
 						const lines = text.split("\n");
 						const from = Math.max(1, params.start_line ?? 1);
-						const to = Math.min(lines.length, params.end_line ?? Math.min(lines.length, from + 399));
+						const to = Math.min(lines.length, params.end_line ?? from + defaultFileLines - 1);
 						return lines
 							.slice(from - 1, to)
 							.map((l, i) => `${from + i}\t${l}`)

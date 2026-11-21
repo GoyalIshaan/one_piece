@@ -161,7 +161,7 @@ async function main(): Promise<void> {
 				taskIds: values.task,
 				dataDir: config.dataDir,
 				router,
-				modules: () => [questionsModule({ deadlineMs: 3 * 60_000 }), boardModule(), workspaceModule({ maxCommandSeconds: 180 }), schedulerModule(config.pools)],
+				modules: () => [questionsModule({ deadlineMs: 3 * 60_000 }), boardModule(), workspaceModule({ maxCommandSeconds: 180, defaultFileLines: 80 }), schedulerModule(config.pools)],
 				profile: { questions: "active", board: "active", workspace: "active", scheduler: "active" },
 				maxConcurrentAgents: Number(values.concurrency ?? config.maxConcurrentAgents),
 				budgetScale: values["budget-scale"] ? Number(values["budget-scale"]) : undefined,

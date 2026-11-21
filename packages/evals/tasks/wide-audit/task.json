@@ -6,7 +6,7 @@
 	"suites": ["smoke", "full"],
 	"prepare": true,
 	"goal": "Follow TASK.md: audit all 16 sensor logs in data/, applying each file's own correction from its note, and produce answers.json covering every file. A hidden grader checks every field. The workspace that holds the final, complete answers.json is the one that counts, so make sure one worker integrates all results into a single answers.json.",
-	"rubric": "Every file's note is different and written in prose; read each one. Exactness matters: rounding and the definitions in TASK.md are the specification. Split the files across workers if useful, but the final answers.json must cover all 16 files.",
+	"rubric": "Read each file's short correction note, then process the raw rows with a script that reads the CSVs locally. Return only notes, checks and summary results to model context. Exactness matters: rounding and the definitions in TASK.md are the specification. Split the files across workers if useful, but the final answers.json must cover all 16 files.",
 	"budget": { "tokens": 350000, "usd": 1.5, "cpu_seconds": 300 },
 	"caps": { "maxChildren": 4, "maxDepth": 2 },
 	"timeLimitMinutes": 20

@@ -114,8 +114,9 @@ more detail on each part of the run.
 
 The Evals view shows a round's task queue, the current run's last event, and results as tasks
 finish. Eval rounds keep task scores and harness health checks together under `.one_piece/evals/`.
-Each eval shell or claims-check call is limited to 180 seconds so a long search can return
-control to its agent between checkpoints.
+Each eval shell or claims-check call is limited to 180 seconds so a long search can return control
+to its agent between checkpoints. Eval file reads default to 80 lines. Workers can request a larger
+range or process the data in the workspace and return a summary.
 
 ## Built on Pi
 
