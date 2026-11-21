@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -293,11 +293,33 @@ export async function runEval(options: EvalOptions): Promise<{ results: TaskResu
 	const dir = join(options.dataDir, "evals", `${stamp}${options.mode === "solo" ? "-solo" : ""}`);
 	mkdirSync(dir, { recursive: true });
 	const dbPath = join(options.dataDir, "one_piece.db");
+	// One eval per project at a time: two would share (and fight over) the same store and quota.
+	const lock = join(options.dataDir, "eval.lock");
+	if (existsSync(lock)) {
+		const pid = Number(readFileSync(lock, "utf8"));
+		let alive = false;
+		try {
+			process.kill(pid, 0);
+			alive = true;
+		} catch {}
+		if (alive && pid !== process.pid) throw new Error(`Another eval (pid ${pid}) is already running in ${options.dataDir}`);
+	}
+	writeFileSync(lock, String(process.pid));
+	const releaseLock = () => {
+		try {
+			if (existsSync(lock) && readFileSync(lock, "utf8") === String(process.pid)) unlinkSync(lock);
+		} catch {}
+	};
+	process.once("exit", releaseLock);
 	const store = new SqliteStore(dbPath);
 	const results: TaskResult[] = [];
 	options.log?.(`Eval ${options.suite} (${tasks.length} tasks) -> ${dir}`);
-	for (const task of tasks) results.push(await runTask(task, options, dir, store, dbPath));
-	store.close();
+	try {
+		for (const task of tasks) results.push(await runTask(task, options, dir, store, dbPath));
+	} finally {
+		store.close();
+		releaseLock();
+	}
 	const reportPath = join(dir, "report.md");
 	writeFileSync(join(dir, "results.json"), JSON.stringify(results, null, 2));
 	writeFileSync(reportPath, renderReport(`${options.suite}${options.mode === "solo" ? " (solo baseline)" : ""}`, results));

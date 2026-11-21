@@ -121,10 +121,27 @@ export function installReporting(harness: Harness): void {
 		if (event.type === "node.status" && event.nodeId === run.rootNodeId && ["done", "failed"].includes(String(event.data.status))) {
 			queueMicrotask(() => finalize(`root ${event.data.status}: ${event.data.reason ?? ""}`));
 		}
-		if (event.type === "budget.charged" && !warned && runFraction(harness) >= 1 - harness.config.reportReserve) {
-			warned = true;
-			for (const child of harness.tree.children(run.rootNodeId)) harness.stopSubtree(child.id, "done", "run budget nearly exhausted");
-			harness.deliver(run.rootNodeId, "[harness] The run budget is nearly exhausted. All branches were stopped. Call write_report now, then finish.");
+		if (event.type === "budget.charged" && runFraction(harness) >= 1 - harness.config.reportReserve) {
+			const { tree } = harness;
+			const live = (id: string) => !tree.isTerminal(id);
+			// A node whose finding is under claims review keeps going: the review is cheap and decides
+			// whether its work counts. Everything else stops now.
+			const underReview = (id: string) =>
+				tree.all().some((n) => n.role === "claims_reviewer" && n.targetNodeId === id && live(n.id));
+			const hardStop = runFraction(harness) >= 1;
+			for (const node of tree.all()) {
+				if (node.role !== "leaf" && node.role !== "internal") continue;
+				if (!live(node.id) || node.epoch !== run.epoch) continue;
+				if (!hardStop && tree.subtree(node.id).some((m) => underReview(m.id))) continue;
+				harness.stopSubtree(node.id, "done", hardStop ? "run budget exhausted" : "run budget nearly exhausted");
+			}
+			if (!warned) {
+				warned = true;
+				harness.deliver(
+					run.rootNodeId,
+					"[harness] The run budget is nearly exhausted. Branches were stopped, except findings already under review, which may still be accepted. Call write_report now (wait_for_children first if a review is pending), then finish.",
+				);
+			}
 		}
 	});
 }
