@@ -232,9 +232,25 @@ export function commonTools(harness: Harness, node: SwarmNode) {
 		}),
 		defineTool({
 			name: "finish",
-			description: "End your work. status: finished (goal handled), needs_input (blocked). Report findings before finishing.",
-			parameters: obj({ status: union([lit("finished"), lit("needs_input")]), summary: str() }),
+			description:
+				"End your work. status: finished (goal handled), needs_input (blocked). Report findings before finishing. " +
+				"Managers are refused while children are still working or findings are unresolved, unless they pass override_reason.",
+			parameters: obj({ status: union([lit("finished"), lit("needs_input")]), summary: str(), override_reason: opt(str()) }),
 			async execute(params) {
+				if ((node.role === "root" || node.role === "internal") && !params.override_reason) {
+					const subtree = harness.tree.subtree(node.id).filter((n) => n.id !== node.id && ["internal", "leaf"].includes(n.role));
+					const live = subtree.filter((n) => !TERMINAL_STATUSES.includes(n.status));
+					const ids = new Set(subtree.map((n) => n.id));
+					const open = harness.store
+						.list<Finding>("findings", { runId: node.runId })
+						.filter((f) => ids.has(f.nodeId) && (f.status === "pending_review" || f.status === "needs_work"));
+					if (live.length || open.length) {
+						throw new Error(
+							`Not finished yet: ${live.length} descendants still working${open.length ? ` and ${open.length} findings unresolved (${open.map((f) => f.id).join(", ")})` : ""}. ` +
+								"Wait for them (wait_for_children), cut them, or call finish again with override_reason explaining why their results are not needed.",
+						);
+					}
+				}
 				harness.tree.update(node.id, { finishedSummary: `${params.status}: ${params.summary}` });
 				node.finishedSummary = `${params.status}: ${params.summary}`;
 				if (node.role === "root") harness.bus.emit(node.runId, "root.finished", { summary: params.summary }, node.id);
