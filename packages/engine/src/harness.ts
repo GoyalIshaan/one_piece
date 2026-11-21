@@ -47,6 +47,8 @@ export interface HarnessConfig {
 	reportReserve: number;
 	/** Fraction of its own budget at which an agent is told to wrap up and report. */
 	budgetWarnFraction: number;
+	/** Turns a worker gets past its budget to report a result it never reported. */
+	reportGraceTurns: number;
 	/** Retries (with exponential backoff) after temporary provider errors such as overload or rate limits. */
 	maxRetries: number;
 	retryBaseMs: number;
@@ -67,6 +69,7 @@ export const DEFAULT_CONFIG: Omit<HarnessConfig, "runDir"> = {
 	maxNudges: 3,
 	reportReserve: 0.05,
 	budgetWarnFraction: 0.7,
+	reportGraceTurns: 2,
 	maxRetries: 4,
 	retryBaseMs: 5_000,
 	reviewCooldownTurns: 4,
@@ -92,6 +95,8 @@ interface Live {
 	reviewing: boolean;
 	spawnCalls: number;
 	budgetWarned: boolean;
+	/** Extra turns a worker gets after its budget runs out, to report. Undefined until granted. */
+	graceTurns?: number;
 }
 
 export type ToolFactory = (harness: Harness, node: SwarmNode) => AgentTool<any>[];
@@ -111,6 +116,7 @@ export class Harness implements HarnessApi {
 	readonly router: ModelRouter;
 	private readonly slots: Semaphore;
 	private readonly live = new Map<string, Live>();
+	private readonly lastCallTokens = new Map<string, number>();
 	private readonly roleTools: ToolFactory[] = [];
 	private readonly callHooks: Array<(node: SwarmNode, record: CallRecord) => void> = [];
 	private readonly turnHooks: Array<(node: SwarmNode) => void> = [];
@@ -308,6 +314,15 @@ export class Harness implements HarnessApi {
 				if (node.finishedSummary !== undefined || this.tree.isTerminal(node.id)) break;
 				const exhausted = TREE_ROLES.includes(node.role) ? this.tree.exhausted(node.id) : undefined;
 				if (exhausted) {
+					// A worker that never reported gets a short grace to file its result: work that is never
+					// reported is invisible to its parent and never verified.
+					const reported = this.store.list<{ nodeId: string }>("findings", { runId: node.runId }).some((f) => f.nodeId === node.id);
+					if (node.role === "leaf" && !reported && live.graceTurns === undefined) {
+						live.graceTurns = this.config.reportGraceTurns;
+						this.bus.emit(node.runId, "budget.grace", { turns: live.graceTurns }, node.id);
+						message = "[harness] Your budget is used up. You have a final short grace to report: call report_finding now with your best verified result (or a negative result), then finish. Do nothing else.";
+						continue;
+					}
 					node.finishedSummary = `Stopped: ${exhausted} budget exhausted.`;
 					break;
 				}
@@ -442,7 +457,14 @@ export class Harness implements HarnessApi {
 			for (const wake of live.turnWaiters.splice(0)) wake();
 			for (const hook of this.turnHooks) hook(node);
 			if (node.finishedSummary !== undefined || this.tree.isTerminal(node.id)) return { action: "end" };
-			if (TREE_ROLES.includes(node.role) && this.tree.exhausted(node.id)) return { action: "end" };
+			if (TREE_ROLES.includes(node.role) && this.tree.exhausted(node.id)) {
+				const grace = this.liveOf(node.id);
+				if (grace.graceTurns !== undefined && grace.graceTurns > 0) {
+					grace.graceTurns -= 1;
+					return undefined;
+				}
+				return { action: "end" };
+			}
 			return undefined;
 		};
 		agent.subscribe((event) => this.onAgentEvent(node, event));
@@ -457,6 +479,7 @@ export class Harness implements HarnessApi {
 		const target = TREE_ROLES.includes(node.role) ? undefined : (node.targetNodeId ?? this.run().rootNodeId);
 		if (target && this.tree.get(target)) this.tree.chargeOversight(target, usage);
 		this.bus.emit(node.runId, "model.call", { ...record, role: node.role, target }, node.id);
+		this.lastCallTokens.set(node.id, record.totalTokens);
 		this.warnBudget(node);
 		for (const hook of this.callHooks) hook(node, record);
 	}
@@ -470,8 +493,14 @@ export class Harness implements HarnessApi {
 		const live = this.liveOf(node.id);
 		if (live.budgetWarned || this.tree.isTerminal(node.id)) return;
 		const fraction = this.tree.fractionSpent(node.id);
-		if (fraction < this.config.budgetWarnFraction) return;
+		// Each turn resends the whole conversation, so turns get expensive: also warn when only a few
+		// turns' worth of tokens remain, whatever the percentage.
+		const last = this.lastCallTokens.get(node.id) ?? 0;
+		const left = this.tree.available(node.id, "tokens");
+		const fewTurnsLeft = Number.isFinite(left) && last > 0 && left < last * 6;
+		if (fraction < this.config.budgetWarnFraction && !fewTurnsLeft) return;
 		live.budgetWarned = true;
+		this.tree.update(node.id, { wrapUp: true });
 		const pct = Math.round(fraction * 100);
 		this.bus.emit(node.runId, "budget.warned", { fraction }, node.id);
 		this.deliver(

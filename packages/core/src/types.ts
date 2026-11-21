@@ -111,6 +111,8 @@ export interface SwarmNode {
 	targetFindingId?: string;
 	/** Set when the agent called finish. */
 	finishedSummary?: string;
+	/** Set once the agent was told to wrap up (budget running low): skip optional ceremony. */
+	wrapUp?: boolean;
 	turns: number;
 	/** Latest checkpoint the agent wrote (compact, replaced, never appended). */
 	checkpoint?: string;

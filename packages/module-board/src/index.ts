@@ -69,6 +69,8 @@ export function boardModule(): HarnessModule {
 		beforeReport(ctx: NodeContext, _finding: Finding) {
 			const { node } = ctx;
 			if (node.role !== "leaf" || !node.parentId) return undefined;
+			// Once told to wrap up, the last turns go to reporting, not board ceremony.
+			if (node.wrapUp) return undefined;
 			const family = posts(node.parentId);
 			const lastReview = family.filter((p) => p.authorNode === node.id && p.kind === "peer_review").at(-1)?.createdAt ?? 0;
 			const newer = family.filter((p) => p.kind === "checkpoint" && p.authorNode !== node.id && p.createdAt > lastReview);
