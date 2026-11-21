@@ -22,8 +22,9 @@ the raw research notes are in [`CONTEXT.md`](../CONTEXT.md).
   the node they review, which counts against that node's budget. Branch and family totals add
   these up; a parent's number never includes its children's.
 - **Budgets are inherited vectors** (`tokens`, `usd`, `cpu_seconds`, `gpu_minutes`...). A parent
-  hands part of its available budget to each child; spend rolls up; a finished child's leftover
-  returns to its parent (`core/src/tree.ts`).
+  hands part of its available budget to each child. Child allocations draw from the shared run
+  budget. When a child finishes, its remaining allocation returns to its parent and any overage
+  is deducted (`core/src/tree.ts`).
 - **Soft caps**: about 8 live children per node and depth 6 by default; a parent can raise a
   child's caps when a reviewer recommends it.
 - **Parking**: a node waiting for children, a job, a review or an answer gives up its agent slot
@@ -31,11 +32,19 @@ the raw research notes are in [`CONTEXT.md`](../CONTEXT.md).
 
 ## Trust layer
 
-`report_finding` (`engine/src/trust.ts`) starts a claims reviewer on a different provider. It
-reads the author's workspace, reruns commands in a scratch copy (`run_check`, network off), and
+`report_finding` (`engine/src/trust.ts`) starts a claims reviewer and prefers a different provider
+when one is available. It reads the author's workspace, reruns commands in a scratch copy (`run_check`, network off), and
 returns `accepted` (with confidence), `needs_work` or `rejected`. The author may revise up to 3
 rounds. Only accepted findings are delivered to the parent. Every round is stored, and every
 report is a git commit in the leaf's workspace.
+
+The harness asks workers to report early while there is time to revise. When a worker exhausts
+its branch budget, it can use a short grace to file its first finding or address a review.
+At the run's reporting reserve (10% by default), new workers are blocked and background reviews
+stop. In-flight claims reviews can continue until the run budget is exhausted. At the cap, the
+harness stops all agents and writes the evidence appendix, using the root's report if available.
+Any review still open is recorded as `unreviewed`. A response can take usage over the nominal cap
+because usage is reported at the end of each provider call.
 
 Evidence levels: formal proof, exact finite check, empirical, conditional, hypothesis, external
 acceptance.
@@ -44,14 +53,14 @@ acceptance.
 
 `engine/src/oversight.ts`:
 
-- **Hidden reviewers** run when a node's subtree spends 25%, 50% or 75% of its budget, when it
-  claims a finding, when it stalls (no checkpoint for 8 turns), or when it asks to spawn again.
-  They read a dossier (goal, rubric, contract, checkpoint, findings, children, recent messages)
-  and call `recommend` with an action, grade and promise. Recommendations go to the parent, which
-  decides. Grades and promise feed the scheduler's priorities.
-- **Root reviewer** is consulted at 25/50/75% of the run budget (trigger C) and after a streak of
-  reviews with no newly accepted finding (trigger A); it may also judge a reframe (B). If it starts
-  a new epoch, the mode decides what carries over: `mix` (best subtrees plus fresh angles),
+- **Hidden reviewers** can run at subtree budget checkpoints (25%, 50%, 75%), after a claims
+  verdict, when a worker stalls for 8 turns, or when an internal node asks to spawn again.
+  They get up to three turns to inspect the dossier and workspace files and call `recommend`
+  with an action, grade and promise. The parent decides what to do with the recommendation.
+  Grades and promise feed the scheduler's priorities.
+- **Root reviewer** can be consulted at run budget checkpoints (C) or after a streak of reviews without an
+  accepted finding (A), and may judge a reframe (B). Both the consultation and the start of a new epoch
+  require at least half the run budget to remain. The mode decides what carries over: `mix` (best subtrees plus fresh angles),
   `fresh` (handoff document only) or `carry` (subtrees above the median). Old branches are
   archived, never deleted.
 
@@ -63,7 +72,7 @@ tools, a prompt section and optional hooks. Each node has a module state per mod
 
 | Module | Package | Gives agents |
 | --- | --- | --- |
-| workspace | `module-workspace` | Private folder per leaf (seed copy + git), `bash`, `read_file`, `write_file`, `edit_file`, `list_files`; reviewers get read-only access and `run_check` |
+| workspace | `module-workspace` | Private folder per leaf (seed copy + git), `bash`, `read_file`, `write_file`, `edit_file`, `list_files`. Reviewers get read-only access, and claims reviewers can also use `run_check`. |
 | questions | `module-questions` | `ask` (non-blocking by default, with a default answer), `answer_question`, `escalate_question`, root-only `ask_user`; assumptions ledger |
 | board | `module-board` | Family board (`read_board`, `post_board`), parents' `read_children_board`, auto-posted checkpoints, mandatory peer review before reporting |
 | secrets | `module-secrets` | Named capabilities (Keychain or env), grants inherited as subsets, injection into one process, redaction, audit events |
@@ -93,10 +102,14 @@ Credentials: OAuth sign-in (Sign in with ChatGPT, OpenRouter) stored user-only i
 append-only event log and current documents (runs, nodes, findings, questions, recommendations,
 posts, assumptions, jobs, epochs, reports). Everything passes through the redactor first.
 
-The dashboard (`dashboard/`) reads the same store: tree with live activity, per-agent thinking,
-messages and tool calls, inbox (questions for you, reports, open recommendations), findings with
-review rounds, family boards, resource pools and provider quotas, tokens by tree, family and agent
-with curves over time, epochs with handoffs, and a live event feed. It binds to 127.0.0.1.
+The dashboard (`dashboard/`) reads the same store and binds to 127.0.0.1. The overview charts
+run spend, agents running and accepted findings over time. The agent graph and outline show
+parent, child and reviewer relationships. Selecting an agent opens its goal, latest checkpoint,
+activity, token allocation, findings and reviews. The budget, board, epoch and inbox views provide
+more detail on each part of the run.
+
+The Evals view shows a round's task queue, the current run's last event, and results as tasks
+finish. Eval rounds keep task scores and harness health checks together under `.one_piece/evals/`.
 
 ## Built on Pi
 
@@ -114,4 +127,4 @@ execution). `pi-durable` and `pi-env` are vendored and built but not yet wired i
 - A mutation library of reusable rewrite-instruction genes.
 - Remote GPU adapters beyond the generic `command` pool; Docker and cloud sandboxes.
 - Racing tournament for noisy benchmarks (paired timing with fresh-input confirmation).
-- Evaluating one_piece itself (historical-recovery benchmark, ablations).
+- Historical-recovery benchmarks and individual component ablations beyond the bundled Mac eval suite.

@@ -169,7 +169,8 @@ async function main(): Promise<void> {
 				log: (line) => console.log(line),
 			});
 			const broken = results.filter((r) => r.health.status === "fail").length;
-			console.log(`\nMean score ${(results.reduce((a, r) => a + r.score, 0) / results.length).toFixed(3)}; ${results.length - broken}/${results.length} tasks ran without breaking.`);
+			const healthy = results.filter((r) => r.health.status === "ok").length;
+			console.log(`\nMean score ${(results.reduce((a, r) => a + r.score, 0) / results.length).toFixed(3)}. ${healthy}/${results.length} healthy, ${results.length - healthy - broken} with warnings, ${broken} failed.`);
 			console.log(`Report: ${reportPath}`);
 			process.exitCode = broken ? 1 : 0;
 			return;

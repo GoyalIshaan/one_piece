@@ -17,7 +17,7 @@
 	--ink: oklch(23% 0.014 65);
 	--ink-2: oklch(43% 0.013 65);
 	--ink-3: oklch(60% 0.011 70);
-	--run: oklch(54% 0.15 258);
+	--run: oklch(46% 0.104 175);
 	--park: oklch(57% 0.075 300);
 	--done: oklch(55% 0.11 152);
 	--cut: oklch(57% 0.17 33);
@@ -36,7 +36,7 @@
 		--paper: oklch(18.5% 0.009 70); --panel: oklch(21.5% 0.009 70); --wash: oklch(25% 0.01 70);
 		--line: oklch(30% 0.01 70); --line-2: oklch(37% 0.012 70);
 		--ink: oklch(93% 0.008 85); --ink-2: oklch(76% 0.01 80); --ink-3: oklch(60% 0.01 80);
-		--run: oklch(70% 0.13 258); --park: oklch(70% 0.07 300); --done: oklch(70% 0.12 152);
+		--run: oklch(70% 0.105 175); --park: oklch(70% 0.07 300); --done: oklch(70% 0.12 152);
 		--cut: oklch(68% 0.15 33); --still: oklch(52% 0.012 80); --wait: oklch(78% 0.12 75);
 		--focus: oklch(80% 0.14 75); --focus-soft: oklch(80% 0.14 75 / 0.18);
 		color-scheme: dark;
@@ -54,7 +54,8 @@ a { color: var(--run); }
 
 /* ---------- top bar ---------- */
 .top { height: 60px; display: flex; align-items: center; gap: 22px; padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
-.brand { font-family: var(--serif); font-size: 25px; letter-spacing: -0.01em; line-height: 1; white-space: nowrap; }
+.brand { font-family: var(--serif); font-size: 28px; letter-spacing: -0.02em; line-height: 1; white-space: nowrap; }
+.brand button { border: 0; background: transparent; cursor: pointer; font: inherit; padding: 4px 0; }
 .brand i { color: var(--ink-3); }
 .runpick { display: flex; flex-direction: column; min-width: 0; }
 .runpick label { font-size: 11px; color: var(--ink-3); letter-spacing: .02em; }
@@ -64,43 +65,36 @@ a { color: var(--run); }
 .metric { display: flex; flex-direction: column; line-height: 1.15; }
 .metric b { font-size: 17px; font-weight: 600; }
 .metric span { font-size: 11px; color: var(--ink-3); }
-.meter { width: 120px; height: 5px; background: var(--wash); border-radius: 3px; overflow: hidden; margin-top: 4px; }
-.meter i { display: block; height: 100%; background: var(--ink); border-radius: 3px; transition: width .6s var(--ease); }
-.meter.warn i { background: var(--wait); }
 .ask-btn { border: 1px solid var(--wait); background: color-mix(in oklch, var(--wait) 14%, var(--panel)); color: var(--ink); border-radius: 999px; padding: 5px 12px; font-weight: 600; cursor: pointer; }
 .chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 9px; border-radius: 999px; background: var(--wash); color: var(--ink-2); white-space: nowrap; line-height: 1.6; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; background: var(--still); }
 .s-running { --c: var(--run); } .s-parked { --c: var(--park); } .s-done { --c: var(--done); } .s-cut, .s-failed { --c: var(--cut); }
-.s-merged, .s-archived { --c: var(--still); } .s-pending { --c: var(--line-2); }
+.s-merged, .s-archived { --c: var(--still); } .s-pending { --c: var(--line-2); } .s-stopped { --c: var(--wait); }
 .s-accepted { --c: var(--done); } .s-rejected { --c: var(--cut); } .s-needs_work, .s-pending_review { --c: var(--wait); } .s-unreviewed { --c: var(--still); }
 .chip.st { background: color-mix(in oklch, var(--c, var(--still)) 13%, transparent); color: color-mix(in oklch, var(--c, var(--ink-2)) 80%, var(--ink)); }
 .chip.st .dot, .dot.st { background: var(--c, var(--still)); }
 
 /* ---------- layout ---------- */
-.app { display: grid; grid-template-columns: 188px minmax(0, 1fr) auto; height: calc(100vh - 60px); }
-.rail { border-right: 1px solid var(--line); padding: 18px 10px; display: flex; flex-direction: column; gap: 2px; background: var(--paper); overflow: auto; }
-.rail button { display: flex; align-items: center; justify-content: space-between; text-align: left; border: 0; background: none; padding: 7px 10px; border-radius: 7px; color: var(--ink-2); cursor: pointer; font-weight: 500; }
+.app { display: grid; grid-template-columns: 164px minmax(0, 1fr) auto; height: calc(100dvh - 60px); }
+.rail { border-right: 1px solid var(--line); padding: 18px 10px; display: flex; flex-direction: column; gap: 2px; background: var(--panel); overflow: auto; }
+.rail button { display: flex; align-items: center; justify-content: space-between; gap: 6px; text-align: left; border: 0; background: none; padding: 7px 10px; border-radius: 7px; color: var(--ink-2); cursor: pointer; font-weight: 500; white-space: nowrap; }
 .rail button:hover { background: var(--wash); color: var(--ink); }
-.rail button.on { background: var(--ink); color: var(--paper); }
+.rail button.on { background: var(--wash); color: var(--ink); font-weight: 700; }
 .rail button .n { font-size: 11px; color: var(--ink-3); }
-.rail button.on .n { color: color-mix(in oklch, var(--paper) 70%, transparent); }
+.rail button.on .n { color: var(--ink-2); }
 .rail button .n.hot { background: var(--wait); color: var(--ink); border-radius: 999px; padding: 0 7px; }
 .rail .sep { height: 1px; background: var(--line); margin: 12px 6px; }
-.rail .legend { padding: 4px 10px; font-size: 12px; color: var(--ink-3); display: grid; gap: 5px; }
-.rail .legend div { display: flex; align-items: center; gap: 8px; }
 .stage { position: relative; overflow: auto; min-width: 0; }
 .page { padding: 26px clamp(20px, 3vw, 40px) 60px; max-width: 1180px; }
-h1.view { font-family: var(--serif); font-weight: 400; font-size: 34px; letter-spacing: -0.015em; margin: 0 0 4px; }
+h1.view { font-family: var(--serif); font-weight: 400; font-size: clamp(32px, 4vw, 51px); line-height: 1.02; letter-spacing: -0.025em; margin: 0 0 8px; overflow-wrap: anywhere; }
 .lede { color: var(--ink-2); margin: 0 0 26px; max-width: 70ch; }
 h3 { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); margin: 30px 0 12px; }
 .empty { color: var(--ink-3); padding: 30px 0; max-width: 56ch; }
 
 /* ---------- graph ---------- */
-.graph { position: absolute; inset: 0; overflow: hidden; background:
-	radial-gradient(circle at 1px 1px, color-mix(in oklch, var(--ink) 7%, transparent) 1px, transparent 0) 0 0 / 22px 22px, var(--paper); cursor: grab; }
+.graph { position: relative; min-height: 360px; height: calc(100dvh - 260px); overflow: hidden; background: var(--panel); border: 1px solid var(--line-2); border-radius: 8px; cursor: grab; }
 .graph.drag { cursor: grabbing; }
 .graph svg { width: 100%; height: 100%; display: block; }
-.ring { fill: none; stroke: var(--line); stroke-dasharray: 2 5; }
 .link { fill: none; stroke: var(--line-2); stroke-width: 1.3; transition: opacity .3s; }
 .link.hi { stroke: var(--focus); stroke-width: 2.2; }
 .gnode { cursor: pointer; transition: opacity .3s var(--ease); }
@@ -112,8 +106,6 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: u
 .gnode .halo { fill: none; stroke: var(--focus); stroke-width: 3; opacity: 0; transition: opacity .2s; }
 .gnode.sel .halo { opacity: 1; }
 .gnode:hover .body { filter: brightness(1.06); }
-.gnode .orbit { fill: none; stroke: var(--c); stroke-width: 1.2; stroke-dasharray: 3 4; opacity: .75; transform-box: fill-box; transform-origin: center; animation: spin 6s linear infinite; }
-.gnode .sat { fill: var(--wait); stroke: var(--panel); stroke-width: 1; }
 .glabel { font-size: 11.5px; fill: var(--ink-2); pointer-events: none; paint-order: stroke; stroke: var(--paper); stroke-width: 4px; stroke-linejoin: round; }
 .glabel.strong { fill: var(--ink); font-weight: 600; }
 .gsub { font-size: 10.5px; fill: var(--ink-3); pointer-events: none; paint-order: stroke; stroke: var(--paper); stroke-width: 4px; }
@@ -128,21 +120,26 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: u
 .rnode.old { opacity: .55; }
 .rlink { fill: none; stroke: var(--wait); stroke-width: 1.1; stroke-dasharray: 3 3; opacity: .8; }
 .rlink.old { opacity: .3; }
-.famband { fill: var(--focus-soft); stroke: var(--focus); stroke-width: 1; stroke-dasharray: 4 4; }
-@keyframes spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .gnode .orbit { animation: none; } * { transition: none !important; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 .gtools { position: absolute; left: 16px; top: 14px; display: flex; gap: 8px; align-items: center; z-index: 2; flex-wrap: wrap; }
 .gtools .group { display: flex; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .gtools .group button { border: 0; background: none; padding: 5px 10px; cursor: pointer; color: var(--ink-2); }
 .gtools .group button + button { border-left: 1px solid var(--line); }
 .gtools .group button:hover { background: var(--wash); color: var(--ink); }
 .gtools .group button.on { background: var(--ink); color: var(--paper); }
-.famtag { background: var(--focus-soft); border: 1px solid var(--focus); border-radius: 8px; padding: 4px 6px 4px 10px; font-size: 13px; display: flex; gap: 8px; align-items: center; }
-.famtag button { border: 0; background: none; cursor: pointer; color: var(--ink-2); padding: 0 4px; font-size: 15px; line-height: 1; }
-.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--paper); padding: 8px 10px; border-radius: 8px; font-size: 12px; max-width: 300px; z-index: 5; opacity: 0; transform: translateY(4px); transition: opacity .12s, transform .12s; }
-.tip.on { opacity: 1; transform: none; }
-.tip b { display: block; font-size: 13px; margin-bottom: 2px; }
-.gfoot { position: absolute; left: 16px; bottom: 14px; font-size: 12px; color: var(--ink-3); z-index: 2; background: color-mix(in oklch, var(--paper) 85%, transparent); padding: 4px 8px; border-radius: 6px; }
+.layer { stroke: var(--line); stroke-dasharray: 3 5; }
+.layer-name { font: 600 12px var(--sans); fill: var(--ink-2); }
+.gnode:focus-visible .halo, .rnode:focus-visible .rhalo { opacity: 1; }
+.glabel { font-size: 14px; fill: var(--ink); stroke: var(--panel); }
+.gsub { font-size: 11.5px; fill: var(--ink-2); stroke: var(--panel); }
+.gstate { font-size: 11px; font-weight: 600; fill: var(--c); paint-order: stroke; stroke: var(--panel); stroke-width: 3px; }
+.graphHeading { display: flex; gap: 16px; align-items: flex-end; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; }
+.graphHeading p { margin: 5px 0 0; }
+.graphKey { display: flex; gap: 8px 18px; flex-wrap: wrap; margin: 10px 0 0; color: var(--ink-2); font-size: 12px; }
+.graphKey span { display: inline-flex; gap: 5px; align-items: center; }
+.tree-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.tree-tools label { font-size: 12px; color: var(--ink-2); }
+.tree-tools select, .tree-tools input { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line-2); padding: 5px 8px; border-radius: 5px; }
 
 /* ---------- drawer ---------- */
 .drawer { width: 0; overflow: hidden; border-left: 1px solid var(--line); background: var(--panel); transition: width .35s var(--ease); }
@@ -151,11 +148,16 @@ h3 { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: u
 .dhead { padding: 18px 20px 12px; border-bottom: 1px solid var(--line); }
 .dhead .kicker { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--ink-3); }
 .dhead h2 { font-family: var(--serif); font-weight: 400; font-size: 26px; line-height: 1.15; margin: 6px 0 4px; }
+.dhead h2 { overflow-wrap: anywhere; }
 .dhead .close { margin-left: auto; border: 0; background: none; font-size: 20px; color: var(--ink-3); cursor: pointer; padding: 0 2px; }
 .tabs { display: flex; gap: 2px; padding: 0 14px; border-bottom: 1px solid var(--line); overflow-x: auto; }
 .tabs button { border: 0; background: none; padding: 9px 9px; color: var(--ink-3); cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; font-weight: 500; }
 .tabs button.on { color: var(--ink); border-color: var(--ink); }
 .dbody { padding: 16px 20px 40px; overflow: auto; flex: 1; }
+.agent-now { border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 12px; }
+.agent-now h3 { margin-top: 0; }
+.agent-now p { margin: 5px 0; }
+.agent-now .box { background: var(--paper); }
 .kv { display: grid; grid-template-columns: 104px 1fr; gap: 7px 12px; font-size: 13px; margin: 0; }
 .kv dt { color: var(--ink-3); }
 .kv dd { margin: 0; overflow-wrap: anywhere; }
@@ -217,6 +219,45 @@ td.r, th.r { text-align: right; }
 .sq { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 .chart text { fill: var(--ink-3); font-size: 11px; font-family: var(--sans); }
 .cols2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 30px 40px; }
+
+/* Run overview */
+.monitor { max-width: 1440px; padding-top: clamp(24px, 4vw, 48px); }
+.run-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; color: var(--ink-2); font-size: 13px; }
+.monitor h1 { max-width: 23ch; margin: 12px 0 18px; }
+.run-stats { display: grid; grid-template-columns: 1.35fr 1fr 1fr 1fr; border-block: 1px solid var(--line-2); margin-top: 26px; }
+.run-stat { min-width: 0; padding: 14px 16px; }
+.run-stat:first-child { padding-left: 0; }
+.run-stat + .run-stat { border-left: 1px solid var(--line); }
+.run-stat dt { color: var(--ink-2); font-size: 12px; margin-bottom: 4px; }
+.run-stat dd { margin: 0; font-variant-numeric: tabular-nums; line-height: 1.3; }
+.run-stat strong { display: block; font-size: clamp(18px, 2.5vw, 27px); letter-spacing: -.035em; font-weight: 600; }
+.run-stat small { color: var(--ink-2); font-size: 12px; }
+.run-stat.over strong { color: var(--cut); }
+.monitor section { margin-top: 32px; }
+.section-head { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.section-head h2, .chart-pane h2 { margin: 0; font-size: 17px; letter-spacing: -.02em; font-weight: 650; }
+.section-head p, .chart-pane p { margin: 3px 0 0; color: var(--ink-2); }
+.chart-grid { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr); gap: 20px 24px; }
+.chart-pane { min-width: 0; border-top: 1px solid var(--line-2); padding-top: 12px; }
+.chart-pane svg { display: block; overflow: visible; }
+.chart-key { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--ink-2); font-size: 12px; margin: 8px 0 5px; }
+.chart-key span { display: inline-flex; align-items: center; gap: 6px; }
+.chart-key i { width: 14px; height: 2px; background: var(--key); display: inline-block; }
+.inspectChart { touch-action: pan-y; }
+.chart-readout { color: var(--ink-2); font-size: 12px; display: block; min-height: 18px; font-variant-numeric: tabular-nums; }
+.chart-guideline { pointer-events: none; stroke: var(--line-2); stroke-width: 1; }
+.monitor-table { border-top: 1px solid var(--line-2); overflow: auto; }
+.monitor-table th:first-child, .monitor-table td:first-child { padding-left: 0; }
+.monitor-table tbody tr:hover { background: var(--wash); }
+.agent-name { font-weight: 650; color: var(--ink); }
+.agent-action { color: var(--ink-2); overflow-wrap: anywhere; min-width: 16ch; }
+.agent-row { display: flex; align-items: baseline; gap: 6px; }
+.table-state { white-space: nowrap; color: color-mix(in oklch, var(--c, var(--ink-2)) 70%, var(--ink)); }
+.outline-name { min-width: 20ch; }
+.outline-name .agent-row { margin-left: calc(min(var(--depth), 6) * 13px); }
+.outline-branch { border-left: 1px solid var(--line-2); padding-left: 9px; }
+
+:where(button, input, select, a):focus-visible { outline: 2px solid var(--run); outline-offset: 3px; }
 
 /* families */
 .fam { display: grid; grid-template-columns: 96px 1fr auto; gap: 18px; align-items: center; padding: 16px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
@@ -290,29 +331,44 @@ td.r, th.r { text-align: right; }
 .frow { display: grid; grid-template-columns: 72px 130px minmax(120px, 200px) 1fr; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
 .frow .ty { color: var(--ink-2); font-weight: 600; }
 
-@media (max-width: 980px) {
-	.app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
-	.rail { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px; }
-	.rail .sep, .rail .legend { display: none; }
-	.drawer.open { position: fixed; inset: 60px 0 0 auto; width: 100vw; z-index: 10; }
-	.drawer .inner { width: 100vw; }
+@media (max-width: 1020px) {
+	.app { grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: auto minmax(0, 1fr); }
+	.rail { grid-column: 1 / -1; flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px; }
+	.rail .sep { display: none; }
+	.drawer.open, .drawer .inner { width: clamp(300px, 39vw, 420px); }
 	.strip .metric:nth-child(n+3) { display: none; }
 	.boards { grid-template-columns: 1fr; }
+}
+@media (max-width: 700px) {
+	.app { grid-template-columns: minmax(0, 1fr); }
+	.top { gap: 12px; padding: 0 12px; }
+	.runpick select { max-width: 43vw; }
+	.strip { gap: 0; }
+	.strip .metric:first-child { display: none; }
+	.strip .metric b { font-size: 14px; }
+	.chart-grid { grid-template-columns: 1fr; }
+	.run-stats { grid-template-columns: 1fr 1fr; }
+	.run-stat:nth-child(3) { padding-left: 0; border-left: 0; }
+	.run-stat:nth-child(n+3) { border-top: 1px solid var(--line); }
+	.graph { height: min(620px, 60dvh); }
+	.drawer.open { position: fixed; inset: 110px 0 0 auto; z-index: 10; }
+	.drawer.open, .drawer .inner { width: min(100vw, 440px); }
+	.ecard { grid-template-columns: minmax(0, 1fr) 92px; }
+	.matrix { min-width: 560px; }
 }
 </style>
 </head>
 <body>
 <header class="top">
-	<div class="brand">one<i>_</i>piece</div>
+	<div class="brand"><button type="button" onclick="go('overview')" aria-label="one_piece run overview">one<i>_</i>piece</button></div>
 	<div class="runpick"><label for="run">Run</label><select id="run"></select></div>
 	<div class="strip" id="strip"></div>
 </header>
 <div class="app">
-	<nav class="rail" id="rail"></nav>
+	<nav class="rail" id="rail" aria-label="Dashboard"></nav>
 	<section class="stage" id="stage"></section>
 	<aside class="drawer" id="drawer"><div class="inner" id="dinner"></div></aside>
 </div>
-<div class="tip" id="tip"></div>
 <script>
 "use strict";
 const $ = (s, r = document) => r.querySelector(s);
@@ -326,7 +382,7 @@ const TREE = new Set(["root", "internal", "leaf"]);
 const LIVE = new Set(["running", "parked", "pending"]);
 const statusChip = (s) => `<span class="chip st s-${esc(s)}"><span class="dot"></span>${esc(String(s).replace(/_/g, " "))}</span>`;
 
-const S = { state: null, runId: null, view: "swarm", reviewers: "all", sel: null, selFinding: null, family: null, epoch: null, drawerTab: "overview", feed: [], feedFilter: "all", feedQuery: "", sort: { key: "tokens", dir: -1 }, boardFam: null, reader: null, zoom: { k: 1, x: 0, y: 0 }, fitted: false, source: null };
+const S = { state: null, runId: null, view: "overview", treeMode: "graph", reviewers: "all", sel: null, selFinding: null, family: null, epoch: null, drawerTab: "overview", feed: [], feedFilter: "all", feedQuery: "", sort: { key: "tokens", dir: -1 }, boardFam: null, reader: null, zoom: { k: 1, x: 0, y: 0 }, fitted: false, source: null };
 
 // ---------- data ----------
 async function api(path, init) { const r = await fetch(path, init); if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); }
@@ -351,7 +407,9 @@ function connect() {
 }
 async function refresh(force) {
 	if (!S.runId) { renderAll(); return; }
-	const st = await api(`/api/runs/${encodeURIComponent(S.runId)}/state`);
+	const runId = S.runId;
+	const st = await api(`/api/runs/${encodeURIComponent(runId)}/state`);
+	if (runId !== S.runId) return;
 	// Re-render only when something happened, so the page never flickers under the pointer.
 	if (!force && S.state && st.lastSeq === S.state.lastSeq && st.run?.id === S.state.run?.id) return;
 	st.byId = Object.fromEntries(st.nodes.map((n) => [n.id, n]));
@@ -365,13 +423,13 @@ async function refresh(force) {
 	st.reviewersOf = {};
 	for (const n of st.nodes) if (n.targetNodeId && !TREE.has(n.role)) (st.reviewersOf[n.targetNodeId] ??= []).push(n);
 	S.state = st;
-	if (!S.epoch) S.epoch = st.run?.epoch ?? 1;
 	renderAll();
 }
 
 // ---------- helpers on state ----------
 const nodeOf = (id) => S.state?.byId[id];
 const titleOf = (id) => nodeOf(id)?.goal.title ?? id;
+const relativeTime = (timestamp) => `<time data-relative="${timestamp}" datetime="${new Date(timestamp).toISOString()}">${ago(timestamp)}</time>`;
 function rootOfEpoch(epoch) { const e = S.state.epochs.find((x) => x.number === epoch); return e ? nodeOf(e.rootNodeId) : S.state.tree.find((n) => n.role === "root"); }
 function families() {
 	return S.state.tree.filter((n) => n.children?.some((c) => TREE.has(nodeOf(c)?.role))).map((head) => {
@@ -396,43 +454,28 @@ function renderStrip() {
 	const st = S.state, r = st?.run;
 	if (!r) { $("#strip").innerHTML = ""; return; }
 	const total = st.nodes.reduce((a, n) => a + (n.spent?.tokens ?? 0), 0);
-	const usd = st.nodes.reduce((a, n) => a + (n.spent?.usd ?? 0), 0);
 	const frac = r.budget.tokens ? total / r.budget.tokens : 0;
-	const running = st.nodes.filter((n) => n.status === "running").length;
-	const parked = st.nodes.filter((n) => n.status === "parked").length;
-	const acc = st.findings.filter((f) => f.status === "accepted").length;
 	const waiting = st.questions.filter((q) => q.holder === "user" && q.status !== "answered").length;
 	$("#strip").innerHTML = `
-		<div class="metric"><span>Status</span>${statusChip(r.status)}</div>
-		<div class="metric"><b class="num">${fmt(total)}</b><span>tokens${r.budget.tokens ? ` of ${kfmt(r.budget.tokens)}` : ""}</span>${r.budget.tokens ? `<div class="meter ${frac > 0.8 ? "warn" : ""}"><i style="width:${Math.min(100, frac * 100).toFixed(1)}%"></i></div>` : ""}</div>
-		<div class="metric"><b class="num">$${usd.toFixed(2)}</b><span>est. cost${r.budget.usd ? ` of $${r.budget.usd}` : ""}</span></div>
-		<div class="metric"><b class="num">${running}<span class="dim" style="font-size:13px"> + ${parked} waiting</span></b><span>agents working</span></div>
-		<div class="metric"><b class="num">${acc}</b><span>accepted findings</span></div>
-		<div class="metric"><b class="num">${r.epoch}</b><span>epoch</span></div>
+		<div class="metric">${statusChip(r.status)}</div>
+		<div class="metric"><b class="num"${frac > 1 ? ' style="color:var(--cut)"' : ""}>${kfmt(total)}${r.budget.tokens ? ` / ${kfmt(r.budget.tokens)}` : ""}</b><span>Run tokens${frac > 1 ? ` · ${((frac - 1) * 100).toFixed(1)}% over` : ""}</span></div>
 		${waiting ? `<button class="ask-btn" onclick="go('inbox')">${waiting} question${waiting > 1 ? "s" : ""} for you</button>` : ""}`;
 }
-const VIEWS = [["swarm", "Swarm"], ["families", "Families"], ["findings", "Findings"], ["boards", "Boards"], ["tokens", "Tokens"], ["epochs", "Epochs"], ["inbox", "Inbox"], ["feed", "Live feed"], ["evals", "Evals"]];
+const NAVIGATION = [
+	[["overview", "Overview"], ["swarm", "Agent tree"], ["tokens", "Token budget"], ["feed", "Activity log"]],
+	[["findings", "Findings"], ["families", "Families"], ["boards", "Boards"], ["epochs", "Epochs"], ["inbox", "Inbox"]],
+	[["evals", "Evals"]],
+];
 function renderRail() {
 	const st = S.state;
 	const count = { families: st ? families().length : 0, findings: st?.findings.length ?? 0, boards: st?.posts.length ?? 0, epochs: st?.epochs.length ?? 0 };
 	const waiting = st ? st.questions.filter((q) => q.holder === "user" && q.status !== "answered").length : 0;
-	$("#rail").innerHTML = VIEWS.map(([k, l]) => `<button class="${S.view === k ? "on" : ""}" onclick="go('${k}')">${l}${k === "inbox" && waiting ? `<span class="n hot">${waiting}</span>` : count[k] ? `<span class="n num">${count[k]}</span>` : ""}</button>`).join("") +
-		`<div class="sep"></div><div class="legend">
-			<div><svg width="14" height="14"><circle cx="7" cy="7" r="5" fill="var(--panel)" stroke="var(--ink-2)" stroke-width="2.4"/><circle cx="7" cy="7" r="2" fill="var(--ink-2)"/></svg>Root</div>
-			<div><svg width="14" height="14"><circle cx="7" cy="7" r="5" fill="var(--wash)" stroke="var(--ink-2)" stroke-width="2.2"/></svg>Explorer (splits work)</div>
-			<div><svg width="14" height="14"><circle cx="7" cy="7" r="5.5" fill="var(--ink-2)"/></svg>Worker (does work)</div>
-			<div><svg width="16" height="14"><rect x="2" y="1" width="12" height="12" rx="3" fill="var(--wash)" stroke="var(--ink-2)" stroke-width="1.4"/><text x="8" y="10" font-size="8" font-weight="700" text-anchor="middle" fill="var(--ink)">H</text></svg>Hidden reviewer</div>
-			<div><svg width="16" height="14"><rect x="2" y="1" width="12" height="12" rx="3" fill="var(--wash)" stroke="var(--ink-2)" stroke-width="1.4"/><text x="8" y="10" font-size="8" font-weight="700" text-anchor="middle" fill="var(--ink)">C</text></svg>Claims reviewer</div>
-			<div><svg width="16" height="14"><rect x="2" y="1" width="12" height="12" rx="3" fill="var(--wash)" stroke="var(--ink-2)" stroke-width="1.4"/><text x="8" y="10" font-size="8" font-weight="700" text-anchor="middle" fill="var(--ink)">R</text></svg>Root reviewer (epochs)</div>
-			<div style="margin-top:4px"><span class="dot st s-running"></span>running</div>
-			<div><span class="dot st s-parked"></span>waiting (costs nothing)</div>
-			<div><span class="dot st s-done"></span>done</div>
-			<div><span class="dot st s-cut"></span>cut or failed</div>
-			<div><span class="dot st s-archived"></span>merged or archived</div>
-			<div style="margin-top:4px">Size = the agent's own tokens</div>
-		</div>`;
+	$("#rail").innerHTML = NAVIGATION.map((group) => group.map(([key, label]) => `<button type="button" class="${S.view === key ? "on" : ""}"${S.view === key ? ' aria-current="page"' : ""} onclick="go('${key}')">${label}${key === "inbox" && waiting ? `<span class="n hot">${waiting}</span>` : count[key] ? `<span class="n num">${count[key]}</span>` : ""}</button>`).join("")).join('<div class="sep" role="presentation"></div>');
 }
-function go(view) { S.view = view; S.reader = null; renderAll(); }
+function go(view) {
+	if (S.view !== view) { $("#stage").scrollTop = 0; S.graphResize?.disconnect(); }
+	S.view = view; S.reader = null; renderAll();
+}
 function renderAll() { renderStrip(); renderRail(); renderView(); renderDrawer(); }
 
 // ---------- views ----------
@@ -442,168 +485,324 @@ function renderView() {
 	if (!S.state?.run) { stage.innerHTML = `<div class="page"><h1 class="view">No runs yet</h1><p class="lede">Start one from a project folder: <span class="code">one-piece run "your goal" --dashboard</span>. This page fills in as the swarm works.</p></div>`; return; }
 	if (S.reader) return renderReader();
 	if (S.view === "swarm") return renderSwarm();
-	if (S.view === "evals") return renderEvals();
-	const page = { families: viewFamilies, findings: viewFindings, boards: viewBoards, tokens: viewTokens, epochs: viewEpochs, inbox: viewInbox, feed: viewFeed }[S.view]();
+	const page = { overview: viewOverview, families: viewFamilies, findings: viewFindings, boards: viewBoards, tokens: viewTokens, epochs: viewEpochs, inbox: viewInbox, feed: viewFeed }[S.view]();
 	const keepScroll = stage.scrollTop;
-	stage.innerHTML = `<div class="page">${page}</div>`;
+	stage.innerHTML = `<div class="page ${S.view === "overview" ? "monitor" : ""}">${page}</div>`;
 	stage.scrollTop = keepScroll;
 	bindPage(stage);
+	if (S.view === "overview") bindCharts(stage);
+}
+
+function nodeDisplayName(node) {
+	return TREE.has(node.role) ? node.goal.title.replace(/^\[eval(?: solo)?\]\s*/, "") : `${ROLE_NAME[node.role]} · ${titleOf(node.targetNodeId) ?? "run"}`;
+}
+
+function shortLabel(text, limit) {
+	return text.length > limit ? `${text.slice(0, limit - 1).trimEnd()}…` : text;
+}
+
+function agentStatus(node) {
+	if (node.status !== "done") return { label: node.status, kind: node.status };
+	const reason = node.statusReason ?? "";
+	if (/^needs_input:/i.test(reason)) return { label: "blocked", kind: "stopped" };
+	if (/^(stopped:|run budget |eval time limit)/i.test(reason)) return { label: "stopped", kind: "stopped" };
+	return { label: "done", kind: "done" };
+}
+
+function activityLabel(node) {
+	if (!LIVE.has(node.status) && node.statusReason) return node.statusReason.replace(/^finished:\s*/i, "");
+	if (node.status === "parked") return node.activity || "Waiting for a result";
+	return node.activity || (node.status === "pending" ? "Waiting for a slot" : node.status === "running" ? "Starting next turn" : "—");
+}
+
+function agentLink(node, label = nodeDisplayName(node)) {
+	return `<button type="button" class="linkbtn agent-name" data-node="${esc(node.id)}">${esc(label)}</button>`;
+}
+
+function agentRows(entries, outline = false) {
+	return `<div class="monitor-table"><table>
+		<thead><tr><th>Agent</th><th>Status</th><th>${outline ? "Latest action" : "Recent activity"}</th><th class="r">Own tokens</th>${outline ? '<th class="r">Branch / allocation</th>' : ""}</tr></thead>
+		<tbody>${entries.map(({ node, depth = 0 }) => {
+			const st = S.state;
+			const state = agentStatus(node);
+			return `<tr><td class="outline-name" style="--depth:${depth}"><div class="agent-row ${depth ? "outline-branch" : ""}">${agentLink(node)}</div><div class="agent-row dim">${esc(ROLE_NAME[node.role])}</div></td>
+			<td><span class="table-state s-${esc(state.kind)}">${esc(state.label)}</span></td>
+			<td class="agent-action" title="${esc(activityLabel(node))}">${esc(shortLabel(activityLabel(node), 140))}${st.series.activity?.[node.id] ? `<div class="dim">${relativeTime(st.series.activity[node.id])}</div>` : ""}</td>
+			<td class="r num">${fmt(st.own[node.id])}</td>${outline ? `<td class="r num">${TREE.has(node.role) ? `${kfmt(st.sub[node.id])}${node.budget.tokens ? ` / ${kfmt(node.budget.tokens)}` : ""}` : "—"}</td>` : ""}</tr>`;
+		}).join("")}</tbody></table></div>`;
+}
+
+function viewOverview() {
+	const st = S.state, run = st.run;
+	const limit = run.budget.tokens;
+	const tokens = Object.values(st.own).reduce((total, spent) => total + spent, 0);
+	const usd = st.nodes.reduce((total, node) => total + (node.spent?.usd ?? 0), 0);
+	const running = st.nodes.filter((node) => node.status === "running").length;
+	const waiting = st.nodes.filter((node) => node.status === "parked" || node.status === "pending").length;
+	const accepted = st.findings.filter((finding) => finding.status === "accepted").length;
+	const latest = st.series.lastEventAt ?? run.updatedAt;
+	const live = run.status === "running";
+	const time = (ts) => new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+	const agents = [...st.nodes].sort((a, b) => Number(LIVE.has(b.status)) - Number(LIVE.has(a.status)) || (st.series.activity?.[b.id] ?? b.updatedAt) - (st.series.activity?.[a.id] ?? a.updatedAt)).slice(0, 7);
+	const started = new Date(run.createdAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+	const spentLabel = limit ? (tokens > limit ? `${fmt(tokens - limit)} over the ${fmt(limit)} cap` : `${fmt(limit - tokens)} remaining of ${fmt(limit)}`) : "No token cap set";
+	const chartRange = { start: run.createdAt, end: latest };
+	return `<div class="run-meta">${statusChip(run.status)}<span>Started ${esc(started)}</span><span>${dur(latest - run.createdAt)} elapsed</span>${live ? `<span>Last event ${relativeTime(latest)}</span>` : `<span>Last event at ${esc(time(latest))}</span>`}</div>
+		<h1 class="view">${esc(run.goal.title.replace(/^\[eval(?: solo)?\]\s*/, ""))}</h1>
+		<div class="row"><button class="btn primary" type="button" onclick="go('swarm')">Explore agent tree</button><button class="btn" type="button" onclick="go('inbox')">Reports &amp; inbox</button></div>
+		<dl class="run-stats">
+			<div class="run-stat ${limit && tokens > limit ? "over" : ""}"><dt>Run token budget</dt><dd><strong>${fmt(tokens)}</strong><small>${spentLabel}</small></dd></div>
+			<div class="run-stat"><dt>Agents running</dt><dd><strong>${running}</strong><small>${waiting} waiting · ${st.nodes.length} launched</small></dd></div>
+			<div class="run-stat"><dt>Accepted findings</dt><dd><strong>${accepted}</strong><small>${st.findings.length} submitted</small></dd></div>
+			<div class="run-stat"><dt>Estimated cost</dt><dd><strong>$${usd.toFixed(2)}</strong><small>Epoch ${run.epoch}</small></dd></div>
+		</dl>
+		<section aria-label="Run progression" class="chart-grid">
+			<div class="chart-pane"><div class="section-head"><h2>Token spend over time</h2><button class="linkbtn" type="button" onclick="go('tokens')">Budget details →</button></div>
+				${inspectionChart("spend", [{ label: "Total", points: st.series.tokens, color: "var(--run)" }, { label: "Reviewers", points: st.series.reviewerTokens ?? [], color: "var(--wait)" }], { ...chartRange, cap: limit, marks: st.series.stages ?? [], label: "Cumulative token spend and run cap" })}</div>
+			<div class="chart-pane"><h2>Agents &amp; findings</h2>
+				${inspectionChart("progress", [{ label: "Running agents", points: st.series.active ?? [], color: "var(--park)" }, { label: "Accepted findings", points: st.series.accepted, color: "var(--done)" }], { ...chartRange, counts: true, label: "Number of agents running and accepted findings over time" })}</div>
+		</section>
+		<section><div class="section-head"><h2>Agent activity</h2><button type="button" class="linkbtn" onclick="go('feed')">Activity log →</button></div>
+			${agents.length ? agentRows(agents.map((node) => ({ node }))) : '<p class="dim">Agent activity appears after the root starts.</p>'}</section>`;
+}
+
+function inspectionChart(id, traces, options) {
+	const width = id === "spend" ? 640 : 380;
+	const height = 178, left = 46, right = width - 18, top = 19, bottom = 152;
+	const start = options.start, end = Math.max(start + 1000, options.end);
+	const values = traces.flatMap((trace) => trace.points.map((point) => point[1]));
+	const max = Math.max(options.counts ? 3 : 1, options.cap ?? 0, ...values);
+	const roughStep = max / 4;
+	const magnitude = 10 ** Math.floor(Math.log10(roughStep));
+	const step = options.counts ? Math.max(1, Math.ceil(roughStep)) : [1, 2, 2.5, 5, 10].find((unit) => unit * magnitude >= roughStep) * magnitude;
+	const ticks = Math.ceil(max / step);
+	const x = (t) => left + (t - start) / (end - start) * (right - left);
+	const y = (value) => bottom - value / (ticks * step) * (bottom - top);
+	const axis = Array.from({ length: ticks + 1 }, (_, i) => `<line x1="${left}" x2="${right}" y1="${y(i * step)}" y2="${y(i * step)}" stroke="var(--line)"/><text x="${left - 8}" y="${y(i * step) + 4}" text-anchor="end">${kfmt(i * step)}</text>`).join("");
+	const times = [0, .5, 1].map((f) => `<text x="${x(start + f * (end - start))}" y="${height - 6}" text-anchor="${f === 0 ? "start" : f === 1 ? "end" : "middle"}">${dur(f * (end - start))}</text>`).join("");
+	const cap = options.cap ? `<line x1="${left}" x2="${right}" y1="${y(options.cap)}" y2="${y(options.cap)}" stroke="var(--cut)" stroke-dasharray="4 4"/><text x="${right - 3}" y="${y(options.cap) - 5}" text-anchor="end" style="fill:var(--cut)">Cap ${kfmt(options.cap)}</text>` : "";
+	const marks = (options.marks ?? []).map((mark) => `<line x1="${x(mark.t)}" x2="${x(mark.t)}" y1="${top}" y2="${bottom}" stroke="var(--ink-3)" stroke-dasharray="2 4"><title>${esc(mark.label)} at ${dur(mark.t - start)}</title></line>`).join("");
+	const lines = traces.map((trace) => {
+		const path = trace.points.reduce((d, [t, value]) => `${d}H${x(t).toFixed(1)}V${y(value).toFixed(1)}`, `M${left} ${bottom}`);
+		return `<path d="${path}H${right}" fill="none" stroke="${trace.color}" stroke-width="2.2"/>`;
+	}).join("");
+	const readout = (t) => `${dur(t - start)} · ${traces.map((trace) => `${trace.label} ${fmt(trace.points.findLast(([at]) => at <= t)?.[1] ?? 0)}`).join(" · ")}`;
+	(S.charts ??= {})[id] = { left, right, start, end, width, readout };
+	return `<div class="chart-key">${traces.map((trace) => `<span><i style="--key:${trace.color}"></i>${esc(trace.label)}</span>`).join("")}</div>
+		<svg class="chart inspectChart" viewBox="0 0 ${width} ${height}" width="100%" role="img" aria-label="${esc(options.label)}" data-chart="${id}">${axis}${times}${marks}${cap}${lines}<line class="chart-guideline" x1="0" x2="0" y1="${top}" y2="${bottom}" visibility="hidden"/></svg>
+		<output class="chart-readout" data-chart-output="${id}">${esc(readout(end))}</output>`;
+}
+
+function bindCharts(parent) {
+	parent.querySelectorAll("[data-chart]").forEach((svg) => {
+		const { start, end, left, right, width, readout } = S.charts[svg.dataset.chart];
+		const output = parent.querySelector(`[data-chart-output="${svg.dataset.chart}"]`);
+		const line = $(".chart-guideline", svg);
+		svg.onpointermove = (event) => {
+			const rect = svg.getBoundingClientRect();
+			const x = Math.min(right, Math.max(left, (event.clientX - rect.left) / rect.width * width));
+			line.setAttribute("x1", x); line.setAttribute("x2", x); line.setAttribute("visibility", "visible");
+			output.textContent = readout(start + (x - left) / (right - left) * (end - start));
+		};
+		svg.onpointerleave = () => { line.setAttribute("visibility", "hidden"); output.textContent = readout(end); };
+	});
 }
 
 // ---------- swarm graph ----------
-const RING = 150;
-function layout(root) {
-	const kids = (n) => (n.children || []).map(nodeOf).filter((c) => c && TREE.has(c.role));
-	const leaves = {};
-	const count = (n) => (leaves[n.id] = kids(n).length ? kids(n).reduce((a, c) => a + count(c), 0) : 1);
-	count(root);
-	const pos = {};
-	const place = (n, a0, a1, depth) => {
-		const a = (a0 + a1) / 2;
-		pos[n.id] = { a, r: depth * RING, depth, x: Math.sin(a) * depth * RING, y: -Math.cos(a) * depth * RING };
-		let cur = a0;
-		for (const c of kids(n)) { const span = ((a1 - a0) * leaves[c.id]) / leaves[n.id]; place(c, cur, cur + span, depth + 1); cur += span; }
-	};
-	const top = kids(root).length;
-	place(root, top === 1 ? -0.6 : 0, top === 1 ? 0.6 : Math.PI * 2, 0);
-	return pos;
+const COLUMN_WIDTH = 254;
+const REV_LETTER = { hidden_reviewer: "H", claims_reviewer: "C", root_reviewer: "E" };
+const treeChildren = (node) => (node.children || []).map(nodeOf).filter((child) => child && TREE.has(child.role));
+const shownReviews = (node) => S.reviewers === "off" ? [] : (S.state.reviewersOf[node.id] ?? []).filter((reviewer) => S.reviewers === "all" || LIVE.has(reviewer.status));
+
+function treeEntries(root, depth = 0) {
+	const nodeEntries = [{ node: root, depth }, ...shownReviews(root).map((node) => ({ node, depth: depth + 1 }))];
+	return nodeEntries.concat(treeChildren(root).flatMap((child) => treeEntries(child, depth + 1)));
 }
-function polar(a, r) { return [Math.sin(a) * r, -Math.cos(a) * r]; }
-function linkPath(p, c) {
-	if (p.depth === 0) { const m = polar(c.a, c.r * 0.55); return `M0 0 Q${m[0].toFixed(1)} ${m[1].toFixed(1)} ${c.x.toFixed(1)} ${c.y.toFixed(1)}`; }
-	const c1 = polar(p.a, p.r + RING * 0.5), c2 = polar(c.a, c.r - RING * 0.5);
-	return `M${p.x.toFixed(1)} ${p.y.toFixed(1)} C${c1[0].toFixed(1)} ${c1[1].toFixed(1)} ${c2[0].toFixed(1)} ${c2[1].toFixed(1)} ${c.x.toFixed(1)} ${c.y.toFixed(1)}`;
+
+function layoutTree(root) {
+	const pos = new Map();
+	const reviewers = treeEntries(root).filter(({ node }) => TREE.has(node.role)).map(({ node }) => shownReviews(node).length);
+	const rowHeight = 96 + Math.max(0, Math.ceil(Math.max(0, ...reviewers) / 7) - 1) * 23;
+	let nextRow = 0;
+	function place(node, depth) {
+		const children = treeChildren(node).map((child) => place(child, depth + 1));
+		const y = children.length ? (children[0].y + children.at(-1).y) / 2 : 74 + rowHeight * nextRow++;
+		const point = { node, x: 26 + depth * COLUMN_WIDTH, y, depth };
+		pos.set(node.id, point);
+		return point;
+	}
+	place(root, 0);
+	const depth = Math.max(0, ...[...pos.values()].map((p) => p.depth));
+	return { pos, depth, height: 70 + rowHeight * nextRow, width: (depth + 1) * COLUMN_WIDTH };
 }
-const REV_LETTER = { hidden_reviewer: "H", claims_reviewer: "C", root_reviewer: "R" };
+
+function treeConnection(p, q) {
+	const mid = q.x - 22;
+	return `M${p.x + 13} ${p.y} H${mid} V${q.y} H${q.x - 12}`;
+}
+
+function graphNode(point, family) {
+	const { node, x, y } = point;
+	const st = S.state;
+	const title = nodeDisplayName(node);
+	const selected = S.sel === node.id;
+	const dim = family && !family.has(node.id);
+	const branch = st.sub[node.id];
+	const budget = node.budget.tokens;
+	const tokens = `${kfmt(st.own[node.id])} own · ${kfmt(branch)} branch${budget ? ` / ${kfmt(budget)}` : ""}`;
+	const state = agentStatus(node);
+	return `<g class="gnode ${node.role} s-${esc(state.kind)} ${selected ? "sel" : ""} ${dim ? "faded" : ""}" data-id="${esc(node.id)}" transform="translate(${x} ${y})" role="button" tabindex="0" aria-label="${esc(`${ROLE_NAME[node.role]}: ${title}, ${state.label}`)}">
+		<title>${esc(title)} · ${esc(activityLabel(node))}</title>
+		<rect x="-16" y="-22" width="${COLUMN_WIDTH - 26}" height="55" fill="transparent"/>
+		<circle class="halo" r="17"/>
+		<circle class="body" r="${node.role === "root" ? "12" : "10"}"/>${node.role === "root" ? '<circle class="core" r="4"/>' : ""}
+		<text class="glabel strong" x="21" y="-8">${esc(shortLabel(title, 31))}</text>
+		<text class="gsub" x="21" y="8"${budget && branch > budget ? ' style="fill:var(--cut)"' : ""}>${esc(tokens)}</text>
+		<text x="21" y="25"><tspan class="gstate">${esc(state.label)}</tspan><tspan class="gsub" dx="5">${esc(shortLabel(activityLabel(node), 24))}</tspan></text>
+	</g>`;
+}
+
+function reviewNodes(point, family) {
+	const reviews = shownReviews(point.node);
+	const dim = family && !family.has(point.node.id);
+	const counts = {};
+	return reviews.map((reviewer, index) => {
+		const x = point.x + 21 + (index % 7) * 27, y = point.y + 47 + Math.floor(index / 7) * 23;
+		const label = REV_LETTER[reviewer.role];
+		const order = (counts[label] ?? 0) + 1;
+		counts[label] = order;
+		const name = `${nodeDisplayName(reviewer)} · ${reviewer.status}`;
+		return `<path class="rlink ${!LIVE.has(reviewer.status) ? "old" : ""} ${dim ? "faded" : ""}" d="M${point.x} ${point.y + 12} V${y} H${x - 10}"/>
+			<g class="rnode s-${esc(reviewer.status)} ${S.sel === reviewer.id ? "sel" : ""} ${dim ? "faded" : ""}" data-id="${esc(reviewer.id)}" transform="translate(${x} ${y})" role="button" tabindex="0" aria-label="${esc(name)}">
+				<title>${esc(name)} · ${fmt(S.state.own[reviewer.id])} tokens</title>
+				<rect class="rhalo" x="-13" y="-12" width="26" height="24" rx="6"/>
+				<rect class="rbody" x="-10.5" y="-9.5" width="21" height="19" rx="4"/>
+				<text y="3">${label}${order}</text>
+			</g>`;
+	}).join("");
+}
+
 function renderSwarm() {
 	const st = S.state, stage = $("#stage");
-	const root = rootOfEpoch(S.epoch) ?? st.tree.find((n) => n.role === "root");
-	if (!root) { stage.innerHTML = `<div class="page"><p class="empty">The root agent has not started yet.</p></div>`; return; }
-	const pos = layout(root);
-	const ids = Object.keys(pos);
-	const maxOwn = Math.max(1, ...ids.filter((i) => i !== root.id).map((i) => st.own[i]));
-	const famIds = S.family ? new Set([S.family, ...(nodeOf(S.family)?.children || [])]) : null;
-	const depthMax = Math.max(...ids.map((i) => pos[i].depth));
-	let g = "";
-	for (let d = 1; d <= depthMax; d++) g += `<circle class="ring" r="${d * RING}"/>`;
-	if (famIds && pos[S.family]) {
-		const head = pos[S.family];
-		const ch = (nodeOf(S.family).children || []).filter((c) => pos[c]).map((c) => pos[c]);
-		if (ch.length) {
-			const r = ch[0].r, a0 = Math.min(...ch.map((c) => c.a)) - 0.12, a1 = Math.max(...ch.map((c) => c.a)) + 0.12;
-			const [x0, y0] = polar(a0, r + 30), [x1, y1] = polar(a1, r + 30), [x2, y2] = polar(a1, Math.max(0, head.r - 24)), [x3, y3] = polar(a0, Math.max(0, head.r - 24));
-			const big = a1 - a0 > Math.PI ? 1 : 0;
-			g += `<path class="famband" d="M${x3} ${y3} L${x0} ${y0} A${r + 30} ${r + 30} 0 ${big} 1 ${x1} ${y1} L${x2} ${y2} ${head.r > 24 ? `A${head.r - 24} ${head.r - 24} 0 ${big} 0 ${x3} ${y3}` : ""} Z"/>`;
+	const root = rootOfEpoch(S.epoch ?? st.run.epoch);
+	if (!root) { stage.innerHTML = '<div class="page"><p class="empty">The root agent has not started yet.</p></div>'; return; }
+	const mode = S.treeMode;
+	const entries = treeEntries(root);
+	const family = nodeOf(S.family);
+	const familyIds = family ? new Set([family.id, ...treeChildren(family).map((node) => node.id)]) : null;
+	const head = `<div class="graphHeading"><div><h1 class="view">Agent tree</h1><p class="soft">${entries.filter(({ node }) => TREE.has(node.role)).length} agents · ${entries.filter(({ node }) => !TREE.has(node.role)).length} reviewers shown</p></div>
+		<div class="tree-tools"><label for="treeEpoch">Epoch</label><select id="treeEpoch" onchange="pickEpoch(this.value)"><option value=""${S.epoch === null ? " selected" : ""}>Latest (${st.run.epoch})</option>${st.epochs.map((epoch) => `<option value="${epoch.number}"${epoch.number === S.epoch ? " selected" : ""}>Epoch ${epoch.number}</option>`).join("")}</select><label for="treeReviewers">Reviewers</label><select id="treeReviewers" onchange="S.reviewers=this.value;S.fitted=false;renderSwarm()">${[["all", "All"], ["live", "Active"], ["off", "Hidden"]].map(([value, label]) => `<option value="${value}"${value === S.reviewers ? " selected" : ""}>${label}</option>`).join("")}</select>
+		<button type="button" class="btn ${mode === "graph" ? "primary" : ""}" aria-pressed="${mode === "graph"}" onclick="setTreeMode('graph')">Graph</button>
+		<button type="button" class="btn ${mode === "outline" ? "primary" : ""}" aria-pressed="${mode === "outline"}" onclick="setTreeMode('outline')">Outline</button></div></div>`;
+	const focus = family ? `<p class="row soft">Family of <b>${esc(nodeDisplayName(family))}</b><button class="linkbtn" type="button" onclick="selectFamily(null)">Clear highlight</button></p>` : "";
+	if (mode === "outline") {
+		const filtered = !familyIds ? entries : entries.filter(({ node }) => familyIds.has(node.id) || familyIds.has(node.targetNodeId));
+		stage.innerHTML = `<div class="page monitor">${head}${focus}${agentRows(filtered, true)}</div>`;
+		bindPage(stage);
+		return;
+	}
+
+	const { pos, depth, width, height } = layoutTree(root);
+	S.bounds = { width, height };
+	if (!$("#gsvg")) {
+		stage.innerHTML = `<div class="page monitor"><div id="treeControls"></div><div class="graph" id="graph">
+			<div class="gtools"><div class="group"><button type="button" onclick="zoomBy(1.25)" aria-label="Zoom in">+</button><button type="button" onclick="zoomBy(0.8)" aria-label="Zoom out">−</button><button type="button" onclick="S.userMoved=false;fit()">Fit</button></div></div>
+			<svg id="gsvg" role="group" aria-label="Agent tree graph"><g id="gview"></g></svg>
+		</div><div class="graphKey"><span>Solid lines connect parents to children</span><span>Dashed lines connect reviewers</span><span><b>H</b> hidden</span><span><b>C</b> claims</span><span><b>E</b> epoch</span><span>Shift-click highlights a family</span></div></div>`;
+		attachPanZoom($("#graph"));
+	}
+	const controls = $("#treeControls");
+	const controlHTML = head + focus;
+	if (controls.dataset.content !== controlHTML) { controls.innerHTML = controlHTML; controls.dataset.content = controlHTML; }
+
+	const layers = Array.from({ length: depth + 1 }, (_, index) => {
+		const x = COLUMN_WIDTH * index;
+		const label = index === 0 ? "Root" : `Depth ${index}`;
+		return `<text class="layer-name" x="${x + 14}" y="26">${label}</text>${index ? `<line class="layer" x1="${x - 14}" x2="${x - 14}" y1="12" y2="${height - 10}"/>` : ""}`;
+	}).join("");
+	const edges = [...pos.values()].flatMap((point) => treeChildren(point.node).map((child) => {
+		const highlight = familyIds?.has(point.node.id) && familyIds.has(child.id);
+		return `<path class="link ${highlight ? "hi" : familyIds ? "faded" : ""}" d="${treeConnection(point, pos.get(child.id))}"/>`;
+	})).join("");
+	const view = $("#gview");
+	const graphHTML = layers + edges + [...pos.values()].map((point) => reviewNodes(point, familyIds) + graphNode(point, familyIds)).join("");
+	if (view.dataset.content !== graphHTML) {
+		view.innerHTML = graphHTML;
+		view.dataset.content = graphHTML;
+		for (const el of view.querySelectorAll("[data-id]")) {
+			const select = (event) => {
+				event.stopPropagation();
+				const node = nodeOf(el.dataset.id);
+				if (event.shiftKey && TREE.has(node.role)) selectFamily(treeChildren(node).length ? node.id : node.parentId ?? null);
+				else selectNode(node.id);
+			};
+			el.onclick = select;
+			el.onkeydown = (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(event); } };
 		}
 	}
-	for (const id of ids) {
-		const n = nodeOf(id);
-		for (const c of n.children || []) {
-			if (!pos[c]) continue;
-			const hi = famIds && famIds.has(c) && id === S.family;
-			const dim = famIds && !(famIds.has(c) && famIds.has(id));
-			g += `<path class="link ${hi ? "hi" : ""} ${dim ? "faded" : ""}" d="${linkPath(pos[id], pos[c])}"/>`;
-		}
-	}
-	// Background reviewers orbit the agent they review, on the outer side.
-	let rv = "";
-	const shownReviewers = [];
-	S.revPos = [];
-	if (S.reviewers !== "off") {
-		for (const id of ids) {
-			const all = (st.reviewersOf[id] || []).filter((r) => S.reviewers === "all" || LIVE.has(r.status));
-			if (!all.length) continue;
-			const p = pos[id];
-			const list = all.sort((a, b) => a.createdAt - b.createdAt).slice(-12);
-			const own = nodeOf(id), rr = own.role === "root" ? 17 : 6 + 13 * Math.sqrt(st.own[id] / maxOwn);
-			const perRow = 6, gap = 18;
-			list.forEach((r, i) => {
-				const row = Math.floor(i / perRow), col = i % perRow, inRow = Math.min(perRow, list.length - row * perRow);
-				const dx = (col - (inRow - 1) / 2) * gap;
-				const dy = (p.depth === 0 ? -1 : 1) * (rr + 16 + row * gap);
-				const x = p.x + dx, y = p.y + dy;
-				const old = !LIVE.has(r.status);
-				const dim = famIds && !famIds.has(id);
-				shownReviewers.push(r.id);
-				S.revPos.push([x, y]);
-				rv += `<path class="rlink ${old ? "old" : ""} ${dim ? "faded" : ""}" d="M${p.x.toFixed(1)} ${(p.y + Math.sign(dy) * rr).toFixed(1)} L${x.toFixed(1)} ${(y - Math.sign(dy) * 7).toFixed(1)}"/>`;
-				rv += `<g class="rnode s-${r.status} ${old ? "old" : ""} ${S.sel === r.id ? "sel" : ""} ${dim ? "faded" : ""}" data-id="${esc(r.id)}" transform="translate(${x.toFixed(1)} ${y.toFixed(1)})"><rect class="rhalo" x="-11" y="-11" width="22" height="22" rx="6"/><rect class="rbody" x="-7.5" y="-7.5" width="15" height="15" rx="4"/><text y="3">${REV_LETTER[r.role] ?? "?"}</text></g>`;
-			});
-		}
-	}
-	g += rv.replace(/<g class="rnode[\s\S]*?<\/g>/g, "") ; // links first, under agents
-	const order = ids.sort((a, b) => pos[b].depth - pos[a].depth);
-	for (const id of order) {
-		const n = nodeOf(id), p = pos[id];
-		const r = n.role === "root" ? 17 : 6 + 13 * Math.sqrt(st.own[id] / maxOwn);
-		const dim = famIds && !famIds.has(id);
-		const side = p.depth === 0 ? "mid" : Math.sin(p.a) >= 0 ? "start" : "end";
-		const lx = p.depth === 0 ? 0 : (r + 10) * (side === "start" ? 1 : -1);
-		const ly = p.depth === 0 ? r + 18 : 4;
-		const title = n.goal.title.length > 30 ? `${n.goal.title.slice(0, 29)}…` : n.goal.title;
-		const hasKids = (n.children || []).some((c) => pos[c]);
-		const sub = `${kfmt(st.own[id])} own${hasKids ? ` · ${kfmt(st.sub[id])} branch` : ""}${n.grade !== undefined ? ` · grade ${n.grade.toFixed(2)}` : ""}`;
-		g += `<g class="gnode ${n.role} s-${n.status} ${S.sel === id ? "sel" : ""} ${dim ? "faded" : ""}" data-id="${esc(id)}" transform="translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})">
-			<circle class="halo" r="${(r + 6).toFixed(1)}"/>
-			${n.status === "running" ? `<circle class="orbit" r="${(r + 4).toFixed(1)}"/>` : ""}
-			<circle class="body" r="${r.toFixed(1)}"/>${n.role === "root" ? `<circle class="core" r="5"/>` : ""}
-			<text class="glabel ${p.depth <= 1 || S.sel === id ? "strong" : ""}" x="${lx}" y="${ly}" text-anchor="${side === "mid" ? "middle" : side}">${esc(title)}</text>
-			<text class="gsub" x="${lx}" y="${ly + 14}" text-anchor="${side === "mid" ? "middle" : side}">${sub}</text>
-		</g>`;
-	}
-	g += (rv.match(/<g class="rnode[\s\S]*?<\/g>/g) || []).join("");
-	let svg = $("#gsvg");
-	if (!svg) {
-		stage.innerHTML = `<div class="graph" id="graph"><div class="gtools" id="gtools"></div><svg id="gsvg"><g id="gview"></g></svg><div class="gfoot" id="gfoot"></div></div>`;
-		svg = $("#gsvg");
-		attachPanZoom();
-	}
-	const famTag = S.family ? `<div class="famtag">Family of <b>${esc(titleOf(S.family))}</b><button title="Clear" onclick="selectFamily(null)">×</button></div>` : "";
-	const epochBtns = st.epochs.length > 1 ? `<div class="group">${[...st.epochs].sort((a, b) => a.number - b.number).map((e) => `<button onclick="pickEpoch(${e.number})" class="${e.number === S.epoch ? "on" : ""}">Epoch ${e.number}</button>`).join("")}</div>` : "";
-	const liveRev = st.nodes.filter((n) => !TREE.has(n.role) && LIVE.has(n.status)).length;
-	const revBtns = `<div class="group" title="Background reviewers">${[["all", "All reviewers"], ["live", `Working now (${liveRev})`], ["off", "Hide reviewers"]].map(([k, l]) => `<button onclick="S.reviewers='${k}';renderSwarm()" class="${S.reviewers === k ? "on" : ""}">${l}</button>`).join("")}</div>`;
-	$("#gtools").innerHTML = `<div class="group"><button onclick="zoomBy(1.25)" title="Zoom in">+</button><button onclick="zoomBy(0.8)" title="Zoom out">−</button><button onclick="S.userMoved=false;fit()">Fit</button></div>${revBtns}${epochBtns}${famTag}`;
-	$("#gview").innerHTML = g;
-	const agents = ids.length, revCount = shownReviewers.length;
-	$("#gfoot").textContent = `${agents} agents and ${revCount} reviewers shown · click anything for details · shift-click selects the family it heads · drag to pan, scroll to zoom`;
-	for (const el of document.querySelectorAll(".gnode, .rnode")) {
-		el.onclick = (ev) => { ev.stopPropagation(); hideTip(); const id = el.dataset.id; if (ev.shiftKey && el.classList.contains("gnode")) selectFamily(nodeOf(id)?.children?.length ? id : nodeOf(id)?.parentId ?? null); else selectNode(id); };
-		el.onmouseenter = (ev) => showTip(ev, el.dataset.id);
-		el.onmousemove = (ev) => moveTip(ev);
-		el.onmouseleave = hideTip;
-	}
-	const pts = [...ids.map((id) => [pos[id].x, pos[id].y]), ...S.revPos];
-	S.bounds = pts.reduce((b, [x, y]) => ({ x0: Math.min(b.x0, x), x1: Math.max(b.x1, x), y0: Math.min(b.y0, y), y1: Math.max(b.y1, y) }), { x0: 0, x1: 0, y0: 0, y1: 0 });
-	if (!S.fitted) { S.fitted = true; S.userMoved = false; requestAnimationFrame(fit); } else applyZoom();
+	if (!S.fitted || !S.userMoved) {
+		S.fitted = true;
+		S.userMoved = false;
+		requestAnimationFrame(fit);
+	} else applyZoom();
 }
-function pickEpoch(n) { S.epoch = n; S.family = null; S.fitted = false; renderSwarm(); }
-function attachPanZoom() {
-	const graph = $("#graph");
-	let drag = null;
-	new ResizeObserver(() => { if (!S.userMoved) fit(); }).observe(graph);
-	graph.addEventListener("wheel", (ev) => {
-		ev.preventDefault();
+
+function setTreeMode(mode) {
+	S.treeMode = mode;
+	S.fitted = false;
+	S.graphResize?.disconnect();
+	renderSwarm();
+}
+function pickEpoch(number) { S.epoch = number === "" ? null : Number(number); S.family = null; S.fitted = false; renderSwarm(); }
+function attachPanZoom(graph) {
+	let drag;
+	S.graphResize?.disconnect();
+	S.graphResize = new ResizeObserver(() => { if (!S.userMoved) fit(); });
+	S.graphResize.observe(graph);
+	graph.addEventListener("wheel", (event) => {
+		if (!event.ctrlKey && !event.metaKey) return;
+		event.preventDefault();
 		const rect = graph.getBoundingClientRect();
-		const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
-		S.userMoved = true;
-		const f = Math.exp(-ev.deltaY * 0.0015), z = S.zoom, k = Math.min(4, Math.max(0.2, z.k * f));
-		z.x = mx - ((mx - z.x) * k) / z.k; z.y = my - ((my - z.y) * k) / z.k; z.k = k; applyZoom();
+		zoomBy(Math.exp(-event.deltaY * 0.0015), event.clientX - rect.left, event.clientY - rect.top);
 	}, { passive: false });
-	graph.addEventListener("pointerdown", (ev) => { if (ev.target.closest(".gnode, .rnode, .gtools")) return; drag = { x: ev.clientX, y: ev.clientY, zx: S.zoom.x, zy: S.zoom.y, moved: false }; graph.classList.add("drag"); graph.setPointerCapture(ev.pointerId); });
-	graph.addEventListener("pointermove", (ev) => { if (!drag) return; S.zoom.x = drag.zx + ev.clientX - drag.x; S.zoom.y = drag.zy + ev.clientY - drag.y; drag.moved ||= Math.abs(ev.clientX - drag.x) + Math.abs(ev.clientY - drag.y) > 3; if (drag.moved) S.userMoved = true; applyZoom(); });
-	graph.addEventListener("pointerup", () => { if (drag && !drag.moved) { S.sel = null; closeDrawer(); } drag = null; graph.classList.remove("drag"); });
+	graph.addEventListener("pointerdown", (event) => {
+		if (event.target.closest("[data-id], .gtools") || event.button !== 0) return;
+		drag = { x: event.clientX, y: event.clientY, zx: S.zoom.x, zy: S.zoom.y };
+		graph.classList.add("drag");
+		graph.setPointerCapture(event.pointerId);
+	});
+	graph.addEventListener("pointermove", (event) => {
+		if (!drag) return;
+		S.zoom.x = drag.zx + event.clientX - drag.x;
+		S.zoom.y = drag.zy + event.clientY - drag.y;
+		S.userMoved = true;
+		applyZoom();
+	});
+	const endDrag = () => { drag = null; graph.classList.remove("drag"); };
+	graph.addEventListener("pointerup", endDrag);
+	graph.addEventListener("pointercancel", endDrag);
 }
-function applyZoom() { const v = $("#gview"); if (v) v.setAttribute("transform", `translate(${S.zoom.x.toFixed(1)} ${S.zoom.y.toFixed(1)}) scale(${S.zoom.k.toFixed(3)})`); }
+function applyZoom() {
+	const view = $("#gview");
+	if (view) view.setAttribute("transform", `translate(${S.zoom.x.toFixed(1)} ${S.zoom.y.toFixed(1)}) scale(${S.zoom.k.toFixed(3)})`);
+}
 function fit() {
-	const graph = $("#graph"); if (!graph || !S.bounds) return;
-	const w = graph.clientWidth, h = graph.clientHeight, b = S.bounds;
-	if (!w || !h) return;
-	const bw = b.x1 - b.x0 + 560, bh = b.y1 - b.y0 + 170;
-	const k = Math.min(1.6, Math.max(0.25, Math.min(w / bw, h / bh)));
-	S.zoom = { k, x: w / 2 - ((b.x0 + b.x1) / 2) * k, y: h / 2 - ((b.y0 + b.y1) / 2) * k + 10 };
+	const graph = $("#graph"), b = S.bounds;
+	if (!graph || !b || !graph.clientWidth || !graph.clientHeight) return;
+	const w = graph.clientWidth - 36, h = graph.clientHeight - 72;
+	const k = Math.min(1.2, Math.max(0.14, Math.min(w / b.width, h / b.height)));
+	S.zoom = { k, x: (graph.clientWidth - b.width * k) / 2, y: 55 + Math.max(0, (h - b.height * k) / 2) };
 	applyZoom();
 }
-function zoomBy(f) { S.userMoved = true; const g = $("#graph"); const cx = g.clientWidth / 2, cy = g.clientHeight / 2, z = S.zoom, k = Math.min(4, Math.max(0.2, z.k * f)); z.x = cx - ((cx - z.x) * k) / z.k; z.y = cy - ((cy - z.y) * k) / z.k; z.k = k; applyZoom(); }
+function zoomBy(factor, x, y) {
+	const graph = $("#graph");
+	if (!graph) return;
+	const cx = x ?? graph.clientWidth / 2, cy = y ?? graph.clientHeight / 2;
+	const prev = S.zoom, k = Math.min(3, Math.max(0.14, prev.k * factor));
+	S.zoom = { k, x: cx - (cx - prev.x) * k / prev.k, y: cy - (cy - prev.y) * k / prev.k };
+	S.userMoved = true;
+	applyZoom();
+}
 function reviewerOutcome(r) {
 	const st = S.state;
 	if (r.role === "hidden_reviewer") { const rec = st.recommendations.find((x) => x.reviewerNodeId === r.id); return rec ? `recommended ${rec.action.replace(/_/g, " ")} (grade ${rec.grade.toFixed(2)}, promise ${rec.promise.toFixed(2)})` : null; }
@@ -611,22 +810,11 @@ function reviewerOutcome(r) {
 	if (r.role === "root_reviewer") return r.finishedSummary ?? null;
 	return null;
 }
-function showTip(ev, id) {
-	const n = nodeOf(id), tip = $("#tip"), st = S.state;
-	if (!TREE.has(n.role)) {
-		const out = reviewerOutcome(n);
-		tip.innerHTML = `<b>${esc(ROLE_NAME[n.role])}</b>reviewing ${esc(titleOf(n.targetNodeId))} · ${esc(n.status)} · ${fmt(st.own[id])} tokens${out ? `<div style="opacity:.8;margin-top:4px">${esc(out)}</div>` : n.activity ? `<div style="opacity:.75;margin-top:4px">${esc(n.activity)}</div>` : ""}`;
-	} else {
-		const revs = (st.reviewersOf[id] || []).length;
-		tip.innerHTML = `<b>${esc(n.goal.title)}</b>${esc(ROLE_NAME[n.role])} · ${esc(n.status)}<div style="margin-top:4px">own ${fmt(st.own[id])} · reviews of it ${fmt(st.over[id])}${n.children?.length ? ` · branch ${fmt(st.sub[id])}` : ""} tokens</div>${revs ? `<div>${revs} background review${revs > 1 ? "s" : ""}</div>` : ""}${n.activity ? `<div style="opacity:.75;margin-top:4px">${esc(n.activity)}</div>` : ""}`;
-	}
-	tip.classList.add("on"); moveTip(ev);
+// ---------- agent inspection ----------
+function selectNode(id) {
+	if (S.sel !== id) S.drawerTab = "overview";
+	S.sel = id; S.selFinding = null; openDrawer(); renderAll();
 }
-function moveTip(ev) { const tip = $("#tip"); tip.style.left = `${Math.min(window.innerWidth - 320, ev.clientX + 14)}px`; tip.style.top = `${ev.clientY + 14}px`; }
-function hideTip() { $("#tip").classList.remove("on"); }
-
-// ---------- selection & drawer ----------
-function selectNode(id) { S.sel = id; S.selFinding = null; S.drawerTab = S.drawerTab === "family-only" ? "overview" : S.drawerTab; openDrawer(); renderAll(); }
 function selectFamily(headId) { S.family = headId; if (headId) { S.view = S.view === "families" ? "families" : "swarm"; } renderAll(); }
 function selectFinding(id) { S.selFinding = id; S.sel = null; openDrawer(); renderDrawer(); }
 function openDrawer() { $("#drawer").classList.add("open"); }
@@ -641,23 +829,36 @@ async function renderDrawer() {
 	const isRev = !TREE.has(n.role);
 	const tabs = isRev ? [["overview", "Overview"], ["activity", "Activity"]] : [["overview", "Overview"], ["activity", "Activity"], ["family", "Family"], ["findings", "Findings"], ["board", "Board"], ["reviews", "Reviews"]];
 	const tab = tabs.some(([k]) => k === S.drawerTab) ? S.drawerTab : "overview";
-	const keep = $("#dbody") && S.lastDrawer === `${n.id}:${tab}` ? $("#dbody").scrollTop : 0;
+	const previous = S.lastDrawer === `${n.id}:${tab}` ? $("#dbody") : null;
+	const keep = previous?.scrollTop ?? 0;
+	const openDetails = previous && [...previous.querySelectorAll("details")].filter((detail) => detail.open).map((detail) => $("summary", detail)?.textContent);
 	S.lastDrawer = `${n.id}:${tab}`;
 	box.innerHTML = `<div class="dhead"><div class="kicker">${esc(ROLE_NAME[n.role])}${n.epoch ? ` · epoch ${n.epoch}` : ""} ${statusChip(n.status)}<button class="close" onclick="closeDrawer()" aria-label="Close">×</button></div>
-		<h2>${esc(isRev ? `${ROLE_NAME[n.role]} of ${titleOf(n.targetNodeId)}` : n.goal.title)}</h2><div class="dim" style="font-size:12.5px">${esc(n.model ? `${n.model.provider} / ${n.model.id}` : "model not picked yet")}${n.activity ? ` · ${esc(n.activity)}` : ""}</div></div>
+		<h2>${esc(nodeDisplayName(n))}</h2><div class="dim" style="font-size:12.5px">${esc(n.model ? `${n.model.provider} / ${n.model.id}` : "Model pending")}</div></div>
 		<div class="tabs">${tabs.map(([k, l]) => `<button class="${k === tab ? "on" : ""}" onclick="setTab('${k}')">${l}</button>`).join("")}</div>
 		<div class="dbody" id="dbody">${tab === "activity" ? '<p class="dim">Loading…</p>' : drawerTab(n, tab)}</div>`;
-	if (tab === "activity") $("#dbody").innerHTML = await activityTab(n);
-	$("#dbody").scrollTop = keep;
+	const body = $("#dbody");
+	if (tab === "activity") {
+		try {
+			const activity = await activityTab(n);
+			if (body.isConnected) body.innerHTML = activity;
+		} catch (error) {
+			if (body.isConnected) body.innerHTML = `<p class="empty">Could not load activity. ${esc(error.message)}</p>`;
+		}
+	}
+	if (openDetails?.length) for (const detail of body.querySelectorAll("details")) detail.open = openDetails.includes($("summary", detail)?.textContent);
+	body.scrollTop = keep;
 	bindPage(box);
 }
 function drawerTab(n, tab) {
 	const st = S.state;
+	const last = st.series.activity?.[n.id];
+	const now = `<div class="agent-now"><h3>${LIVE.has(n.status) ? "Current activity" : "Last activity"}</h3><p class="prose">${esc(activityLabel(n))}</p>${last ? `<p class="dim">${relativeTime(last)}</p>` : ""}${n.checkpoint ? `<details><summary>Latest checkpoint</summary><div class="box prose">${esc(n.checkpoint)}</div></details>` : ""}</div>`;
 	if (tab === "overview" && !TREE.has(n.role)) {
 		const target = nodeOf(n.targetNodeId);
 		const out = reviewerOutcome(n);
 		const finding = n.targetFindingId ? st.findings.find((f) => f.id === n.targetFindingId) : null;
-		return `<div class="gauges"><div class="gauge"><b class="num">${kfmt(st.own[n.id])}</b><span>tokens it spent</span></div><div class="gauge"><b class="num">${n.turns}</b><span>turns</span></div><div class="gauge"><b>${esc(n.status)}</b><span>${ago(n.createdAt)}</span></div></div>
+		return `${now}<div class="gauges"><div class="gauge"><b class="num">${kfmt(st.own[n.id])}</b><span>tokens it spent</span></div><div class="gauge"><b class="num">${n.turns}</b><span>turns</span></div><div class="gauge"><b>${esc(n.status)}</b><span>${ago(n.createdAt)}</span></div></div>
 			<h3>Reviewing</h3><div class="mlist">${target ? `<div class="mrow" data-node="${esc(target.id)}"><span class="dot st s-${target.status}"></span><span class="t">${esc(target.goal.title)}</span><span class="num dim">${kfmt(st.own[target.id])} own</span><span class="a">${esc(ROLE_NAME[target.role])} · ${esc(target.status)}</span></div>` : "<p class='dim'>unknown</p>"}</div>
 			${finding ? `<h3>The finding under review</h3><div class="find" data-finding="${esc(finding.id)}" style="grid-template-columns:96px 1fr">${`<div>${statusChip(finding.status)}</div><div><div class="lvl">${esc(finding.level.replace(/_/g, " "))}</div><div class="claim">${esc(finding.claim)}</div></div>`}</div>` : ""}
 			<h3>Outcome</h3><p class="prose">${esc(out ?? (LIVE.has(n.status) ? "Still reviewing." : "Ended without a recorded outcome."))}</p>
@@ -669,10 +870,12 @@ function drawerTab(n, tab) {
 		const frac = budget ? sub / budget : 0;
 		const c = n.contract;
 		const kids = (n.children || []).filter((c) => TREE.has(nodeOf(c)?.role));
-		return `<div class="gauges">
+		const parent = nodeOf(n.parentId);
+		const reviewers = st.reviewersOf[n.id] ?? [];
+		return `${now}${parent ? `<div class="row dim">Parent ${agentLink(parent)}</div>` : ""}<div class="row dim">${kids.length ? `<button type="button" class="linkbtn" onclick="setTab('family')">${kids.length} ${kids.length === 1 ? "child" : "children"}</button>` : ""}${reviewers.length ? `<button type="button" class="linkbtn" onclick="setTab('reviews')">${reviewers.length} reviewer${reviewers.length === 1 ? "" : "s"}</button>` : ""}</div><div class="gauges">
 				<div class="gauge"><b class="num">${kfmt(st.own[n.id])}</b><span>its own tokens</span></div>
 				<div class="gauge"><b class="num">${kfmt(st.over[n.id])}</b><span>spent reviewing it</span></div>
-				<div class="gauge"><b class="num">${kids.length ? kfmt(sub) : "—"}</b><span>${kids.length ? "its whole branch" : "no children"}</span></div>
+				<div class="gauge"><b class="num">${kfmt(sub)}</b><span>branch total</span></div>
 			</div>
 			<div style="font-size:12px;color:var(--ink-3)">Budget ${budget ? `${fmt(budget)} tokens · ${(frac * 100).toFixed(0)}% used by the branch` : "unbounded"}</div>${budget ? `<div class="bar" style="margin-bottom:6px"><i style="width:${Math.min(100, frac * 100)}%"></i></div>` : ""}
 			<div class="gauges"><div class="gauge"><b class="num">${n.grade !== undefined ? n.grade.toFixed(2) : "—"}</b><span>reviewer grade</span></div><div class="gauge"><b class="num">${n.promise.toFixed(2)}</b><span>promise (priority)</span></div><div class="gauge"><b class="num">${n.turns}</b><span>turns</span></div></div>
@@ -680,7 +883,6 @@ function drawerTab(n, tab) {
 			${n.goal.rubric ? `<h3>Decision rubric</h3><div class="prose soft">${esc(n.goal.rubric)}</div>` : ""}
 			${n.goal.targets?.length ? `<h3>Targets</h3><ul>${n.goal.targets.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
 			${c ? `<h3>Its contract · v${c.version}</h3><dl class="kv"><dt>Success</dt><dd>${c.success.map(esc).join("<br>")}</dd><dt>Kill if</dt><dd>${c.kill.map(esc).join("<br>")}</dd><dt>First check</dt><dd>${esc(c.firstCheck)}</dd><dt>Aims for</dt><dd>${esc(c.evidenceLevel.replace(/_/g, " "))}</dd></dl>` : ""}
-			${n.checkpoint ? `<h3>Latest checkpoint</h3><div class="box prose">${esc(n.checkpoint)}</div>` : ""}
 			<h3>Details</h3><dl class="kv"><dt>Agent id</dt><dd class="code">${esc(n.id)}</dd><dt>Turns</dt><dd class="num">${n.turns}</dd><dt>Own spend</dt><dd class="num">${fmt(st.own[n.id])} tokens · $${(n.spent?.usd ?? 0).toFixed(3)}</dd><dt>Reviews of it</dt><dd class="num">${fmt(st.over[n.id])} tokens · $${(n.oversight?.usd ?? 0).toFixed(3)}</dd><dt>Budget</dt><dd class="code">${esc(Object.entries(n.budget).map(([k, v]) => `${k} ${v}`).join(" · ") || "unbounded")}</dd><dt>Soft caps</dt><dd>${n.caps.maxChildren} children · depth ${n.caps.maxDepth}</dd><dt>Started</dt><dd>${ago(n.createdAt)}</dd>${n.statusReason ? `<dt>Note</dt><dd>${esc(n.statusReason)}</dd>` : ""}${n.finishedSummary ? `<dt>Summary</dt><dd>${esc(n.finishedSummary)}</dd>` : ""}</dl>`;
 	}
 	if (tab === "family") {
@@ -707,6 +909,7 @@ function drawerTab(n, tab) {
 		const about = st.recommendations.filter((r) => r.deciderNodeId === n.id && r.targetNodeId !== n.id && r.status === "open");
 		const revs = st.reviewersOf[n.id] || [];
 		return `<p class="soft" style="margin-top:0">${revs.filter((r) => r.role === "hidden_reviewer").length} hidden reviews and ${revs.filter((r) => r.role === "claims_reviewer").length} claims reviews so far. The agent never sees hidden reviews; its parent decides what to do with them.</p>
+			${revs.length ? `<div class="mlist">${[...revs].reverse().map((reviewer) => `<div class="mrow"><span class="dot st s-${esc(reviewer.status)}"></span>${agentLink(reviewer, ROLE_NAME[reviewer.role])}<span class="dim num">${kfmt(st.own[reviewer.id])}</span><span class="a">${esc(reviewerOutcome(reviewer) ?? activityLabel(reviewer))}</span></div>`).join("")}</div>` : ""}
 			${about.length ? `<h3>Waiting on this agent's decision</h3>${about.map(recRow).join("")}` : ""}
 			<h3>Hidden reviews of this agent</h3>${recs.length ? recs.map(recRow).join("") : `<p class="dim">None yet.</p>`}`;
 	}
@@ -847,6 +1050,7 @@ function viewTokens() {
 	const revs = st.nodes.filter((n) => !TREE.has(n.role));
 	const revTypes = ["hidden_reviewer", "claims_reviewer", "root_reviewer"].map((role) => { const list = revs.filter((r) => r.role === role); const tok = list.reduce((a, r) => a + st.own[r.id], 0); return { role, count: list.length, live: list.filter((r) => LIVE.has(r.status)).length, tok, avg: list.length ? tok / list.length : 0 }; });
 	const reviewed = st.tree.filter((n) => st.over[n.id] > 0).map((n) => { const rs = st.reviewersOf[n.id] || []; return { n, over: st.over[n.id], own: st.own[n.id], hidden: rs.filter((r) => r.role === "hidden_reviewer").length, claims: rs.filter((r) => r.role === "claims_reviewer").length }; }).sort((a, b) => b.over - a.over);
+	const usage = st.series.modelUsage;
 	const recentRevs = [...revs].sort((a, b) => b.createdAt - a.createdAt).slice(0, 25);
 	// top-level branches and families
 	const root = rootOfEpoch(st.run.epoch);
@@ -863,6 +1067,7 @@ function viewTokens() {
 	const prov = Object.entries(st.providers);
 	return `<h1 class="view">Tokens</h1><p class="lede"><b class="num">${fmt(total)}</b> tokens${run.budget.tokens ? ` of a ${fmt(run.budget.tokens)} budget (${((total / run.budget.tokens) * 100).toFixed(1)}%)` : ""}, about <b>$${usd.toFixed(2)}</b> at list prices. Every number on this page is counted once, on the agent that spent it; branch and family totals add those up.</p>
 		${lineChart(st.series.tokens, { label: "Tokens over time", cap: run.budget.tokens, marks, dots })}
+		${usage && total ? `<div class="keys"><span>Uncached input <b class="num">${fmt(usage.input)}</b></span><span>Output <b class="num">${fmt(usage.output)}</b></span><span>Cached and other <b class="num">${fmt(usage.other)}</b></span></div>` : ""}
 		<h3>Who spent them</h3>
 		<div class="split">${Object.entries(byGroup).map(([g, v]) => `<div style="width:${(v / gsum) * 100}%;background:${COLORS[g]}" title="${g}: ${fmt(v)}"></div>`).join("")}</div>
 		<div class="keys">${Object.entries(byGroup).map(([g, v]) => `<span><i class="sq" style="background:${COLORS[g]}"></i>${g} <b class="num">${kfmt(v)}</b> <span class="dim">${((v / gsum) * 100).toFixed(0)}%</span></span>`).join("")}</div>
@@ -935,14 +1140,19 @@ async function renderReader() {
 	const r = await api(`/api/runs/${encodeURIComponent(S.runId)}/reports/${encodeURIComponent(S.reader)}`);
 	$("#stage").innerHTML = `<div class="page"><button class="btn" onclick="S.reader=null;renderView()">← Back to inbox</button><div style="margin-top:26px">${md(r.markdown)}</div></div>`;
 }
-const FEED_GROUPS = { all: null, agents: ["agent.message", "agent.error", "agent.retry", "node.spawned", "node.status", "node.checkpoint", "node.contract"], tools: ["tool.call", "tool.result", "workspace.command"], findings: ["finding.reported", "finding.verdict"], reviews: ["review.started", "recommendations.updated", "epoch.consulted", "epoch.decision", "epoch.started"], questions: ["question.asked", "question.answered", "question.escalated_to_user", "node.delivered"], jobs: ["job.submitted", "job.started", "job.finished", "job.cached"], money: ["model.call", "budget.transferred", "budget.reclaimed"] };
+const FEED_GROUPS = { all: null, agents: ["agent.message", "agent.error", "agent.retry", "node.spawned", "node.status", "node.checkpoint", "node.contract"], tools: ["tool.call", "tool.result", "workspace.command"], findings: ["finding.reported", "finding.verdict", "finding.closed"], reviews: ["review.started", "recommendations.updated", "epoch.consulted", "epoch.decision", "epoch.started"], questions: ["question.asked", "question.answered", "question.escalated_to_user", "node.delivered"], jobs: ["job.submitted", "job.started", "job.finished", "job.cached"], money: ["model.call", "budget.transferred", "budget.reclaimed"] };
 const scoreColor = (v) => `color-mix(in oklch, var(--done) ${Math.round(12 + v * 60)}%, var(--panel))`;
 const healthWord = { ok: "healthy", warn: "warnings", fail: "broke" };
 const healthClass = { ok: "done", warn: "needs_work", fail: "failed" };
 async function renderEvals() {
 	const stage = $("#stage");
-	let rounds = [];
-	try { rounds = await api("/api/evals"); } catch {}
+	let rounds;
+	try { rounds = await api("/api/evals"); }
+	catch (error) {
+		if (S.view === "evals" && !stage.querySelector("[data-eval-view]")) stage.innerHTML = `<div class="page"><h1 class="view">Evals</h1><p class="empty">Could not load eval rounds. ${esc(error.message)}</p></div>`;
+		return;
+	}
+	if (S.view !== "evals") return;
 	if (!rounds.length) {
 		stage.innerHTML = `<div class="page"><h1 class="view">Evals</h1><p class="lede">Run <span class="code">one-piece eval --suite smoke</span> to grade the harness on Mac-only tasks: optimization with continuous scores, engineering with hidden tests, and wide coordination. Each round lands here with scores, health checks and a link to its swarm.</p></div>`;
 		return;
@@ -955,34 +1165,54 @@ async function renderEvals() {
 		const d = new Date(iso);
 		return `${isNaN(d) ? id : d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}${solo ? " · solo" : ""}`;
 	};
-	const mean = (r) => r.results.reduce((a, x) => a + x.score, 0) / Math.max(1, r.results.length);
-	const ok = (r) => r.results.filter((x) => x.health.status !== "fail").length;
-	const taskIds = [...new Set(rounds.flatMap((r) => r.results.map((x) => x.task.id)))].sort();
+	const mean = (r, digits) => r.results.length ? (r.results.reduce((a, x) => a + x.score, 0) / r.results.length).toFixed(digits) : "—";
+	const healthy = (r) => r.results.filter((x) => x.health.status === "ok").length;
+	const tasks = (r) => r.tasks ?? r.results.map((x) => x.task);
+	const taskIds = [...new Set(rounds.flatMap((r) => tasks(r).map((t) => t.id)))].sort();
+	const phase = (r) => r.status === "interrupted" ? "Interrupted" : r.current?.status === "running" ? "Running" : "Grading";
 	const cols = rounds.slice(0, 10).reverse();
-	const cell = (x) => x
+	const cell = (r, id) => {
+		const x = r.results.find((y) => y.task.id === id);
+		return x
 		? `<td class="cell" style="background:${scoreColor(x.score)}" title="${esc(healthWord[x.health.status])}">${x.score.toFixed(2)}${x.health.status === "fail" ? ' <span style="color:var(--cut)">✕</span>' : x.health.status === "warn" ? ' <span style="color:var(--wait)">!</span>' : ""}</td>`
-		: `<td class="cell dim">—</td>`;
+		: `<td class="cell dim">${r.current?.taskId === id ? phase(r) : r.status === "running" && tasks(r).some((t) => t.id === id) ? "Queued" : "—"}</td>`;
+	};
 	const matrix = `<table class="matrix"><tr><th>Task</th>${cols.map((r) => `<th class="col"><button class="linkbtn" data-round="${esc(r.id)}" style="${r.id === S.evalRound ? "font-weight:700;color:var(--ink)" : ""}">${esc(when(r.id))}</button></th>`).join("")}</tr>
-		${taskIds.map((t) => `<tr><td>${esc(t)}</td>${cols.map((r) => cell(r.results.find((y) => y.task.id === t))).join("")}</tr>`).join("")}
-		<tr><td><b>Mean</b></td>${cols.map((r) => `<td class="cell"><b>${mean(r).toFixed(2)}</b></td>`).join("")}</tr>
-		<tr><td class="dim">Ran without breaking</td>${cols.map((r) => `<td class="cell dim">${ok(r)}/${r.results.length}</td>`).join("")}</tr></table>`;
+		${taskIds.map((t) => `<tr><td>${esc(t)}</td>${cols.map((r) => cell(r, t)).join("")}</tr>`).join("")}
+		<tr><td><b>Mean of scored tasks</b></td>${cols.map((r) => `<td class="cell"><b>${mean(r, 2)}</b></td>`).join("")}</tr>
+		<tr><td class="dim">Healthy</td>${cols.map((r) => `<td class="cell dim">${healthy(r)}/${tasks(r).length}</td>`).join("")}</tr></table>`;
+	const current = round.current;
+	const progress = current
+		? `<p class="row"><b>${esc(tasks(round).find((t) => t.id === current.taskId)?.title ?? current.taskId)}</b><span>${phase(round)}</span><span class="dim">Last activity <time data-eval-activity="${esc(current.lastActivity)}" datetime="${new Date(current.lastActivity).toISOString()}"></time></span><button class="btn" data-openrun="${esc(current.runId)}">Open swarm</button></p>`
+		: round.status === "running" ? `<p class="dim">${round.results.length === tasks(round).length ? "Writing report" : "Preparing next task"}</p>` : "";
 	const cards = round.results.map((x) => {
 		const st = x.stats;
+		const tokenUse = st?.tokenBudget ? `${kfmt(st.tokens)} / ${kfmt(st.tokenBudget)} tokens` : st ? `${kfmt(st.tokens)} tokens` : "";
 		return `<div class="ecard"><div>
 			<div class="row"><b style="font-size:16px">${esc(x.task.title)}</b><span class="chip">${esc(x.task.category)}</span><span class="chip st s-${healthClass[x.health.status]}"><span class="dot"></span>${healthWord[x.health.status]}</span></div>
-			<div class="dim" style="font-size:12.5px;margin-top:2px">${esc(x.task.id)} · inspired by ${esc(x.task.inspiredBy)} · ${esc(x.status)}${st ? ` · ${dur(st.durationMs)} · ${kfmt(st.tokens)} tokens · $${st.usd.toFixed(2)}` : ""}</div>
+			<div class="dim" style="font-size:12.5px;margin-top:2px">${esc(x.task.id)} · inspired by ${esc(x.task.inspiredBy)} · ${esc(x.status)}${st ? ` · ${dur(st.durationMs)} · ${tokenUse} · $${st.usd.toFixed(2)}` : ""}</div>
 			${x.best ? `<p class="prose" style="margin:10px 0 0">Best worker <b>${esc(x.best.title)}</b>: ${esc(x.best.details)}</p>` : `<p class="dim">No worker workspace was graded.</p>`}
 			${x.health.issues.length ? `<ul class="issues">${x.health.issues.map((i) => `<li class="${i.level}"><b>${esc(i.check)}</b>: ${esc(i.message)}</li>`).join("")}</ul>` : `<p class="dim" style="margin:6px 0 0">All health checks passed.</p>`}
 			${x.graded.length > 1 ? `<div class="wbars">${x.graded.map((g) => `<div class="wbar"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(g.title)}</span><span class="track"><i style="width:${(g.score * 100).toFixed(1)}%"></i></span><span class="num">${g.score.toFixed(2)}</span></div>`).join("")}</div>` : ""}
 			${st ? `<div class="dim" style="font-size:12.5px;margin-top:10px">${Object.entries(st.agents).map(([k, v]) => `${v} ${esc(ROLE_NAME[k] ?? k)}`).join(" · ")} · findings ${Object.entries(st.findings).map(([k, v]) => `${v} ${k.replace(/_/g, " ")}`).join(", ") || "none"} · ${st.modelErrors} model errors, ${st.retries} retries · ${st.toolErrors}/${st.toolCalls} tool errors${st.parallelism !== undefined ? ` · ${st.parallelism} agents running on average (peak ${st.peakParallelism})` : ""}${st.tokensPerPoint ? ` · ${st.tokensPerPoint === null ? "∞" : kfmt(st.tokensPerPoint)} tokens per point` : ""}${st.oversightShare !== undefined ? ` · oversight ${(st.oversightShare * 100).toFixed(0)}%` : ""}${st.childModelChoices?.length ? ` · managers chose ${st.childModelChoices.map(esc).join(", ")}` : ""}</div>` : ""}
 		</div><div style="text-align:right"><div class="big" style="color:${x.score >= 0.8 ? "var(--done)" : x.score >= 0.4 ? "var(--ink)" : "var(--cut)"}">${x.score.toFixed(2)}</div><div class="dim" style="font-size:12px">score</div><button class="btn" style="margin-top:12px" data-openrun="${esc(x.runId)}">Open swarm</button></div></div>`;
 	}).join("");
-	stage.innerHTML = `<div class="page"><h1 class="view">Evals</h1><p class="lede">Each round runs the suite with hidden graders outside the swarm. Scores run from 0 to 1; ! marks a warning and ✕ a run that broke.</p>
-		${matrix}<h3>Round of ${esc(when(round.id))} · mean ${mean(round).toFixed(3)} · ${ok(round)}/${round.results.length} ran without breaking</h3>${cards}</div>`;
+	const markup = `<div class="page" data-eval-view><h1 class="view">Evals</h1><p class="lede">Scores run from 0 to 1. ! marks a health warning and ✕ marks a failure.</p>
+		${matrix}<h3>Round of ${esc(when(round.id))} · ${round.results.length}/${tasks(round).length} scored · ${healthy(round)}/${tasks(round).length} healthy${round.status === "interrupted" ? " · interrupted" : ""}</h3>${progress}${cards}</div>`;
+	const changed = S.evalMarkup !== markup || !stage.querySelector("[data-eval-view]");
+	if (changed) {
+		const scroll = stage.scrollTop;
+		stage.innerHTML = markup;
+		stage.scrollTop = scroll;
+		S.evalMarkup = markup;
+	}
+	const activity = stage.querySelector("[data-eval-activity]");
+	if (activity) activity.textContent = ago(Number(activity.dataset.evalActivity));
+	if (!changed) return;
 	stage.querySelectorAll("[data-round]").forEach((el) => (el.onclick = () => { S.evalRound = el.dataset.round; renderEvals(); }));
 	stage.querySelectorAll("[data-openrun]").forEach((el) => (el.onclick = async () => {
 		S.runId = el.dataset.openrun; S.sel = null; S.family = null; S.epoch = null; S.fitted = false; S.feed = [];
-		$("#run").value = S.runId; connect(); S.view = "swarm"; await refresh(true);
+		S.view = "swarm"; await loadRuns(); connect(); await refresh(true);
 	}));
 }
 
@@ -1022,9 +1252,10 @@ window.addEventListener("resize", () => { if (S.view === "swarm" && !S.fitted) f
 (async () => {
 	try { await loadRuns(); connect(); await refresh(); } catch (e) { $("#stage").innerHTML = `<div class="page"><p class="empty">Could not reach the harness: ${esc(e.message)}</p></div>`; }
 	setInterval(async () => {
+		for (const time of document.querySelectorAll("[data-relative]")) time.textContent = ago(Number(time.dataset.relative));
 		const typing = [...document.querySelectorAll("textarea, input")].some((t) => t === document.activeElement || (t.tagName === "TEXTAREA" && t.value));
 		if (S.reader || typing) return;
-		try { await refresh(); } catch {}
+		try { if (S.view === "evals") await renderEvals(); else await refresh(); } catch {}
 	}, 2500);
 	setInterval(() => loadRuns().catch(() => {}), 15000);
 })();

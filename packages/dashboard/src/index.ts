@@ -18,6 +18,62 @@ export interface DashboardOptions {
 
 const NOISE = new Set(["nodes.updated", "budget.charged"]);
 
+function readOptional(path: string): string | undefined {
+	try {
+		return readFileSync(path, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+}
+
+function processIsAlive(pid: number): boolean {
+	if (!Number.isSafeInteger(pid) || pid < 1) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function evalRounds(dataDir: string, store: SqliteStore) {
+	const root = join(dataDir, "evals");
+	if (!existsSync(root)) return [];
+	const lockPid = Number(readOptional(join(dataDir, "eval.lock")));
+	const activePid = processIsAlive(lockPid) ? lockPid : undefined;
+	let runs: Run[] | undefined;
+	return readdirSync(root)
+		.filter((id) => existsSync(join(root, id, "round.json")) || existsSync(join(root, id, "results.json")))
+		.sort().reverse().slice(0, 50)
+		.map((id) => {
+			const dir = join(root, id);
+			const manifest = JSON.parse(readOptional(join(dir, "round.json")) ?? "null") as { pid: number; tasks: { id: string; title: string }[] } | null;
+			const raw = JSON.parse(readOptional(join(dir, "results.json")) ?? "[]") as Array<Record<string, any>>;
+			const results = raw.map((r) => ({
+				task: { id: r.task.id, title: r.task.title, category: r.task.category, inspiredBy: r.task.inspiredBy },
+				runId: r.runId,
+				status: r.status,
+				score: r.score,
+				best: r.best ? { title: r.best.title, details: r.best.grade.details } : null,
+				graded: r.graded.map((g: any) => ({ title: g.title, score: g.grade.score })),
+				health: r.health,
+				stats: r.stats,
+			}));
+			const tasks = manifest?.tasks ?? results.map((r) => r.task);
+			const status = !manifest || existsSync(join(dir, "report.md")) ? "complete" : manifest.pid === activePid ? "running" : "interrupted";
+			let current;
+			if (status !== "complete" && results.length < tasks.length) {
+				runs ??= store.list<Run>("runs");
+				const run = runs.findLast((r) => r.config.evalRound === id && !results.some((result) => result.runId === r.id));
+				if (run) {
+					const latest = store.events(run.id, { afterSeq: store.lastSeq(run.id) - 1, limit: 1 })[0];
+					current = { taskId: run.config.eval, runId: run.id, status: run.status, lastActivity: latest?.ts ?? run.createdAt };
+				}
+			}
+			return { id, status, tasks, current, results };
+		});
+}
+
 function json(res: ServerResponse, status: number, body: unknown): void {
 	res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
 	res.end(JSON.stringify(body));
@@ -34,20 +90,45 @@ async function readBody(req: IncomingMessage): Promise<string> {
 
 function series(events: HarnessEvent[]) {
 	const tokens: Array<[number, number]> = [];
+	const reviewerTokens: Array<[number, number]> = [];
 	const accepted: Array<[number, number]> = [];
+	const active: Array<[number, number]> = [];
+	const running = new Set<string>();
+	const activity: Record<string, number> = {};
+	const stages: Array<{ t: number; label: string }> = [];
+	const modelUsage = { input: 0, output: 0, other: 0 };
 	let total = 0;
+	let reviews = 0;
 	let acc = 0;
 	for (const e of events) {
+		if (e.nodeId && !NOISE.has(e.type)) activity[e.nodeId] = e.ts;
 		if (e.type === "model.call") {
-			total += Number(e.data.totalTokens ?? 0);
+			const spent = Number(e.data.totalTokens ?? 0);
+			const input = Number(e.data.input ?? 0);
+			const output = Number(e.data.output ?? 0);
+			modelUsage.input += input;
+			modelUsage.output += output;
+			modelUsage.other += Math.max(0, spent - input - output);
+			total += spent;
+			if (String(e.data.role).endsWith("_reviewer")) reviews += spent;
 			tokens.push([e.ts, total]);
+			reviewerTokens.push([e.ts, reviews]);
 		} else if (e.type === "finding.verdict" && e.data.verdict === "accepted") {
 			acc += 1;
 			accepted.push([e.ts, acc]);
+		} else if (e.type === "node.status" && e.nodeId) {
+			const before = running.size;
+			if (e.data.status === "running") running.add(e.nodeId);
+			else running.delete(e.nodeId);
+			if (running.size !== before) active.push([e.ts, running.size]);
+		} else if (e.type === "epoch.started") {
+			stages.push({ t: e.ts, label: `Epoch ${String(e.data.number)}` });
+		} else if (e.type === "budget.report_reserve") {
+			stages.push({ t: e.ts, label: "Report reserve" });
 		}
 	}
 	const thin = <T>(arr: T[], max: number) => (arr.length <= max ? arr : arr.filter((_, i) => i % Math.ceil(arr.length / max) === 0 || i === arr.length - 1));
-	return { tokens: thin(tokens, 400), accepted };
+	return { tokens: thin(tokens, 400), reviewerTokens: thin(reviewerTokens, 400), accepted, active: thin(active, 600), activity, stages, modelUsage, lastEventAt: events.at(-1)?.ts };
 }
 
 function roleStats(events: HarnessEvent[]) {
@@ -96,32 +177,7 @@ export function startDashboard(options: DashboardOptions): { server: Server; url
 			}
 			if (parts[0] !== "api") return json(res, 404, { error: "not found" });
 			if (req.method === "GET" && parts[1] === "evals") {
-				// Eval rounds live next to the store: <dataDir>/evals/<stamp>/results.json
-				const root = join(dirname(options.dbPath), "evals");
-				const rounds = existsSync(root)
-					? readdirSync(root)
-							.filter((d) => existsSync(join(root, d, "results.json")))
-							.sort()
-							.reverse()
-							.slice(0, 50)
-							.map((d) => {
-								const results = JSON.parse(readFileSync(join(root, d, "results.json"), "utf8")) as Array<Record<string, any>>;
-								return {
-									id: d,
-									results: results.map((r) => ({
-										task: { id: r.task.id, title: r.task.title, category: r.task.category, inspiredBy: r.task.inspiredBy },
-										runId: r.runId,
-										status: r.status,
-										score: r.score,
-										best: r.best ? { title: r.best.title, details: r.best.grade.details } : null,
-										graded: r.graded.map((g: any) => ({ title: g.title, score: g.grade.score })),
-										health: r.health,
-										stats: r.stats,
-									})),
-								};
-							})
-					: [];
-				return json(res, 200, rounds);
+				return json(res, 200, evalRounds(dirname(options.dbPath), store));
 			}
 			if (req.method === "GET" && parts[1] === "runs" && parts.length === 2) {
 				return json(res, 200, store.list<Run>("runs").sort((a, b) => b.createdAt - a.createdAt));

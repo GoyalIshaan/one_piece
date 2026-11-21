@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	allowSandboxReads,
@@ -66,6 +66,7 @@ export interface TaskResult {
 	stats: {
 		durationMs: number;
 		tokens: number;
+		tokenBudget?: number;
 		usd: number;
 		agents: Record<string, number>;
 		findings: Record<string, number>;
@@ -259,7 +260,7 @@ export async function runTask(task: TaskSpec, options: EvalOptions, evalDir: str
 			rubric: task.rubric,
 		},
 		budget,
-		{ workspace: seed, config: { eval: task.id } },
+		{ workspace: seed, config: { eval: task.id, evalRound: basename(evalDir) } },
 	);
 	log(`  ${task.id}: run ${run.id} started`);
 	let stoppedByTimeLimit = false;
@@ -300,6 +301,7 @@ export async function runTask(task: TaskSpec, options: EvalOptions, evalDir: str
 		stats: {
 			durationMs: Date.now() - began,
 			tokens: nodes.reduce((a, n) => a + (n.spent.tokens ?? 0), 0),
+			tokenBudget: budget.tokens,
 			usd: nodes.reduce((a, n) => a + (n.spent.usd ?? 0), 0),
 			agents: count(nodes, (n) => n.role),
 			findings: count(store.list<Finding>("findings", { runId: run.id }), (f) => f.status),
@@ -349,28 +351,40 @@ export async function runEval(options: EvalOptions): Promise<{ results: TaskResu
 		} catch {}
 	};
 	process.once("exit", releaseLock);
-	const store = new SqliteStore(dbPath);
 	const results: TaskResult[] = [];
-	options.log?.(`Eval ${options.suite} (${tasks.length} tasks) -> ${dir}`);
-	try {
-		for (const task of tasks) results.push(await runTask(task, options, dir, store, dbPath));
-	} finally {
-		store.close();
-		releaseLock();
-	}
+	const roundPath = join(dir, "round.json");
+	const resultsPath = join(dir, "results.json");
 	const reportPath = join(dir, "report.md");
-	writeFileSync(join(dir, "results.json"), JSON.stringify(results, null, 2));
-	writeFileSync(reportPath, renderReport(`${options.suite}${options.mode === "solo" ? " (solo baseline)" : ""}`, results));
+	try {
+		writeFileSync(`${roundPath}.tmp`, JSON.stringify({ pid: process.pid, tasks: tasks.map(({ id, title }) => ({ id, title })) }));
+		renameSync(`${roundPath}.tmp`, roundPath);
+		options.log?.(`Eval ${options.suite} (${tasks.length} tasks) -> ${dir}`);
+		const store = new SqliteStore(dbPath);
+		try {
+			for (const task of tasks) {
+				results.push(await runTask(task, options, dir, store, dbPath));
+				writeFileSync(`${resultsPath}.tmp`, JSON.stringify(results, null, 2));
+				renameSync(`${resultsPath}.tmp`, resultsPath);
+			}
+		} finally {
+			store.close();
+		}
+		writeFileSync(`${reportPath}.tmp`, renderReport(`${options.suite}${options.mode === "solo" ? " (solo baseline)" : ""}`, results));
+		renameSync(`${reportPath}.tmp`, reportPath);
+	} finally {
+		releaseLock();
+		process.removeListener("exit", releaseLock);
+	}
 	return { results, dir, reportPath };
 }
 
 export function renderReport(suite: string, results: TaskResult[]): string {
-	const ok = results.filter((r) => r.health.status !== "fail").length;
+	const healthy = results.filter((r) => r.health.status === "ok").length;
 	const total = (k: keyof TaskResult["stats"]) => results.reduce((a, r) => a + Number(r.stats[k]), 0);
 	const lines = [
 		`# one_piece eval: ${suite}`,
 		"",
-		`${results.length} tasks · mean score ${(results.reduce((a, r) => a + r.score, 0) / results.length).toFixed(3)} · ${ok}/${results.length} ran without breaking · ${total("tokens").toLocaleString()} tokens · $${total("usd").toFixed(2)} est.`,
+		`${results.length} tasks · mean score ${(results.reduce((a, r) => a + r.score, 0) / results.length).toFixed(3)} · ${healthy}/${results.length} healthy · ${total("tokens").toLocaleString()} tokens · $${total("usd").toFixed(2)} est.`,
 		"",
 		"| Task | Category | Score | Health | Tokens | Tokens per point | Time | Parallelism (avg / peak) | Oversight share | Agents | Findings | Errors |",
 		"| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",

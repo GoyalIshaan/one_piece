@@ -57,6 +57,7 @@ they review.
 | Command | What it does |
 | --- | --- |
 | `run "<goal>"` | Plan, search, verify and report. Flags: `--provider`, `--kind`, `--workspace`, `--budget-tokens`, `--budget-usd`, `--concurrency`, `--rubric`, `--dashboard` |
+| `eval --suite smoke\|full` | Run the Mac evals and report task scores and harness health |
 | `dashboard` | Telemetry dashboard for this project's runs |
 | `runs` | List this project's runs |
 | `models <provider>` | List a provider's models |
@@ -65,6 +66,9 @@ they review.
 
 Each project keeps its own store, workspaces and reports in `./.one_piece`, so projects never
 share context.
+
+The Evals dashboard shows the current task, its last activity, and scores as tasks finish.
+Completed rounds save a report and machine-readable results in `./.one_piece/evals/`.
 
 ## Configuration
 
@@ -97,6 +101,7 @@ Optional `one-piece.config.json` in the project folder:
 | `packages/scheduler` | Resource pools, jobs, fair share, gates, cache |
 | `packages/module-*` | Plug-in modules: `workspace`, `questions`, `board`, `secrets` |
 | `packages/dashboard` | Telemetry server and web UI |
+| `packages/evals` | Eval tasks, graders, harness health checks and round reports |
 | `packages/cli` | The `one-piece` command |
 | `vendor/pi` | In-repo fork of [Pi](https://github.com/earendil-works/pi) (MIT): model layer, agent loop, durable runtime |
 
