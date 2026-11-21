@@ -1,0 +1,14 @@
+{
+	"name": "@one-piece/scheduler",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"license": "MIT",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@one-piece/core": "0.1.0",
+		"@earendil-works/pi-schema": "1.6.0"
+	}
+}

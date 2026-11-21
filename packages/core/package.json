@@ -1,0 +1,15 @@
+{
+	"name": "@one-piece/core",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"license": "MIT",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@earendil-works/pi-agent-core": "1.6.0",
+		"@earendil-works/pi-schema": "1.6.0",
+		"@earendil-works/pi-ai": "1.6.0"
+	}
+}
