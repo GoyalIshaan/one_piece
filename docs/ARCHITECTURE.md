@@ -41,7 +41,7 @@ report is a git commit in the leaf's workspace.
 The harness asks workers to report early while there is time to revise. When a worker exhausts
 its branch budget, it can use a short grace to file its first finding or address a review.
 At the run's reporting reserve (10% by default), new workers are blocked and background reviews
-stop. In-flight claims reviews can continue until the run budget is exhausted. At the cap, the
+stop. In-flight claims reviews and bounded revisions can continue until the run budget is exhausted. At the cap, the
 harness stops all agents and writes the evidence appendix, using the root's report if available.
 Any review still open is recorded as `unreviewed`. A response can take usage over the nominal cap
 because usage is reported at the end of each provider call.

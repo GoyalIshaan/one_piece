@@ -36,6 +36,8 @@ def t_delete():
     assert run(f, "list")[1] == ["#2 2026-01-01 2.00 y"]
     code, _, err = run(f, "delete", "9"); assert code == 2 and err.startswith("error:")
     assert run(f, "add", "4", "z", "--date", "2026-01-02")[1] == ["added #3 4.00 z"]
+    assert run(f, "delete", "3")[1] == ["deleted #3"]
+    assert run(f, "add", "5", "z", "--date", "2026-01-03")[1] == ["added #4 5.00 z"]
 def t_budget():
     f = fresh()
     assert run(f, "budget", "check", "--month", "2026-02")[1] == ["no budgets"]

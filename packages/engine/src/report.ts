@@ -147,10 +147,6 @@ export function installReporting(harness: Harness): void {
 					"[harness] The run budget is nearly exhausted. Wait for outstanding claims reviews if needed, call write_report with the supported results you have, then call finish.",
 				);
 			}
-			// A node whose finding is under claims review keeps going: the review is cheap and decides
-			// whether its work counts. Everything else stops now.
-			const underReview = (id: string) =>
-				tree.all().some((n) => n.role === "claims_reviewer" && n.targetNodeId === id && live(n.id));
 			const hardStop = fraction >= 1;
 			if (hardStop && !capped) {
 				capped = true;
@@ -159,10 +155,18 @@ export function installReporting(harness: Harness): void {
 					harness.finishRun(hasReport ? "done" : "stopped", "run budget exhausted");
 				});
 			}
+			const continueReview = new Set(
+				tree.all().filter((n) => n.role === "claims_reviewer" && n.targetNodeId && live(n.id)).map((n) => n.targetNodeId!),
+			);
+			if (!hardStop) {
+				for (const finding of harness.store.list<Finding>("findings", { runId: run.id })) {
+					if (finding.status === "needs_work" && finding.rounds.length < harness.config.claimsMaxRounds) continueReview.add(finding.nodeId);
+				}
+			}
 			for (const node of tree.all()) {
 				if (node.role !== "leaf" && node.role !== "internal") continue;
 				if (!live(node.id) || node.epoch !== run.epoch) continue;
-				if (!hardStop && tree.subtree(node.id).some((m) => underReview(m.id))) continue;
+				if (!hardStop && tree.subtree(node.id).some((m) => live(m.id) && continueReview.has(m.id))) continue;
 				harness.stopSubtree(node.id, "done", hardStop ? "run budget exhausted" : "run budget nearly exhausted");
 			}
 		}

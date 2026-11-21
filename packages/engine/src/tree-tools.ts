@@ -1,5 +1,5 @@
 import { arr, lit, num, obj, opt, str, union } from "@earendil-works/pi-schema";
-import { defineTool, EVIDENCE_LEVELS, type EvidenceLevel, type Finding, type Recommendation, type SwarmNode, TERMINAL_STATUSES } from "@one-piece/core";
+import { defineTool, EVIDENCE_LEVELS, type EvidenceLevel, type Finding, type Recommendation, type SwarmNode } from "@one-piece/core";
 import type { Harness } from "./harness.ts";
 import { briefFor } from "./prompts.ts";
 
@@ -41,6 +41,14 @@ function acceptedFindingsText(harness: Harness, nodeIds: Set<string>): string {
 		.join("\n");
 }
 
+function openWork(harness: Harness, managerId: string): SwarmNode[] {
+	const { tree } = harness;
+	const descendants = tree.subtree(managerId).filter((node) => node.id !== managerId);
+	const ids = new Set(descendants.map((node) => node.id));
+	const reviews = tree.all().filter((node) => node.role === "claims_reviewer" && node.targetNodeId && ids.has(node.targetNodeId));
+	return [...descendants, ...reviews].filter((node) => !tree.isTerminal(node.id));
+}
+
 /** Tools for root and internal nodes: grow, steer and prune the tree. */
 export function managerTools(harness: Harness, node: SwarmNode) {
 	if (node.role !== "root" && node.role !== "internal") return [];
@@ -49,6 +57,11 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 		const child = tree.get(id);
 		if (!child || child.parentId !== node.id) throw new Error(`${id} is not one of your children`);
 		return child;
+	};
+	const allocatableTokens = () => {
+		const remaining = harness.workBudgetRemaining().tokens ?? Number.POSITIVE_INFINITY;
+		const available = Math.max(0, Math.floor(Math.min(remaining, tree.available(node.id, "tokens"))));
+		return Number.isFinite(available) ? `Up to ${available} tokens can still be allocated to new children before the report reserve.` : "";
 	};
 
 	return [
@@ -116,10 +129,10 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 						tree.update(child.id, { model: { provider: choice.provider, id: choice.id } });
 					}
 					harness.launch(child, briefFor(child, integrationNote(harness, spec.start_from, spec.sources)));
-					created.push(`${child.id} (${child.role}${spec.model ? `, ${spec.model}` : ""}): ${spec.title}`);
+					created.push(`${child.id} (${child.role}${spec.model ? `, ${spec.model}` : ""}): ${spec.title}${child.budget.tokens === undefined ? "" : ` · ${child.budget.tokens} tokens`}`);
 				});
 				harness.bus.emit(node.runId, "tree.spawned", { count: created.length, call: live.spawnCalls }, node.id);
-				return `Spawned ${created.length} children:\n${created.join("\n")}\nCall wait_for_children to wait for their results.`;
+				return [`Spawned ${created.length} children:`, ...created, allocatableTokens(), "Call wait_for_children to wait for their results."].filter(Boolean).join("\n");
 			},
 		}),
 		defineTool({
@@ -132,10 +145,10 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 					const inbox = harness.drainInbox(node.id);
 					if (inbox.length) return inbox.join("\n\n");
 					const children = tree.children(node.id);
-					const open = children.filter((c) => !TERMINAL_STATUSES.includes(c.status));
+					const open = openWork(harness, node.id);
 					if (!open.length) {
 						const ids = new Set(children.flatMap((c) => tree.subtree(c.id).map((n) => n.id)));
-						return `ALL_SETTLED: none of your children are running.\n${children.map((c) => childSummary(harness, c)).join("\n")}\n\nAccepted findings in your subtree:\n${acceptedFindingsText(harness, ids)}`;
+						return `ALL_SETTLED: none of your children are running.\n${allocatableTokens()}\n${children.map((c) => childSummary(harness, c)).join("\n")}\n\nAccepted findings in your subtree:\n${acceptedFindingsText(harness, ids)}`;
 					}
 					await harness.park(
 						node.id,
@@ -150,7 +163,7 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 			parameters: obj({}),
 			async execute() {
 				const children = tree.children(node.id);
-				return children.length ? children.map((c) => childSummary(harness, c)).join("\n") : "You have no children.";
+				return [allocatableTokens(), children.length ? children.map((c) => childSummary(harness, c)).join("\n") : "You have no children."].filter(Boolean).join("\n");
 			},
 		}),
 		defineTool({
@@ -278,13 +291,10 @@ export function commonTools(harness: Harness, node: SwarmNode) {
 			parameters: obj({ status: union([lit("finished"), lit("needs_input")]), summary: str(), override_reason: opt(str()) }),
 			async execute(params) {
 				if ((node.role === "root" || node.role === "internal") && !params.override_reason) {
-					const subtree = harness.tree.subtree(node.id).filter((n) => n.id !== node.id && ["internal", "leaf"].includes(n.role));
-					const live = subtree.filter((n) => !TERMINAL_STATUSES.includes(n.status));
-					const ids = new Set(subtree.map((n) => n.id));
-					const reviews = harness.tree.all().filter((n) => n.role === "claims_reviewer" && n.targetNodeId && ids.has(n.targetNodeId) && !harness.tree.isTerminal(n.id));
-					if (live.length || reviews.length) {
+					const open = openWork(harness, node.id);
+					if (open.length) {
 						throw new Error(
-							`Not finished yet: ${live.length} descendants still working${reviews.length ? ` and ${reviews.length} claims reviews in progress` : ""}. ` +
+							`Not finished yet: ${open.length} descendants or claims reviews still working. ` +
 								"Wait for them (wait_for_children), cut them, or call finish again with override_reason explaining why their results are not needed.",
 						);
 					}

@@ -52,8 +52,10 @@ export interface HarnessConfig {
 	earlyReportFraction: number;
 	/** A new epoch is only considered while at least this fraction of the run budget remains. */
 	epochMinRemaining: number;
-	/** Turns a worker gets past its branch budget to submit or revise a finding. */
+	/** Turns a worker gets past its branch budget to submit a first finding. */
 	reportGraceTurns: number;
+	/** Turns to address a claims review, verify the change and resubmit after branch exhaustion. */
+	revisionGraceTurns: number;
 	/** Retries (with exponential backoff) after temporary provider errors such as overload or rate limits. */
 	maxRetries: number;
 	retryBaseMs: number;
@@ -77,6 +79,7 @@ export const DEFAULT_CONFIG: Omit<HarnessConfig, "runDir"> = {
 	earlyReportFraction: 0.45,
 	epochMinRemaining: 0.5,
 	reportGraceTurns: 2,
+	revisionGraceTurns: 4,
 	maxRetries: 4,
 	retryBaseMs: 5_000,
 	reviewCooldownTurns: 4,
@@ -335,15 +338,16 @@ export class Harness implements HarnessApi {
 				if (node.finishedSummary !== undefined || this.tree.isTerminal(node.id)) break;
 				const exhausted = TREE_ROLES.includes(node.role) ? this.tree.exhausted(node.id) : undefined;
 				if (exhausted) {
-					if (node.role === "leaf" && live.graceTurns === undefined && this.config.reportGraceTurns > 0) {
+					if (node.role === "leaf" && live.graceTurns === undefined) {
 						const findings = this.store.list<Finding>("findings", { runId: node.runId }).filter((f) => f.nodeId === node.id);
 						const revision = findings.findLast((f) => f.status === "needs_work" && f.rounds.length < this.config.claimsMaxRounds);
-						if (!findings.length || revision) {
-							live.graceTurns = this.config.reportGraceTurns;
+						const graceTurns = revision ? this.config.revisionGraceTurns : !findings.length ? this.config.reportGraceTurns : 0;
+						if (graceTurns > 0) {
+							live.graceTurns = graceTurns;
 							this.tree.update(node.id, { wrapUp: true });
-							this.bus.emit(node.runId, "budget.grace", { turns: live.graceTurns, findingId: revision?.id }, node.id);
+							this.bus.emit(node.runId, "budget.grace", { turns: graceTurns, findingId: revision?.id }, node.id);
 							message = revision
-								? `[harness] Your budget is used up. Use this short grace to address the review of ${revision.id} and call report_finding with revises="${revision.id}". Do nothing else.`
+								? `[harness] Your branch budget is used up. You have ${graceTurns} turns to make the requested changes, rerun the decisive check, and call report_finding with revises="${revision.id}". Reserve the last turn for submitting the finding.`
 								: "[harness] Your budget is used up. You have a final short grace to report: call report_finding now with your best verified result (or a negative result), then finish. Do nothing else.";
 							continue;
 						}
@@ -495,10 +499,9 @@ export class Harness implements HarnessApi {
 				return { action: "end" };
 			}
 			if (TREE_ROLES.includes(node.role) && this.tree.exhausted(node.id)) {
-				const grace = this.liveOf(node.id);
-				if (grace.graceTurns !== undefined && grace.graceTurns > 0) {
-					grace.graceTurns -= 1;
-					return undefined;
+				if (live.graceTurns !== undefined && live.graceTurns > 0) {
+					live.graceTurns -= 1;
+					if (live.graceTurns > 0) return undefined;
 				}
 				return { action: "end" };
 			}

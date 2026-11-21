@@ -394,11 +394,21 @@ async function loadRuns() {
 	if (S.runId) sel.value = S.runId;
 	sel.onchange = () => { S.runId = sel.value; S.sel = null; S.family = null; S.epoch = null; S.feed = []; S.fitted = false; closeDrawer(); connect(); refresh(true); };
 }
-function connect() {
+async function connect() {
 	S.source?.close();
-	if (!S.runId) return;
-	S.source = new EventSource(`/api/runs/${encodeURIComponent(S.runId)}/stream`);
-	S.source.onmessage = (m) => {
+	const runId = S.runId;
+	const version = S.connectionVersion = (S.connectionVersion ?? 0) + 1;
+	if (!runId) return;
+	const endpoint = `/api/runs/${encodeURIComponent(runId)}`;
+	const recent = await api(`${endpoint}/events?limit=240`).catch(() => []);
+	if (version !== S.connectionVersion) return;
+	S.feed = recent;
+	if (S.view === "feed") renderView();
+	const after = recent.at(-1)?.seq;
+	const source = new EventSource(`${endpoint}/stream${after === undefined ? "" : `?after=${after}`}`);
+	S.source = source;
+	source.onmessage = (m) => {
+		if (version !== S.connectionVersion) return;
 		const { events } = JSON.parse(m.data);
 		S.feed.push(...events); if (S.feed.length > 3000) S.feed = S.feed.slice(-3000);
 		if (S.view === "feed") renderView();
@@ -1219,9 +1229,9 @@ async function renderEvals() {
 function viewFeed() {
 	const allow = FEED_GROUPS[S.feedFilter], q = S.feedQuery.toLowerCase();
 	const rows = S.feed.filter((e) => (!allow || allow.includes(e.type)) && !e.type.endsWith(".updated") || (allow && allow.includes(e.type))).filter((e) => !q || `${e.type} ${titleOf(e.nodeId)} ${JSON.stringify(e.data)}`.toLowerCase().includes(q)).slice(-500).reverse();
-	return `<h1 class="view">Live feed</h1><p class="lede">Every event as it happens. Click a row to open its agent.</p>
+	return `<h1 class="view">Activity log</h1><p class="lede">Recent run events, updated live. Select a row to open its agent.</p>
 		<div class="filters">${Object.keys(FEED_GROUPS).map((k) => `<button class="${S.feedFilter === k ? "on" : ""}" data-feed="${k}">${k}</button>`).join("")}<input id="feedq" placeholder="Filter by text, agent or type" value="${esc(S.feedQuery)}"></div>
-		${rows.length ? rows.map((e) => `<div class="frow ${e.nodeId ? "click" : ""}" ${e.nodeId ? `data-node="${esc(e.nodeId)}" style="cursor:pointer"` : ""}><span class="dim num">${new Date(e.ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}</span><span class="ty">${esc(e.type)}</span><span class="soft" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.nodeId ? titleOf(e.nodeId) : "")}</span><span class="code dim" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(JSON.stringify(e.data).slice(0, 260))}</span></div>`).join("") : `<p class="empty">Waiting for events. This feed shows what happens from the moment the page opened.</p>`}`;
+		${rows.length ? rows.map((e) => `<div class="frow ${e.nodeId ? "click" : ""}" ${e.nodeId ? `data-node="${esc(e.nodeId)}" style="cursor:pointer"` : ""}><span class="dim num">${new Date(e.ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}</span><span class="ty">${esc(e.type)}</span><span class="soft" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.nodeId ? titleOf(e.nodeId) : "")}</span><span class="code dim" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(JSON.stringify(e.data).slice(0, 260))}</span></div>`).join("") : `<p class="empty">No events match this filter.</p>`}`;
 }
 
 // ---------- event binding ----------
