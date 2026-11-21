@@ -45,6 +45,8 @@ export interface HarnessConfig {
 	maxNudges: number;
 	/** Fraction of the run budget kept back so the root can always write its report. */
 	reportReserve: number;
+	/** Fraction of its own budget at which an agent is told to wrap up and report. */
+	budgetWarnFraction: number;
 	/** Retries (with exponential backoff) after temporary provider errors such as overload or rate limits. */
 	maxRetries: number;
 	retryBaseMs: number;
@@ -64,6 +66,7 @@ export const DEFAULT_CONFIG: Omit<HarnessConfig, "runDir"> = {
 	stallTurns: 8,
 	maxNudges: 3,
 	reportReserve: 0.05,
+	budgetWarnFraction: 0.7,
 	maxRetries: 4,
 	retryBaseMs: 5_000,
 	reviewCooldownTurns: 4,
@@ -88,6 +91,7 @@ interface Live {
 	reviewedFractions: Set<number>;
 	reviewing: boolean;
 	spawnCalls: number;
+	budgetWarned: boolean;
 }
 
 export type ToolFactory = (harness: Harness, node: SwarmNode) => AgentTool<any>[];
@@ -247,6 +251,7 @@ export class Harness implements HarnessApi {
 				reviewedFractions: new Set(),
 				reviewing: false,
 				spawnCalls: 0,
+				budgetWarned: false,
 			};
 			this.live.set(nodeId, live);
 		}
@@ -452,7 +457,29 @@ export class Harness implements HarnessApi {
 		const target = TREE_ROLES.includes(node.role) ? undefined : (node.targetNodeId ?? this.run().rootNodeId);
 		if (target && this.tree.get(target)) this.tree.chargeOversight(target, usage);
 		this.bus.emit(node.runId, "model.call", { ...record, role: node.role, target }, node.id);
+		this.warnBudget(node);
 		for (const hook of this.callHooks) hook(node, record);
+	}
+
+	/**
+	 * Agents cannot see their own budget, so without a nudge they polish until they are stopped and
+	 * never report. At `budgetWarnFraction` of its budget an agent is told to wrap up and report.
+	 */
+	private warnBudget(node: SwarmNode): void {
+		if (!TREE_ROLES.includes(node.role) || node.role === "root") return;
+		const live = this.liveOf(node.id);
+		if (live.budgetWarned || this.tree.isTerminal(node.id)) return;
+		const fraction = this.tree.fractionSpent(node.id);
+		if (fraction < this.config.budgetWarnFraction) return;
+		live.budgetWarned = true;
+		const pct = Math.round(fraction * 100);
+		this.bus.emit(node.runId, "budget.warned", { fraction }, node.id);
+		this.deliver(
+			node.id,
+			node.role === "leaf"
+				? `[harness] Budget: you have used ${pct}% of your budget. Stop exploring. Make sure your best result is in place, report it now with report_finding (negative results count), then finish.`
+				: `[harness] Budget: your branch has used ${pct}% of its budget. Stop spawning, integrate your children's accepted findings, report_finding, then finish.`,
+		);
 	}
 
 	private onAgentEvent(node: SwarmNode, event: AgentEvent): void {
