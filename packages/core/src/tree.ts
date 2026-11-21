@@ -36,6 +36,8 @@ function add(a: BudgetVector, b: BudgetVector): BudgetVector {
  */
 export class SwarmTree {
 	private readonly nodes = new Map<string, SwarmNode>();
+	/** Finished nodes whose leftover budget already went back to their parent. */
+	private readonly refundedIds = new Set<string>();
 
 	private readonly bus: EventBus;
 
@@ -209,7 +211,9 @@ export class SwarmTree {
 		const out: BudgetVector = {};
 		for (const kind of Object.keys(parent.budget)) {
 			const available = Math.max(0, this.available(parentId, kind));
-			out[kind] = Math.floor((available * Math.min(1, Math.max(0, share))) / Math.max(1, count));
+			const amount = (available * Math.min(1, Math.max(0, share))) / Math.max(1, count);
+			// Counts (tokens, seconds) are whole; money keeps cents.
+			out[kind] = kind === "usd" || kind.endsWith("_usd") ? Math.floor(amount * 100) / 100 : Math.floor(amount);
 		}
 		return out;
 	}
@@ -242,7 +246,7 @@ export class SwarmTree {
 		const child = this.require(childId);
 		const parent = child.parentId ? this.require(child.parentId) : undefined;
 		const taken: BudgetVector = {};
-		if (!parent) return taken;
+		if (!parent || this.refundedIds.has(childId)) return taken;
 		for (const kind of Object.keys(child.budget)) {
 			const free = Math.max(0, this.available(childId, kind));
 			const amount = Math.floor(free * Math.min(1, Math.max(0, fraction)));
@@ -274,14 +278,14 @@ export class SwarmTree {
 		if (!node.parentId || !TREE_ROLES.includes(node.role)) return;
 		const parent = this.get(node.parentId);
 		if (!parent) return;
+		if (this.refundedIds.has(id)) return;
+		this.refundedIds.add(id);
 		const spent = this.subtreeSpent(id);
 		for (const [kind, total] of Object.entries(node.budget)) {
 			const leftover = Math.max(0, total - (spent[kind] ?? 0));
 			if (leftover > 0) parent.refunded[kind] = (parent.refunded[kind] ?? 0) + leftover;
-			node.budget[kind] = Math.min(total, spent[kind] ?? 0);
 		}
 		this.persist(parent);
-		this.persist(node);
 	}
 
 	private persist(node: SwarmNode): void {

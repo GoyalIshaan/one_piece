@@ -2,8 +2,7 @@
 
 > The clean, living architecture is maintained in a separate working doc and will be mirrored to `docs/ARCHITECTURE.md`. This file keeps the raw research notes.
 
-> Status: **pre-design**. This file captures intent, prior art, and open questions.
-> Nothing gets built until the open questions below are answered.
+> Status: research notes from the design phase. v1 is built; see docs/ARCHITECTURE.md.
 > Created 2026-11-20.
 
 ---

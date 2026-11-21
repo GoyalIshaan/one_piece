@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>one_piece telemetry</title>
+<style>
+:root {
+	--bg: #fbfbfa; --panel: #ffffff; --line: #e6e4df; --ink: #1d1c1a; --quiet: #6b6862; --faint: #f2f1ee;
+	--accent: #2f6fd6; --good: #23864f; --warn: #b7791f; --bad: #c2412d; --violet: #6d4bd1;
+	--mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+	:root { --bg: #151514; --panel: #1c1c1b; --line: #2e2d2b; --ink: #ecebe8; --quiet: #9b988f; --faint: #232321; --accent: #6b9cf0; --good: #4cbf7f; --warn: #e0a84a; --bad: #ec6f5c; --violet: #a48af0; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
+header { display: flex; gap: 16px; align-items: center; padding: 10px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
+header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+header select { font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); max-width: 360px; }
+.kpis { display: flex; gap: 18px; color: var(--quiet); font-size: 13px; flex-wrap: wrap; }
+.kpis b { color: var(--ink); font-weight: 600; }
+nav { display: flex; gap: 2px; padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--panel); overflow-x: auto; }
+nav button { font: inherit; background: none; border: 0; padding: 9px 12px; color: var(--quiet); cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
+nav button.on { color: var(--ink); border-color: var(--ink); }
+nav .count { font-size: 11px; background: var(--faint); border-radius: 8px; padding: 0 6px; margin-left: 4px; }
+nav .count.hot { background: var(--bad); color: white; }
+main { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 0; min-height: calc(100vh - 92px); }
+main.wide { grid-template-columns: minmax(0, 1fr); }
+section.view { padding: 16px 20px; overflow: auto; }
+aside { border-left: 1px solid var(--line); background: var(--panel); padding: 16px; overflow: auto; max-height: calc(100vh - 92px); position: sticky; top: 92px; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; } aside { position: static; max-height: none; border-left: 0; border-top: 1px solid var(--line); } }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--quiet); margin: 18px 0 8px; font-weight: 600; }
+h2:first-child { margin-top: 0; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th { text-align: left; color: var(--quiet); font-weight: 500; border-bottom: 1px solid var(--line); padding: 6px 8px; white-space: nowrap; }
+td { border-bottom: 1px solid var(--line); padding: 6px 8px; vertical-align: top; }
+tr.click { cursor: pointer; } tr.click:hover td { background: var(--faint); }
+.mono { font-family: var(--mono); font-size: 12px; }
+.quiet { color: var(--quiet); }
+.pill { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px; background: var(--faint); color: var(--quiet); white-space: nowrap; }
+.pill.running { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
+.pill.parked { background: color-mix(in srgb, var(--violet) 16%, transparent); color: var(--violet); }
+.pill.done, .pill.accepted, .pill.succeeded, .pill.cached { background: color-mix(in srgb, var(--good) 16%, transparent); color: var(--good); }
+.pill.cut, .pill.failed, .pill.rejected, .pill.cancelled { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
+.pill.needs_work, .pill.pending_review, .pill.queued, .pill.gated, .pill.escalated, .pill.open { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.pill.merged, .pill.archived { background: var(--faint); color: var(--quiet); }
+.tree ul { list-style: none; margin: 0; padding-left: 18px; border-left: 1px dashed var(--line); }
+.tree > ul { padding-left: 0; border: 0; }
+.tree li { margin: 4px 0; }
+.node { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); cursor: pointer; }
+.node:hover { border-color: var(--quiet); }
+.node.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.node .title { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node .act { color: var(--quiet); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; grid-column: 2 / 4; }
+.role { font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--quiet); width: 52px; }
+.bar { height: 4px; background: var(--faint); border-radius: 2px; overflow: hidden; width: 80px; }
+.bar > i { display: block; height: 100%; background: var(--accent); }
+.bar.hot > i { background: var(--warn); }
+.metrics { display: flex; gap: 10px; align-items: center; font-size: 12px; color: var(--quiet); }
+.reviewers { margin: 2px 0 0 0; font-size: 11px; color: var(--quiet); }
+pre, .msg { white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 12px; background: var(--faint); padding: 8px 10px; border-radius: 6px; margin: 6px 0; max-height: 360px; overflow: auto; }
+.msg.thinking { border-left: 3px solid var(--violet); }
+.msg.tool { border-left: 3px solid var(--accent); }
+.feed .row { display: grid; grid-template-columns: 70px 150px 160px 1fr; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.md h1 { font-size: 20px; } .md h2 { text-transform: none; letter-spacing: 0; font-size: 16px; color: var(--ink); } .md h3 { font-size: 14px; }
+.md table td, .md table th { border: 1px solid var(--line); }
+textarea { width: 100%; font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); min-height: 60px; }
+button.primary { font: inherit; background: var(--ink); color: var(--bg); border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer; margin-top: 6px; }
+svg text { fill: var(--quiet); font-size: 11px; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+.empty { color: var(--quiet); padding: 24px 0; }
+dl { display: grid; grid-template-columns: 110px 1fr; gap: 4px 10px; margin: 0; font-size: 13px; }
+dt { color: var(--quiet); }
+dd { margin: 0; overflow-wrap: anywhere; }
+</style>
+</head>
+<body>
+<header>
+	<h1>one_piece</h1>
+	<select id="run"></select>
+	<div class="kpis" id="kpis"></div>
+</header>
+<nav id="tabs"></nav>
+<main id="main">
+	<section class="view" id="view"></section>
+	<aside id="side"></aside>
+</main>
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const fmt = (n) => (n ?? 0).toLocaleString();
+const ago = (ts) => { const s = Math.round((Date.now() - ts) / 1000); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`; };
+const pill = (s) => `<span class="pill ${esc(s)}">${esc(String(s).replace(/_/g, " "))}</span>`;
+let state = null, runId = null, tab = "tree", selected = null, feed = [], source = null;
+
+const TABS = [["tree", "Tree"], ["inbox", "Inbox"], ["findings", "Findings"], ["boards", "Boards"], ["resources", "Resources"], ["tokens", "Tokens"], ["epochs", "Epochs"], ["live", "Live"]];
+
+function md(text) {
+	const lines = esc(text).split("\n"); let out = "", inCode = false, inTable = false, inList = false;
+	const inline = (s) => s.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+	for (const line of lines) {
+		if (line.startsWith("```")) { out += inCode ? "</pre>" : "<pre>"; inCode = !inCode; continue; }
+		if (inCode) { out += line + "\n"; continue; }
+		if (/^\|.*\|$/.test(line.trim())) {
+			if (/^\|[\s:|-]+\|$/.test(line.trim())) continue;
+			if (!inTable) { out += "<table>"; inTable = true; }
+			out += "<tr>" + line.trim().slice(1, -1).split(/(?<!\\)\|/).map((c) => `<td>${inline(c.trim())}</td>`).join("") + "</tr>"; continue;
+		} else if (inTable) { out += "</table>"; inTable = false; }
+		if (/^\s*[-*] /.test(line)) { if (!inList) { out += "<ul>"; inList = true; } out += `<li>${inline(line.replace(/^\s*[-*] /, ""))}</li>`; continue; }
+		else if (inList) { out += "</ul>"; inList = false; }
+		const h = /^(#{1,4}) (.*)/.exec(line);
+		if (h) { out += `<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`; continue; }
+		out += line.trim() ? `<p>${inline(line)}</p>` : "";
+	}
+	if (inTable) out += "</table>"; if (inList) out += "</ul>"; if (inCode) out += "</pre>";
+	return `<div class="md">${out}</div>`;
+}
+
+async function api(path, init) { const r = await fetch(path, init); if (!r.ok) throw new Error(await r.text()); return r.json(); }
+
+async function loadRuns() {
+	const runs = await api("/api/runs");
+	const sel = $("#run");
+	sel.innerHTML = runs.map((r) => `<option value="${esc(r.id)}">${esc(r.goal.title)} · ${esc(r.status)} · ${new Date(r.createdAt).toLocaleString()}</option>`).join("") || "<option>No runs yet</option>";
+	if (!runId && runs[0]) runId = runs[0].id;
+	if (runId) sel.value = runId;
+	sel.onchange = () => { runId = sel.value; selected = null; feed = []; connect(); refresh(); };
+}
+
+function connect() {
+	source?.close();
+	if (!runId) return;
+	source = new EventSource(`/api/runs/${encodeURIComponent(runId)}/stream`);
+	source.onmessage = (m) => {
+		const { events } = JSON.parse(m.data);
+		feed.push(...events); if (feed.length > 1500) feed = feed.slice(-1500);
+		if (tab === "live") render();
+		if (selected && events.some((e) => e.nodeId === selected)) renderSide();
+	};
+}
+
+async function refresh() {
+	if (!runId) return;
+	state = await api(`/api/runs/${encodeURIComponent(runId)}/state`);
+	state.byId = Object.fromEntries(state.nodes.map((n) => [n.id, n]));
+	render();
+}
+
+const spentOf = (n) => n.spent?.tokens ?? 0;
+function subtreeSpent(id) { const n = state.byId[id]; if (!n) return 0; return spentOf(n) + (n.children || []).reduce((a, c) => a + subtreeSpent(c), 0); }
+
+function renderHeader() {
+	const r = state.run; if (!r) return;
+	const total = state.nodes.reduce((a, n) => a + spentOf(n), 0);
+	const usd = state.nodes.reduce((a, n) => a + (n.spent?.usd ?? 0), 0);
+	const running = state.nodes.filter((n) => n.status === "running").length;
+	const parked = state.nodes.filter((n) => n.status === "parked").length;
+	const accepted = state.findings.filter((f) => f.status === "accepted").length;
+	$("#kpis").innerHTML = [
+		`${pill(r.status)}`, `epoch <b>${r.epoch}</b>`,
+		`tokens <b>${fmt(total)}</b>${r.budget.tokens ? ` / ${fmt(r.budget.tokens)}` : ""}`, `cost <b>$${usd.toFixed(2)}</b>`,
+		`agents <b>${state.nodes.length}</b> (${running} running, ${parked} parked)`, `accepted findings <b>${accepted}</b>`,
+	].join("<span>·</span>");
+	const waiting = state.questions.filter((q) => q.holder === "user" && q.status !== "answered").length;
+	$("#tabs").innerHTML = TABS.map(([k, label]) => {
+		const n = k === "inbox" ? waiting : k === "findings" ? state.findings.length : 0;
+		return `<button class="${tab === k ? "on" : ""}" data-tab="${k}">${label}${n ? `<span class="count ${k === "inbox" ? "hot" : ""}">${n}</span>` : ""}</button>`;
+	}).join("");
+	document.querySelectorAll("#tabs button").forEach((b) => (b.onclick = () => { tab = b.dataset.tab; render(); }));
+}
+
+function nodeCard(n) {
+	const sub = subtreeSpent(n.id), budget = n.budget?.tokens;
+	const frac = budget ? Math.min(1, sub / budget) : 0;
+	const reviewers = state.nodes.filter((r) => r.targetNodeId === n.id && r.role !== "root" && r.parentId === n.id);
+	const rv = reviewers.length ? `<div class="reviewers">${reviewers.filter((r) => r.role === "claims_reviewer").length} claims reviews · ${reviewers.filter((r) => r.role === "hidden_reviewer").length} hidden reviews</div>` : "";
+	return `<div class="node ${selected === n.id ? "sel" : ""}" data-node="${esc(n.id)}">
+		<span class="role">${esc(n.role)}</span>
+		<span class="title" title="${esc(n.goal.text)}">${esc(n.goal.title)}</span>
+		<span class="metrics">${n.grade !== undefined ? `grade ${n.grade.toFixed(2)}` : ""} ${pill(n.status)} <span class="bar ${frac > 0.75 ? "hot" : ""}"><i style="width:${(frac * 100).toFixed(0)}%"></i></span> <span class="mono">${fmt(sub)}</span></span>
+		<span class="act">${esc(n.model ? `${n.model.provider}/${n.model.id} · ` : "")}${esc(n.activity ?? n.statusReason ?? "")}</span>
+	</div>${rv}`;
+}
+
+function renderTree() {
+	const roots = state.nodes.filter((n) => n.role === "root").sort((a, b) => b.epoch - a.epoch);
+	const build = (n) => `<li>${nodeCard(n)}${n.children?.length ? `<ul>${n.children.map((c) => state.byId[c]).filter(Boolean).map(build).join("")}</ul>` : ""}</li>`;
+	return `<div class="tree"><ul>${roots.map(build).join("")}</ul></div>`;
+}
+
+function renderInbox() {
+	const qs = state.questions.filter((q) => q.holder === "user");
+	const recs = state.recommendations.filter((r) => r.status === "open");
+	const reports = [...state.reports].sort((a, b) => b.createdAt - a.createdAt);
+	return `<h2>Questions for you</h2>${qs.length ? qs.map((q) => `<div class="card"><div>${pill(q.status)} <b>${esc(q.question)}</b></div>
+		<p class="quiet">${esc(q.context)}</p>${q.options.length ? `<p>Options: ${q.options.map(esc).join(" · ")}</p>` : ""}<p class="quiet">Default: ${esc(q.default)} · asked by ${esc(q.fromNode)} · ${ago(q.createdAt)}</p>
+		${q.status === "answered" ? `<p>Your answer: <b>${esc(q.answer)}</b></p>` : `<textarea id="ans-${esc(q.id)}" placeholder="Your answer"></textarea><button class="primary" data-answer="${esc(q.id)}">Send answer</button>`}</div>`).join("") : `<div class="empty">Nothing needs you right now.</div>`}
+		<h2>Reports</h2>${reports.length ? reports.map((r) => `<div class="card click" data-report="${esc(r.id)}"><b>${esc(r.title)}</b> <span class="pill">${esc(r.kind)}</span> <span class="quiet">epoch ${r.epoch} · ${ago(r.createdAt)}</span></div>`).join("") : `<div class="empty">No reports yet.</div>`}
+		<h2>Open reviewer recommendations</h2>${recs.length ? `<table><tr><th>Action</th><th>About</th><th>Grade</th><th>Promise</th><th>Reason</th><th>Decider</th></tr>${recs.map((r) => `<tr><td>${pill(r.action)}</td><td>${esc(state.byId[r.targetNodeId]?.goal.title ?? r.targetNodeId)}</td><td>${r.grade.toFixed(2)}</td><td>${r.promise.toFixed(2)}</td><td>${esc(r.reason)}</td><td class="mono">${esc(r.deciderNodeId)}</td></tr>`).join("")}</table>` : `<div class="empty">None open.</div>`}`;
+}
+
+function renderFindings() {
+	const order = { accepted: 0, needs_work: 1, pending_review: 2, rejected: 3 };
+	const fs = [...state.findings].sort((a, b) => order[a.status] - order[b.status] || b.updatedAt - a.updatedAt);
+	return fs.length ? `<table><tr><th>Status</th><th>Level</th><th>Conf.</th><th>Rounds</th><th>Claim</th><th>From</th></tr>${fs.map((f) => `<tr class="click" data-finding="${esc(f.id)}"><td>${pill(f.status)}</td><td>${esc(f.level)}</td><td>${f.confidence?.toFixed(2) ?? ""}</td><td>${f.rounds.length}</td><td>${esc(f.claim)}</td><td>${esc(state.byId[f.nodeId]?.goal.title ?? f.nodeId)}</td></tr>`).join("")}</table>` : `<div class="empty">No findings yet.</div>`;
+}
+
+function renderBoards() {
+	const fams = {};
+	for (const p of state.posts) (fams[p.familyId] ??= []).push(p);
+	const keys = Object.keys(fams);
+	return keys.length ? keys.map((fid) => `<div class="card"><b>Family of ${esc(state.byId[fid]?.goal.title ?? fid)}</b> <span class="quiet mono">${esc(fid)}</span>${fams[fid].slice(-40).reverse().map((p) => `<div style="margin-top:8px">${pill(p.kind)} <b>${esc(p.title)}</b> <span class="quiet">by ${esc(state.byId[p.authorNode]?.goal.title ?? p.authorNode)} · ${ago(p.createdAt)}</span><div class="msg">${esc(p.body)}</div></div>`).join("")}</div>`).join("") : `<div class="empty">No board posts yet.</div>`;
+}
+
+function renderResources() {
+	const pools = {};
+	for (const j of state.jobs) { const p = (pools[j.spec.pool] ??= { queued: 0, running: 0, done: 0, failed: 0, cached: 0, units: 0 }); const k = j.status === "succeeded" ? "done" : j.status === "gated" ? "queued" : j.status === "cancelled" ? "failed" : j.status; p[k] = (p[k] ?? 0) + 1; p.units += j.unitsUsed ?? 0; }
+	const jobs = [...state.jobs].sort((a, b) => b.queuedAt - a.queuedAt).slice(0, 200);
+	const prov = Object.entries(state.providers);
+	return `<h2>Resource pools</h2>${Object.keys(pools).length ? `<table><tr><th>Pool</th><th>Queued</th><th>Running</th><th>Done</th><th>Cached</th><th>Failed</th><th>Units used</th></tr>${Object.entries(pools).map(([k, p]) => `<tr><td>${esc(k)}</td><td>${p.queued}</td><td>${p.running}</td><td>${p.done}</td><td>${p.cached}</td><td>${p.failed}</td><td>${p.units.toFixed(2)}</td></tr>`).join("")}</table>` : `<div class="empty">No jobs submitted yet.</div>`}
+		<h2>Model providers</h2>${prov.length ? `<table><tr><th>Provider</th><th>Calls</th><th>Tokens</th><th>Cost</th><th>Avg wait for quota</th><th>Errors</th><th>Models</th></tr>${prov.map(([p, s]) => `<tr><td>${esc(p)}</td><td>${fmt(s.calls)}</td><td>${fmt(s.tokens)}</td><td>$${s.usd.toFixed(2)}</td><td>${(s.waitedMs / Math.max(1, s.calls) / 1000).toFixed(1)}s</td><td>${s.errors}</td><td class="mono">${Object.entries(s.models).map(([m, c]) => `${esc(m)}×${c}`).join(", ")}</td></tr>`).join("")}</table>` : `<div class="empty">No model calls yet.</div>`}
+		<h2>Jobs</h2>${jobs.length ? `<table><tr><th>Status</th><th>Pool</th><th>Command</th><th>Agent</th><th>Units</th><th>Queued</th></tr>${jobs.map((j) => `<tr><td>${pill(j.status)}</td><td>${esc(j.spec.pool)}</td><td class="mono">${esc(j.spec.command.slice(0, 120))}</td><td>${esc(state.byId[j.nodeId]?.goal.title ?? j.nodeId)}</td><td>${(j.unitsUsed ?? 0).toFixed(2)}</td><td>${ago(j.queuedAt)}</td></tr>`).join("")}</table>` : ""}`;
+}
+
+function chart(points, label, color) {
+	if (points.length < 2) return `<div class="empty">Not enough data yet.</div>`;
+	const W = 560, H = 160, P = 28; const x0 = points[0][0], x1 = points.at(-1)[0], ymax = Math.max(1, ...points.map((p) => p[1]));
+	const X = (t) => P + ((t - x0) / Math.max(1, x1 - x0)) * (W - 2 * P), Y = (v) => H - P + 4 - (v / ymax) * (H - 2 * P);
+	const d = points.map((p, i) => `${i ? "L" : "M"}${X(p[0]).toFixed(1)} ${Y(p[1]).toFixed(1)}`).join(" ");
+	return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(label)}"><line x1="${P}" x2="${W - P}" y1="${H - P + 4}" y2="${H - P + 4}" stroke="var(--line)"/><path d="${d}" fill="none" stroke="${color}" stroke-width="2"/><text x="${P}" y="14">${esc(label)} · max ${fmt(ymax)}</text><text x="${W - P}" y="${H - 6}" text-anchor="end">${Math.round((x1 - x0) / 60000)} min</text></svg>`;
+}
+
+function renderTokens() {
+	const roots = state.nodes.filter((n) => n.role === "root");
+	const trees = roots.flatMap((r) => (r.children || []).map((c) => state.byId[c])).filter(Boolean);
+	const families = state.nodes.filter((n) => (n.role === "root" || n.role === "internal") && n.children?.length);
+	const agents = [...state.nodes].sort((a, b) => spentOf(b) - spentOf(a)).slice(0, 60);
+	const row = (n, v) => `<tr class="click" data-node="${esc(n.id)}"><td>${esc(n.goal.title)}</td><td>${esc(n.role)}</td><td>${pill(n.status)}</td><td class="mono">${fmt(v)}</td><td class="mono">${fmt(n.budget?.tokens)}</td><td class="mono">${esc(n.model ? n.model.provider + "/" + n.model.id : "")}</td></tr>`;
+	return `<div class="grid2"><div class="card">${chart(state.series.tokens, "Tokens used over time", "var(--accent)")}</div><div class="card">${chart(state.series.accepted, "Accepted findings over time", "var(--good)")}</div></div>
+		<h2>By tree (root's branches)</h2><table><tr><th>Branch</th><th>Role</th><th>Status</th><th>Tokens (subtree)</th><th>Budget</th><th>Model</th></tr>${trees.map((n) => row(n, subtreeSpent(n.id))).join("")}</table>
+		<h2>By family (parent and its children)</h2><table><tr><th>Family head</th><th>Role</th><th>Status</th><th>Children's tokens</th><th>Budget</th><th>Model</th></tr>${families.map((n) => row(n, n.children.reduce((a, c) => a + subtreeSpent(c), 0))).join("")}</table>
+		<h2>By agent (own spend, includes its reviews)</h2><table><tr><th>Agent</th><th>Role</th><th>Status</th><th>Tokens</th><th>Budget</th><th>Model</th></tr>${agents.map((n) => row(n, spentOf(n))).join("")}</table>`;
+}
+
+function renderEpochs() {
+	return [...state.epochs].sort((a, b) => b.number - a.number).map((e) => `<div class="card"><b>Epoch ${e.number}</b> ${e.trigger ? pill(e.trigger) : ""} ${e.mode ? pill(e.mode) : ""} <span class="quiet">${new Date(e.startedAt).toLocaleString()}${e.endedAt ? ` → ${new Date(e.endedAt).toLocaleString()}` : " (current)"} · carried ${e.carried.length}</span>${e.handoff ? md(e.handoff) : ""}</div>`).join("") || `<div class="empty">One epoch so far.</div>`;
+}
+
+function renderLive() {
+	const rows = feed.slice(-400).reverse();
+	return `<div class="feed">${rows.map((e) => `<div class="row"><span class="quiet">${new Date(e.ts).toLocaleTimeString()}</span><span class="mono">${esc(e.type)}</span><span>${esc(state.byId[e.nodeId]?.goal.title ?? e.nodeId ?? "")}</span><span class="mono quiet">${esc(JSON.stringify(e.data).slice(0, 220))}</span></div>`).join("") || `<div class="empty">Waiting for events…</div>`}</div>`;
+}
+
+async function renderSide() {
+	const side = $("#side");
+	if (!selected || !state?.byId[selected]) { side.innerHTML = `<div class="quiet">Select an agent to see its goal, contract, checkpoint, thinking and tool calls.</div>`; return; }
+	const n = state.byId[selected];
+	const events = await api(`/api/runs/${encodeURIComponent(runId)}/events?node=${encodeURIComponent(selected)}&limit=120&types=agent.message,tool.call,tool.result,node.delivered,review.started`);
+	const fs = state.findings.filter((f) => f.nodeId === n.id);
+	side.innerHTML = `<h2>${esc(n.role)} · ${pill(n.status)}</h2><div style="font-weight:600;font-size:15px">${esc(n.goal.title)}</div>
+		<dl style="margin-top:8px"><dt>Id</dt><dd class="mono">${esc(n.id)}</dd><dt>Model</dt><dd>${esc(n.model ? n.model.provider + "/" + n.model.id : "")}</dd><dt>Spent</dt><dd class="mono">${esc(JSON.stringify(n.spent))}</dd><dt>Budget</dt><dd class="mono">${esc(JSON.stringify(n.budget))}</dd><dt>Turns</dt><dd>${n.turns}</dd>${n.grade !== undefined ? `<dt>Grade</dt><dd>${n.grade.toFixed(2)} (promise ${n.promise.toFixed(2)})</dd>` : ""}${n.statusReason ? `<dt>Status</dt><dd>${esc(n.statusReason)}</dd>` : ""}</dl>
+		<h2>Goal</h2><div class="msg">${esc(n.goal.text)}${n.goal.rubric ? `\n\nRubric: ${esc(n.goal.rubric)}` : ""}</div>
+		${n.contract ? `<h2>Contract v${n.contract.version}</h2><div class="msg">success: ${esc(n.contract.success.join("; "))}\nkill: ${esc(n.contract.kill.join("; "))}\nfirst check: ${esc(n.contract.firstCheck)}\naims for: ${esc(n.contract.evidenceLevel)}</div>` : ""}
+		${n.checkpoint ? `<h2>Checkpoint</h2><div class="msg">${esc(n.checkpoint)}</div>` : ""}
+		${fs.length ? `<h2>Findings</h2>${fs.map((f) => `<div class="card click" data-finding="${esc(f.id)}">${pill(f.status)} ${esc(f.claim)}</div>`).join("")}` : ""}
+		<h2>What it is thinking and doing</h2>${events.slice(-60).reverse().map((e) => e.type === "agent.message" ? `${e.data.thinking ? `<div class="msg thinking">${esc(e.data.thinking)}</div>` : ""}${e.data.text ? `<div class="msg">${esc(e.data.text)}</div>` : ""}` : e.type === "tool.call" ? `<div class="msg tool">→ ${esc(e.data.tool)} ${esc(JSON.stringify(e.data.args).slice(0, 600))}</div>` : e.type === "tool.result" ? `<div class="msg tool">← ${esc(e.data.tool)}${e.data.isError ? " (error)" : ""}\n${esc(e.data.text)}</div>` : `<div class="msg">${esc(e.type)}: ${esc(e.data.text ?? e.data.reason ?? "")}</div>`).join("") || `<div class="empty">No activity yet.</div>`}`;
+	bindClicks(side);
+}
+
+async function showFinding(id) {
+	const f = state.findings.find((x) => x.id === id); if (!f) return;
+	$("#side").innerHTML = `<h2>Finding ${pill(f.status)}</h2><div style="font-weight:600">${esc(f.claim)}</div><dl style="margin-top:8px"><dt>Level</dt><dd>${esc(f.level)}</dd><dt>Confidence</dt><dd>${f.confidence ?? "n/a"}</dd><dt>From</dt><dd>${esc(state.byId[f.nodeId]?.goal.title ?? f.nodeId)}</dd><dt>Evidence</dt><dd>${f.evidence.map(esc).join("<br>")}</dd><dt>Assumptions</dt><dd>${f.assumptions.map(esc).join("<br>") || "none"}</dd></dl><h2>Reasoning</h2><div class="msg">${esc(f.reasoning)}</div><h2>Review rounds</h2>${f.rounds.map((r) => `<div class="card">${pill(r.verdict)} round ${r.round} · ${esc(r.reviewerModel ? r.reviewerModel.provider + "/" + r.reviewerModel.id : "")}<div class="msg">${esc(r.message)}</div>${r.checksRun.length ? `<div class="quiet">checks: ${r.checksRun.map(esc).join("; ")}</div>` : ""}</div>`).join("") || `<div class="empty">Not reviewed yet.</div>`}`;
+}
+
+async function showReport(id) {
+	const r = await api(`/api/runs/${encodeURIComponent(runId)}/reports/${encodeURIComponent(id)}`);
+	tab = "report"; $("#main").className = "wide"; $("#view").innerHTML = `<button class="primary" id="back">← Back to inbox</button><div class="card" style="margin-top:12px">${md(r.markdown)}</div>`;
+	$("#back").onclick = () => { tab = "inbox"; render(); };
+}
+
+function bindClicks(root) {
+	root.querySelectorAll("[data-node]").forEach((el) => (el.onclick = () => { selected = el.dataset.node; if (tab !== "tree" && tab !== "tokens") tab = "tree"; render(); }));
+	root.querySelectorAll("[data-finding]").forEach((el) => (el.onclick = (ev) => { ev.stopPropagation(); showFinding(el.dataset.finding); }));
+	root.querySelectorAll("[data-report]").forEach((el) => (el.onclick = () => showReport(el.dataset.report)));
+	root.querySelectorAll("[data-answer]").forEach((el) => (el.onclick = async () => {
+		const id = el.dataset.answer, answer = document.getElementById(`ans-${id}`).value;
+		try { await api(`/api/questions/${encodeURIComponent(id)}/answer`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer }) }); el.textContent = "Sent; the swarm picks it up within seconds"; el.disabled = true; } catch (e) { alert(e.message); }
+	}));
+}
+
+function render() {
+	if (!state) { $("#view").innerHTML = `<div class="empty">No runs yet. Start one with <span class="mono">one-piece run "your goal"</span>.</div>`; return; }
+	renderHeader();
+	$("#main").className = tab === "tree" || tab === "tokens" ? "" : "wide";
+	const views = { tree: renderTree, inbox: renderInbox, findings: renderFindings, boards: renderBoards, resources: renderResources, tokens: renderTokens, epochs: renderEpochs, live: renderLive };
+	if (!views[tab]) return;
+	$("#view").innerHTML = views[tab]();
+	bindClicks($("#view"));
+	if (tab === "tree" || tab === "tokens") renderSide();
+}
+
+(async () => {
+	await loadRuns(); connect(); await refresh();
+	setInterval(async () => {
+		const typing = [...document.querySelectorAll("textarea")].some((t) => t.value || t === document.activeElement);
+		if (tab !== "report" && !typing) await refresh();
+	}, 3000);
+	setInterval(loadRuns, 15000);
+})();
+</script>
+</body>
+</html>
