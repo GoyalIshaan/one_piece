@@ -125,6 +125,11 @@ export function installOversight(harness: Harness): void {
 	const consultRootReviewer = async (trigger: EpochTrigger) => {
 		const run = harness.run();
 		if (state.consulting || run.status !== "running") return;
+		// A new epoch needs budget to get anywhere; late in the run it only throws away work in flight.
+		if (1 - runFraction(harness) < harness.config.epochMinRemaining) {
+			harness.bus.emit(run.id, "epoch.skipped", { trigger, reason: "too little run budget left for a new epoch" }, run.rootNodeId);
+			return;
+		}
 		state.consulting = true;
 		try {
 			const root = tree.require(run.rootNodeId);

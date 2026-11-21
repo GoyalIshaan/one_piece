@@ -11,7 +11,7 @@ describe("run end", () => {
 	it("closes findings still waiting for review as unreviewed instead of leaving them pending", async () => {
 		// The claims reviewer is slow: the run ends while it is still thinking.
 		const policy: FauxResponseFactory = async (context, options, state, model) => {
-			if (JSON.stringify(context.messages).includes("ROLE: claims_reviewer") || JSON.stringify(context.systemPrompt ?? "").includes("ROLE: claims_reviewer")) {
+			if (JSON.stringify(context.messages).includes("ROLE: claims_reviewer")) {
 				await new Promise((r) => setTimeout(r, 400));
 				return fauxAssistantMessage([fauxText("still checking")], { stopReason: "stop" });
 			}

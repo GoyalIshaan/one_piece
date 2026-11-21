@@ -5,6 +5,7 @@ import {
 	type BudgetVector,
 	type CallRecord,
 	EventBus,
+	type Finding,
 	type Goal,
 	type HarnessApi,
 	type HarnessModule,
@@ -47,6 +48,10 @@ export interface HarnessConfig {
 	reportReserve: number;
 	/** Fraction of its own budget at which an agent is told to wrap up and report. */
 	budgetWarnFraction: number;
+	/** Fraction of its budget at which a worker that has reported nothing is told to report what it has. */
+	earlyReportFraction: number;
+	/** A new epoch is only considered while at least this fraction of the run budget remains. */
+	epochMinRemaining: number;
 	/** Turns a worker gets past its budget to report a result it never reported. */
 	reportGraceTurns: number;
 	/** Retries (with exponential backoff) after temporary provider errors such as overload or rate limits. */
@@ -69,6 +74,8 @@ export const DEFAULT_CONFIG: Omit<HarnessConfig, "runDir"> = {
 	maxNudges: 3,
 	reportReserve: 0.05,
 	budgetWarnFraction: 0.7,
+	earlyReportFraction: 0.45,
+	epochMinRemaining: 0.5,
 	reportGraceTurns: 2,
 	maxRetries: 4,
 	retryBaseMs: 5_000,
@@ -95,6 +102,7 @@ interface Live {
 	reviewing: boolean;
 	spawnCalls: number;
 	budgetWarned: boolean;
+	earlyNudged?: boolean;
 	/** Extra turns a worker gets after its budget runs out, to report. Undefined until granted. */
 	graceTurns?: number;
 }
@@ -493,6 +501,20 @@ export class Harness implements HarnessApi {
 		const live = this.liveOf(node.id);
 		if (live.budgetWarned || this.tree.isTerminal(node.id)) return;
 		const fraction = this.tree.fractionSpent(node.id);
+		// A result reported late cannot be revised when the reviewer pushes back, so a worker that
+		// has reported nothing by mid-budget is asked to report what it has and keep improving.
+		if (node.role === "leaf" && !live.earlyNudged && fraction >= this.config.earlyReportFraction && fraction < this.config.budgetWarnFraction) {
+			live.earlyNudged = true;
+			const reported = this.store.list<Finding>("findings", { runId: node.runId }).some((f) => f.nodeId === node.id);
+			if (!reported) {
+				this.bus.emit(node.runId, "budget.early_report", { fraction }, node.id);
+				this.deliver(
+					node.id,
+					`[harness] You have used ${Math.round(fraction * 100)}% of your budget and reported nothing yet. If your deliverable works and passes your own check, report it now with report_finding so it can be reviewed while there is budget to fix what the reviewer finds; then keep improving and resubmit with revises=<id>. If you have no result yet, report what you have learned so far at level "hypothesis" only if it is useful; otherwise keep going.`,
+				);
+				return;
+			}
+		}
 		// Each turn resends the whole conversation, so turns get expensive: also warn when only a few
 		// turns' worth of tokens remain, whatever the percentage.
 		const last = this.lastCallTokens.get(node.id) ?? 0;

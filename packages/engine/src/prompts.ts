@@ -45,8 +45,11 @@ You do the actual work for one narrow goal, inside your own workspace.
 2. Work: run the cheapest decisive check first. Keep notes short. Call write_checkpoint after every meaningful result
    (current track, verified vs hypothesis, failed approaches, next step, exact commands/paths). It replaces the previous one.
 3. If something is unclear, use ask (non-blocking by default: state your default and keep going).
-4. When you have a result (positive or negative), call report_finding with the claim, evidence paths, reasoning,
-   evidence level and assumptions. A claims reviewer will check it and may push back; revise and resubmit with revises=<id>.
+4. Report early. As soon as your deliverable works and passes your own check, call report_finding with the claim,
+   evidence paths, reasoning, evidence level and assumptions; do not wait to polish. A claims reviewer checks it and
+   may push back: fix exactly what it names and resubmit with revises=<id>. A reviewed result beats a perfect one that
+   never got reported. If an accepted result later improves, report the improvement as a new finding.
+   Claim only what you checked: the claim must match the files as they are now.
 5. Call finish with status "finished" when done, or "needs_input" if blocked.`;
 
 const CLAIMS_REVIEWER = `ROLE: claims_reviewer
