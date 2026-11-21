@@ -58,7 +58,24 @@ export interface QuotaInfo {
 	calls: number;
 }
 
+/** One entry on the model menu managers choose from when they spawn children. */
+export interface ModelChoice {
+	/** What a manager passes: "provider:model-id". */
+	key: string;
+	provider: string;
+	id: string;
+	tier: "strong" | "fast" | "cheap" | "reasoning" | "coding";
+	note: string;
+	/** Dollars per million tokens, from the catalog. */
+	inputPerM?: number;
+	outputPerM?: number;
+}
+
 export interface ModelRouter {
+	/** Resolve credentials once before a run; providers without them are left off the menu. */
+	prepare?(): Promise<void>;
+	/** Models managers may assign to children. */
+	menu(): ModelChoice[];
 	/** Choose a model for a role, optionally avoiding providers (cross-provider review). */
 	pick(role: Role, options?: { avoidProviders?: string[] }): PickedModel;
 	resolve(picked: PickedModel): Model<Api>;

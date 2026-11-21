@@ -272,7 +272,8 @@ export class Harness implements HarnessApi {
 			updatedAt: now,
 		};
 		this.bus.save("runs", this.currentRun);
-		this.bus.emit(runId, "run.started", { goal, budget, providers: this.router.providers() });
+		await this.router.prepare?.();
+		this.bus.emit(runId, "run.started", { goal, budget, providers: this.router.providers(), menu: this.router.menu().map((m) => m.key) });
 		for (const module of this.modules) await module.setup?.(this);
 		const root = this.tree.create({ runId, epoch: 1, role: "root", goal, budget, modules: this.config.profile, caps: this.config.caps });
 		this.saveRun({ rootNodeId: root.id });
@@ -407,6 +408,17 @@ export class Harness implements HarnessApi {
 			if (moduleState(node, module.manifest.name) !== "active" || !module.manifest.roles.includes(node.role)) continue;
 			const section = module.prompt?.(ctx);
 			if (section) sections.push(section);
+		}
+		if (node.role === "root" || node.role === "internal") {
+			const menu = this.router.menu();
+			if (menu.length > 1) {
+				const price = (m: (typeof menu)[number]) => (m.inputPerM !== undefined ? ` (${m.inputPerM} / ${m.outputPerM} USD per million tokens in/out)` : "");
+				sections.push(
+					"Models you can give each child (spawn_children model=\"provider:id\"; omit for the default). Match the model to the job: " +
+						"cheap and fast ones for broad parallel exploration and simple checks, strong reasoning ones for the hardest sub-problems.\n" +
+						menu.map((m) => `- ${m.key}: ${m.tier}, ${m.note}${price(m)}`).join("\n"),
+				);
+			}
 		}
 		const deferred = this.deferredModules(node).map((m) => `${m.manifest.name}: ${m.manifest.summary}`);
 		const target = node.targetNodeId ? this.tree.get(node.targetNodeId) : undefined;

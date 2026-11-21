@@ -54,11 +54,18 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 						targets: opt(arr(str(), { description: "Concrete measurable targets" })),
 						kind: union([lit("explore"), lit("work")]),
 						budget_share: num({ minimum: 0.01, maximum: 1 }),
+						model: opt(str({ description: 'Optional model from your model menu, as "provider:model-id". Omit for the default.' })),
 					}),
 					{ minItems: 1 },
 				),
 			}),
 			async execute(params) {
+				const menu = harness.router.menu();
+				for (const spec of params.children) {
+					if (spec.model && !menu.some((m) => m.key === spec.model)) {
+						throw new Error(`Unknown model "${spec.model}". Choose from: ${menu.map((m) => m.key).join(", ")}`);
+					}
+				}
 				const check = tree.canSpawn(node.id, params.children.length);
 				if (!check.ok) throw new Error(`${check.reason}. Ask your reviewer path to raise caps, or cut/merge children first.`);
 				const live = harness.liveState(node.id);
@@ -75,8 +82,12 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 						goal: { title: spec.title, text: spec.goal, rubric: spec.rubric, targets: spec.targets },
 						budget: budgets[i],
 					});
+					if (spec.model) {
+						const choice = menu.find((m) => m.key === spec.model)!;
+						tree.update(child.id, { model: { provider: choice.provider, id: choice.id } });
+					}
 					harness.launch(child, briefFor(child));
-					created.push(`${child.id} (${child.role}): ${spec.title}`);
+					created.push(`${child.id} (${child.role}${spec.model ? `, ${spec.model}` : ""}): ${spec.title}`);
 				});
 				harness.bus.emit(node.runId, "tree.spawned", { count: created.length, call: live.spawnCalls }, node.id);
 				return `Spawned ${created.length} children:\n${created.join("\n")}\nCall wait_for_children to wait for their results.`;

@@ -15,7 +15,7 @@ import {
 	type MutableModels,
 	type Provider,
 } from "@earendil-works/pi-ai";
-import type { CallRecord, ModelRouter, PickedModel, QuotaInfo, Role } from "@one-piece/core";
+import type { CallRecord, ModelChoice, ModelRouter, PickedModel, QuotaInfo, Role } from "@one-piece/core";
 
 export type { CallRecord };
 
@@ -28,6 +28,8 @@ export interface ProviderConfig {
 	requestsPerMinute?: number;
 	/** Relative preference when several providers can serve a role. */
 	weight?: number;
+	/** Extra models managers may assign to children from this provider. */
+	offer?: Array<{ id: string; tier: ModelChoice["tier"]; note: string }>;
 }
 
 export interface RouterOptions {
@@ -162,7 +164,7 @@ export class Router implements ModelRouter {
 			this.models.setProvider(factory());
 		}
 		if (this.configs.some((c) => c.id === "sim")) {
-			const ids = [...new Set(this.configs.filter((c) => c.id === "sim").flatMap((c) => Object.values(c.models)))] as string[];
+			const ids = [...new Set(this.configs.filter((c) => c.id === "sim").flatMap((c) => [...Object.values(c.models), ...(c.offer ?? []).map((o) => o.id)]))] as string[];
 			this.sim = fauxProvider({ provider: "sim", models: ids.map((id) => ({ id, reasoning: false, contextWindow: 200_000 })) });
 			this.models.setProvider(this.sim.provider);
 			this.simPolicy = options.simPolicy;
@@ -176,8 +178,53 @@ export class Router implements ModelRouter {
 		return this.configs.map((c) => c.id);
 	}
 
+	/** Providers with working credentials. Undefined until prepare() ran: then everything counts as usable. */
+	private usable?: Set<string>;
+
+	async prepare(): Promise<void> {
+		const usable = new Set<string>();
+		for (const config of this.configs) {
+			if (config.id === "sim") {
+				usable.add("sim");
+				continue;
+			}
+			try {
+				if (await this.models.getAuth(config.id)) usable.add(config.id);
+			} catch {
+				// A broken credential means the provider is not usable for this run.
+			}
+		}
+		if (!usable.size) throw new Error(`No provider has credentials. Sign in with "one-piece login <provider>" or set its API key.`);
+		this.usable = usable;
+	}
+
+	private isUsable(provider: string): boolean {
+		return !this.usable || this.usable.has(provider);
+	}
+
+	menu(): ModelChoice[] {
+		const out: ModelChoice[] = [];
+		const seen = new Set<string>();
+		const add = (provider: string, id: string, tier: ModelChoice["tier"], note: string) => {
+			const key = `${provider}:${id}`;
+			if (seen.has(key) || !this.isUsable(provider)) return;
+			const model = this.models.getModel(provider, id);
+			if (!model && provider !== "sim") return;
+			seen.add(key);
+			out.push({ key, provider, id, tier, note, inputPerM: model?.cost?.input, outputPerM: model?.cost?.output });
+		};
+		for (const config of this.configs) {
+			const strong = config.models.root ?? config.models.default;
+			const worker = config.models.leaf ?? config.models.default;
+			if (strong) add(config.id, strong, "strong", "default model for planners and reviewers");
+			if (worker) add(config.id, worker, "fast", "default model for workers");
+			for (const offer of config.offer ?? []) add(config.id, offer.id, offer.tier, offer.note);
+		}
+		return out;
+	}
+
 	pick(role: Role, options: { avoidProviders?: string[] } = {}): PickedModel {
-		const serving = this.configs.filter((c) => c.models[role] ?? c.models.default);
+		const serving = this.configs.filter((c) => (c.models[role] ?? c.models.default) && this.isUsable(c.id));
 		if (!serving.length) throw new Error(`No provider is configured for role ${role}`);
 		const preferred = serving.filter((c) => !options.avoidProviders?.includes(c.id));
 		const pool = preferred.length ? preferred : serving;
