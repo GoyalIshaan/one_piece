@@ -203,6 +203,7 @@ export class SwarmTree {
 		node.spent = add(node.spent, usage);
 		node.updatedAt = Date.now();
 		this.persist(node);
+		if (TREE_ROLES.includes(node.role)) this.adjustLateSpend(node, usage);
 		this.bus.emit(node.runId, "budget.charged", { usage }, id);
 	}
 
@@ -212,14 +213,15 @@ export class SwarmTree {
 		node.oversight = add(node.oversight ?? {}, usage);
 		node.updatedAt = Date.now();
 		this.persist(node);
+		this.adjustLateSpend(node, usage);
 	}
 
 	/** Split part of the parent's available budget into one child's allocation. */
-	carve(parentId: string, share: number, count: number): BudgetVector {
+	carve(parentId: string, share: number, count: number, limit: BudgetVector = {}): BudgetVector {
 		const parent = this.require(parentId);
 		const out: BudgetVector = {};
 		for (const kind of Object.keys(parent.budget)) {
-			const available = Math.max(0, this.available(parentId, kind));
+			const available = Math.max(0, Math.min(this.available(parentId, kind), limit[kind] ?? Number.POSITIVE_INFINITY));
 			const amount = (available * Math.min(1, Math.max(0, share))) / Math.max(1, count);
 			// Counts (tokens, seconds) are whole; money keeps cents.
 			out[kind] = kind === "usd" || kind.endsWith("_usd") ? Math.floor(amount * 100) / 100 : Math.floor(amount);
@@ -291,10 +293,23 @@ export class SwarmTree {
 		this.refundedIds.add(id);
 		const spent = this.subtreeSpent(id);
 		for (const [kind, total] of Object.entries(node.budget)) {
-			const leftover = Math.max(0, total - (spent[kind] ?? 0));
-			if (leftover > 0) parent.refunded[kind] = (parent.refunded[kind] ?? 0) + leftover;
+			const adjustment = total - (spent[kind] ?? 0);
+			if (adjustment !== 0) parent.refunded[kind] = (parent.refunded[kind] ?? 0) + adjustment;
 		}
 		this.persist(parent);
+	}
+
+	/** A cancelled model call can return usage after its branch allocation has already settled. */
+	private adjustLateSpend(node: SwarmNode, usage: BudgetVector): void {
+		if (!node.parentId) return;
+		for (const branch of [node, ...this.ancestors(node.id)]) {
+			if (!this.refundedIds.has(branch.id) || !branch.parentId) continue;
+			const parent = this.require(branch.parentId);
+			for (const [kind, spent] of Object.entries(usage)) {
+				if (branch.budget[kind] !== undefined) parent.refunded[kind] = (parent.refunded[kind] ?? 0) - spent;
+			}
+			this.persist(parent);
+		}
 	}
 
 	private persist(node: SwarmNode): void {

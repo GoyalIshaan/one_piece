@@ -52,7 +52,7 @@ export interface HarnessConfig {
 	earlyReportFraction: number;
 	/** A new epoch is only considered while at least this fraction of the run budget remains. */
 	epochMinRemaining: number;
-	/** Turns a worker gets past its budget to report a result it never reported. */
+	/** Turns a worker gets past its branch budget to submit or revise a finding. */
 	reportGraceTurns: number;
 	/** Retries (with exponential backoff) after temporary provider errors such as overload or rate limits. */
 	maxRetries: number;
@@ -72,7 +72,7 @@ export const DEFAULT_CONFIG: Omit<HarnessConfig, "runDir"> = {
 	saturationWindow: 6,
 	stallTurns: 8,
 	maxNudges: 3,
-	reportReserve: 0.05,
+	reportReserve: 0.1,
 	budgetWarnFraction: 0.7,
 	earlyReportFraction: 0.45,
 	epochMinRemaining: 0.5,
@@ -171,6 +171,19 @@ export class Harness implements HarnessApi {
 		const run = this.run();
 		Object.assign(run, patch, { updatedAt: Date.now() });
 		this.bus.save("runs", run);
+	}
+
+	runSpent(): BudgetVector {
+		const spent: BudgetVector = {};
+		for (const node of this.tree.all()) {
+			for (const [kind, usage] of Object.entries(node.spent)) spent[kind] = (spent[kind] ?? 0) + usage;
+		}
+		return spent;
+	}
+
+	workBudgetRemaining(): BudgetVector {
+		const spent = this.runSpent();
+		return Object.fromEntries(Object.entries(this.run().budget).map(([kind, total]) => [kind, Math.max(0, total * (1 - this.config.reportReserve) - (spent[kind] ?? 0))]));
 	}
 
 	workspaceOf(nodeId: string): string | undefined {
@@ -322,14 +335,18 @@ export class Harness implements HarnessApi {
 				if (node.finishedSummary !== undefined || this.tree.isTerminal(node.id)) break;
 				const exhausted = TREE_ROLES.includes(node.role) ? this.tree.exhausted(node.id) : undefined;
 				if (exhausted) {
-					// A worker that never reported gets a short grace to file its result: work that is never
-					// reported is invisible to its parent and never verified.
-					const reported = this.store.list<{ nodeId: string }>("findings", { runId: node.runId }).some((f) => f.nodeId === node.id);
-					if (node.role === "leaf" && !reported && live.graceTurns === undefined) {
-						live.graceTurns = this.config.reportGraceTurns;
-						this.bus.emit(node.runId, "budget.grace", { turns: live.graceTurns }, node.id);
-						message = "[harness] Your budget is used up. You have a final short grace to report: call report_finding now with your best verified result (or a negative result), then finish. Do nothing else.";
-						continue;
+					if (node.role === "leaf" && live.graceTurns === undefined && this.config.reportGraceTurns > 0) {
+						const findings = this.store.list<Finding>("findings", { runId: node.runId }).filter((f) => f.nodeId === node.id);
+						const revision = findings.findLast((f) => f.status === "needs_work" && f.rounds.length < this.config.claimsMaxRounds);
+						if (!findings.length || revision) {
+							live.graceTurns = this.config.reportGraceTurns;
+							this.tree.update(node.id, { wrapUp: true });
+							this.bus.emit(node.runId, "budget.grace", { turns: live.graceTurns, findingId: revision?.id }, node.id);
+							message = revision
+								? `[harness] Your budget is used up. Use this short grace to address the review of ${revision.id} and call report_finding with revises="${revision.id}". Do nothing else.`
+								: "[harness] Your budget is used up. You have a final short grace to report: call report_finding now with your best verified result (or a negative result), then finish. Do nothing else.";
+							continue;
+						}
 					}
 					node.finishedSummary = `Stopped: ${exhausted} budget exhausted.`;
 					break;
@@ -363,8 +380,10 @@ export class Harness implements HarnessApi {
 				this.tree.setStatus(node.id, "done", node.finishedSummary);
 			}
 		} catch (error) {
-			if (!this.tree.isTerminal(node.id)) this.tree.setStatus(node.id, "failed", String(error));
-			this.bus.emit(node.runId, "agent.error", { error: String(error) }, node.id);
+			if (!live.abort.signal.aborted) {
+				if (!this.tree.isTerminal(node.id)) this.tree.setStatus(node.id, "failed", String(error));
+				this.bus.emit(node.runId, "agent.error", { error: String(error) }, node.id);
+			}
 		} finally {
 			if (live.holdsSlot) {
 				live.holdsSlot = false;
@@ -377,24 +396,30 @@ export class Harness implements HarnessApi {
 
 	/** Stop a node's subtree. Nothing is deleted: nodes are marked and their work archived. */
 	stopSubtree(nodeId: string, status: "cut" | "merged" | "archived" | "done", reason: string): void {
-		for (const member of this.tree.subtree(nodeId).reverse()) {
-			if (this.tree.isTerminal(member.id)) continue;
-			this.services.get("scheduler")?.cancelSubtree(member.id);
-			const live = this.live.get(member.id);
-			live?.abort.abort(reason);
-			live?.agent?.abort();
-			this.tree.setStatus(member.id, status, reason);
-			live?.resolveSettled();
+		const members = this.tree.subtree(nodeId);
+		const ids = new Set(members.map((node) => node.id));
+		for (const reviewer of this.tree.all()) {
+			if (reviewer.targetNodeId && ids.has(reviewer.targetNodeId)) this.stopNode(reviewer.id, status, reason);
 		}
+		for (const member of members.reverse()) this.stopNode(member.id, status, reason);
+	}
+
+	private stopNode(nodeId: string, status: "cut" | "merged" | "archived" | "done", reason: string): void {
+		if (this.tree.isTerminal(nodeId)) return;
+		this.services.get("scheduler")?.cancelSubtree(nodeId);
+		const live = this.live.get(nodeId);
+		live?.abort.abort(reason);
+		live?.agent?.abort();
+		this.tree.setStatus(nodeId, status, reason);
+		live?.resolveSettled();
 	}
 
 	finishRun(status: Run["status"], reason: string): void {
 		const run = this.run();
 		if (run.status !== "running") return;
-		for (const node of this.tree.all()) {
-			if (!this.tree.isTerminal(node.id) && node.role !== "root") this.stopSubtree(node.id, "done", reason);
-		}
 		this.saveRun({ status });
+		for (const node of this.tree.all().reverse()) this.stopNode(node.id, "done", reason);
+		this.bus.emit(run.id, "run.finishing", { status, reason });
 		this.bus.emit(run.id, "run.finished", { status, reason });
 		this.resolveDone?.();
 	}
@@ -465,6 +490,10 @@ export class Harness implements HarnessApi {
 			for (const wake of live.turnWaiters.splice(0)) wake();
 			for (const hook of this.turnHooks) hook(node);
 			if (node.finishedSummary !== undefined || this.tree.isTerminal(node.id)) return { action: "end" };
+			if ((node.role === "hidden_reviewer" || node.role === "root_reviewer") && node.turns >= 3) {
+				node.finishedSummary = "Stopped: oversight reviewer reached its three-turn limit.";
+				return { action: "end" };
+			}
 			if (TREE_ROLES.includes(node.role) && this.tree.exhausted(node.id)) {
 				const grace = this.liveOf(node.id);
 				if (grace.graceTurns !== undefined && grace.graceTurns > 0) {
@@ -483,12 +512,12 @@ export class Harness implements HarnessApi {
 		const usage = { tokens: record.totalTokens, usd: record.usd, [`tokens:${record.provider}`]: record.totalTokens };
 		// Every agent's own spend is its own, reviewers included. A reviewer's spend is also recorded
 		// as oversight on the node it reviews, which counts against that node's budget.
-		this.tree.charge(node.id, usage);
 		const target = TREE_ROLES.includes(node.role) ? undefined : (node.targetNodeId ?? this.run().rootNodeId);
 		if (target && this.tree.get(target)) this.tree.chargeOversight(target, usage);
+		this.tree.charge(node.id, usage);
 		this.bus.emit(node.runId, "model.call", { ...record, role: node.role, target }, node.id);
 		this.lastCallTokens.set(node.id, record.totalTokens);
-		this.warnBudget(node);
+		this.warnBudget(target ? this.tree.require(target) : node);
 		for (const hook of this.callHooks) hook(node, record);
 	}
 
@@ -528,7 +557,7 @@ export class Harness implements HarnessApi {
 		this.deliver(
 			node.id,
 			node.role === "leaf"
-				? `[harness] Budget: you have used ${pct}% of your budget. Stop exploring. Make sure your best result is in place, report it now with report_finding (negative results count), then finish.`
+				? `[harness] Budget: you have used ${pct}% of your budget. Stop exploring. If a reviewer asked for changes, address them and resubmit the finding. Otherwise, file your best checked result with report_finding, then finish.`
 				: `[harness] Budget: your branch has used ${pct}% of its budget. Stop spawning, integrate your children's accepted findings, report_finding, then finish.`,
 		);
 	}

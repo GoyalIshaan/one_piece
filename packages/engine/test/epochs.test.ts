@@ -8,6 +8,24 @@ import { describe, expect, it } from "vitest";
 import { createHarness, simPolicy } from "../src/index.ts";
 
 describe("epochs", () => {
+	it("keeps the current epoch if the review decision arrives after the budget cutoff", async () => {
+		const policy: FauxResponseFactory = (context, options, state, model) => {
+			if (JSON.stringify(context.messages).includes("ROLE: root_reviewer")) {
+				harness.tree.charge(harness.run().rootNodeId, { tokens: 550_000 });
+				return fauxAssistantMessage([fauxToolCall("decide_epoch", { start: true, reason: "test delayed decision" })], { stopReason: "toolUse" });
+			}
+			return simPolicy(context, options, state, model);
+		};
+		const store = new MemoryStore();
+		const router = new Router({ providers: [{ id: "sim", models: { default: "sim-a" }, maxConcurrent: 8, requestsPerMinute: 100000 }], simPolicy: policy });
+		const harness = createHarness({ store, router, config: { runDir: mkdtempSync(join(tmpdir(), "op-late-epoch-")), epochCheckpoints: [0.01] } });
+		const run = await harness.start({ title: "Late epoch test", text: "Find the value." }, { tokens: 1_000_000 });
+		await harness.done;
+		const events = store.events(run.id, { types: ["epoch.decision", "epoch.skipped", "epoch.started"] });
+		expect(events.map((event) => event.type)).toEqual(["epoch.decision", "epoch.skipped"]);
+		expect(harness.run().epoch).toBe(1);
+	});
+
 	it("the root reviewer can start a new epoch that carries a branch and archives the rest", async () => {
 		let started = false;
 		const policy: FauxResponseFactory = (context, options, state, model) => {

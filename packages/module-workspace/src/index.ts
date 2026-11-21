@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { arr, num, obj, opt, str } from "@earendil-works/pi-schema";
 import { defineTool, type HarnessApi, type HarnessEvent, type HarnessModule, type NodeContext, runCommand } from "@one-piece/core";
@@ -77,9 +77,9 @@ export function workspaceModule(): HarnessModule {
 			});
 		},
 		prompt(ctx: NodeContext) {
-			return ctx.node.role === "leaf"
-				? "Workspace: you have a private folder (a copy of the project). Use bash, read_file, write_file, edit_file, list_files. Commands run sandboxed: no sudo, no writes outside your folder. Every reported finding is committed."
-				: "You can read the author's workspace with read_file and list_files, and rerun commands in a scratch copy with run_check.";
+			if (ctx.node.role === "leaf") return "Workspace: you have a private folder (a copy of the project). Use bash, read_file, write_file, edit_file, list_files. Commands run sandboxed: no sudo, no writes outside your folder. Every reported finding is committed.";
+			if (ctx.node.role === "claims_reviewer") return "You can read the author's workspace with read_file and list_files, and rerun commands in a scratch copy with run_check.";
+			return "You can inspect the worker's workspace with read_file and list_files.";
 		},
 		tools(ctx: NodeContext) {
 			const { node } = ctx;
@@ -112,7 +112,8 @@ export function workspaceModule(): HarnessModule {
 					},
 				}),
 			];
-			if (node.role !== "leaf") {
+			if (node.role === "hidden_reviewer") return read;
+			if (node.role === "claims_reviewer") {
 				return [
 					...read,
 					defineTool({
@@ -120,12 +121,16 @@ export function workspaceModule(): HarnessModule {
 						description: "Rerun a command in a scratch copy of the author's workspace (the original is never changed).",
 						parameters: obj({ command: str(), timeout_seconds: opt(num({ minimum: 1, maximum: 3600 })) }),
 						async execute(params, signal) {
-							// A fresh copy per check: never reuse a previous run's state (or its read-only git objects).
-							const scratch = join(harness.workspaceOf(node.id)!, "..", `.check-${node.id}`);
-							rmSync(scratch, { recursive: true, force: true });
-							cpSync(root(), scratch, { recursive: true });
-							const result = await runCommand({ command: params.command, cwd: scratch, profile: "job", timeoutMs: (params.timeout_seconds ?? 300) * 1000, signal });
-							return harness.bus.redactor.redactText(`exit ${result.exitCode}${result.timedOut ? " (timed out)" : ""}\n${result.stdout}\n${result.stderr}`.trim());
+							const workspace = root();
+							// The agent can request multiple checks in the same tool batch.
+							const scratch = mkdtempSync(join(dirname(workspace), `.check-${node.id}-`));
+							try {
+								cpSync(workspace, scratch, { recursive: true });
+								const result = await runCommand({ command: params.command, cwd: scratch, profile: "job", timeoutMs: (params.timeout_seconds ?? 300) * 1000, signal });
+								return harness.bus.redactor.redactText(`exit ${result.exitCode}${result.timedOut ? " (timed out)" : ""}\n${result.stdout}\n${result.stderr}`.trim());
+							} finally {
+								rmSync(scratch, { recursive: true, force: true });
+							}
 						},
 					}),
 				];

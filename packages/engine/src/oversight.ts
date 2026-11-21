@@ -65,15 +65,9 @@ function dossier(harness: Harness, target: SwarmNode, reason: string): string {
 		.join("\n\n");
 }
 
-function totalSpent(harness: Harness): BudgetVector {
-	const out: BudgetVector = {};
-	for (const node of harness.tree.all()) for (const [k, v] of Object.entries(node.spent)) out[k] = (out[k] ?? 0) + v;
-	return out;
-}
-
 export function runFraction(harness: Harness): number {
 	const run = harness.run();
-	const spent = totalSpent(harness);
+	const spent = harness.runSpent();
 	let max = 0;
 	for (const [k, total] of Object.entries(run.budget)) if (total > 0) max = Math.max(max, (spent[k] ?? 0) / total);
 	return max;
@@ -88,7 +82,9 @@ export function installOversight(harness: Harness): void {
 		if (!nodeId) return;
 		const node = tree.get(nodeId);
 		if (!node || !["internal", "leaf"].includes(node.role) || TERMINAL_STATUSES.includes(node.status)) return;
-		if (harness.run().status !== "running") return;
+		const run = harness.run();
+		if (run.status !== "running" || tree.require(run.rootNodeId).wrapUp) return;
+		if (tree.all().some((reviewer) => reviewer.role === "claims_reviewer" && reviewer.targetNodeId === nodeId && !tree.isTerminal(reviewer.id))) return;
 		const live = harness.liveState(nodeId);
 		if (live.reviewing) return;
 		// Space reviews out: one review every few turns per node, so oversight stays cheaper than the work.
@@ -122,14 +118,18 @@ export function installOversight(harness: Harness): void {
 		await harness.runNode(reviewer, `${reviewer.goal.text}\n\nCall recommend once.`);
 	};
 
+	const epochHasBudget = (trigger: EpochTrigger): boolean => {
+		const run = harness.run();
+		if (tree.isTerminal(run.rootNodeId)) return false;
+		if (!tree.require(run.rootNodeId).wrapUp && 1 - runFraction(harness) >= harness.config.epochMinRemaining) return true;
+		harness.bus.emit(run.id, "epoch.skipped", { trigger, reason: "too little run budget left for a new epoch" }, run.rootNodeId);
+		return false;
+	};
+
 	const consultRootReviewer = async (trigger: EpochTrigger) => {
 		const run = harness.run();
 		if (state.consulting || run.status !== "running") return;
-		// A new epoch needs budget to get anywhere; late in the run it only throws away work in flight.
-		if (1 - runFraction(harness) < harness.config.epochMinRemaining) {
-			harness.bus.emit(run.id, "epoch.skipped", { trigger, reason: "too little run budget left for a new epoch" }, run.rootNodeId);
-			return;
-		}
+		if (!epochHasBudget(trigger)) return;
 		state.consulting = true;
 		try {
 			const root = tree.require(run.rootNodeId);
@@ -158,7 +158,9 @@ export function installOversight(harness: Harness): void {
 			await harness.runNode(reviewer, `${text}\n\nCall decide_epoch once.`);
 			const decision = epochDecisions.get(reviewer.id);
 			epochDecisions.delete(reviewer.id);
-			if (decision?.start && harness.run().status === "running") startEpoch(decision, decision.trigger ?? trigger);
+			const decidedTrigger = decision?.trigger ?? trigger;
+			// Workers keep spending while the root reviewer is deciding.
+			if (decision?.start && harness.run().status === "running" && epochHasBudget(decidedTrigger)) startEpoch(decision, decidedTrigger);
 		} finally {
 			state.consulting = false;
 		}
@@ -170,7 +172,7 @@ export function installOversight(harness: Harness): void {
 		const mode: EpochMode = decision.mode ?? (trigger === "A_saturation" ? "mix" : trigger === "B_reframe" ? "fresh" : "carry");
 		const inTree = new Set(tree.subtree(oldRoot.id).map((n) => n.id));
 		const carry = mode === "fresh" ? [] : (decision.carry ?? []).filter((id) => id !== oldRoot.id && inTree.has(id) && !tree.isTerminal(id));
-		const spent = totalSpent(harness);
+		const spent = harness.runSpent();
 		const remaining: BudgetVector = {};
 		for (const [k, v] of Object.entries(run.budget)) remaining[k] = Math.max(0, v - (spent[k] ?? 0));
 		const number = run.epoch + 1;
@@ -202,7 +204,7 @@ export function installOversight(harness: Harness): void {
 		harness.saveRun({ rootNodeId: newRoot.id, epoch: number });
 		harness.bus.emit(run.id, "epoch.started", { number, trigger, mode, carried: carry, reason: decision.reason }, newRoot.id);
 		const carriedText = carry.length ? `\n\n## Branches carried over (now your children)\n${carry.map((id) => childSummary(harness, tree.require(id))).join("\n")}` : "";
-		harness.launch(newRoot, briefFor(newRoot, `## State of knowledge from epoch ${run.epoch}\n${handoff}${carriedText}`));
+		harness.launch(newRoot, briefFor(newRoot, `## State of knowledge from epoch ${number - 1}\n${handoff}${carriedText}`));
 	};
 
 	// --- triggers ---------------------------------------------------------------------------
@@ -238,8 +240,10 @@ export function installOversight(harness: Harness): void {
 	});
 
 	harness.bus.on((event: HarnessEvent) => {
-		if (event.type === "finding.reported") scheduleReview(event.nodeId, "it claimed a finding");
-		if (event.type === "finding.verdict" && event.data.verdict === "accepted") state.reviewsSinceAccepted = 0;
+		if (event.type === "finding.verdict") {
+			if (event.data.verdict === "accepted") state.reviewsSinceAccepted = 0;
+			scheduleReview(event.nodeId, `claims review returned ${String(event.data.verdict)}`);
+		}
 		if (event.type === "tree.spawned" && Number(event.data.call) > 1) scheduleReview(event.nodeId, "it asked to spawn more children");
 	});
 

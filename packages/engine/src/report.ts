@@ -78,6 +78,7 @@ export function reportAppendix(harness: Harness): string {
 
 export function installReporting(harness: Harness): void {
 	let warned = false;
+	let capped = false;
 	let finalized = false;
 
 	const finalize = (reason: string) => {
@@ -96,7 +97,6 @@ export function installReporting(harness: Harness): void {
 		const path = harness.writeReportFile("report.md", markdown);
 		harness.bus.save("reports", { id: newId("report"), runId: run.id, epoch: run.epoch, kind: "final", title: `${run.goal.title} (with evidence trail)`, markdown, createdAt: Date.now() });
 		harness.bus.emit(run.id, "report.written", { path });
-		harness.finishRun("done", reason);
 	};
 
 	harness.addTools((h, node) => {
@@ -120,33 +120,50 @@ export function installReporting(harness: Harness): void {
 	harness.bus.on((event: HarnessEvent) => {
 		if (finalized) return;
 		const run = harness.run();
-		if (event.type === "root.finished" && event.nodeId === run.rootNodeId) {
-			const rootId = run.rootNodeId;
-			void harness.whenSettled(rootId).then(() => finalize("root finished"));
+		if (event.type === "run.finishing") {
+			finalize(String(event.data.reason ?? "run stopped"));
+			return;
 		}
+		if (run.status !== "running") return;
 		if (event.type === "node.status" && event.nodeId === run.rootNodeId && ["done", "failed"].includes(String(event.data.status))) {
-			queueMicrotask(() => finalize(`root ${event.data.status}: ${event.data.reason ?? ""}`));
+			queueMicrotask(() => harness.finishRun(event.data.status === "failed" ? "failed" : "done", `root ${event.data.status}: ${event.data.reason ?? ""}`));
 		}
-		if (event.type === "budget.charged" && runFraction(harness) >= 1 - harness.config.reportReserve) {
+		if (event.type !== "budget.charged") return;
+		const fraction = runFraction(harness);
+		if (fraction >= 1 - harness.config.reportReserve) {
 			const { tree } = harness;
 			const live = (id: string) => !tree.isTerminal(id);
+			if (!warned) {
+				warned = true;
+				tree.update(run.rootNodeId, { wrapUp: true });
+				harness.bus.emit(run.id, "budget.report_reserve", { fraction, reserve: harness.config.reportReserve }, run.rootNodeId);
+				for (const reviewer of tree.all()) {
+					if (reviewer.role === "hidden_reviewer" || reviewer.role === "root_reviewer") {
+						harness.stopSubtree(reviewer.id, "done", "run budget reserved for claims review and reporting");
+					}
+				}
+				harness.deliver(
+					run.rootNodeId,
+					"[harness] The run budget is nearly exhausted. Wait for outstanding claims reviews if needed, call write_report with the supported results you have, then call finish.",
+				);
+			}
 			// A node whose finding is under claims review keeps going: the review is cheap and decides
 			// whether its work counts. Everything else stops now.
 			const underReview = (id: string) =>
 				tree.all().some((n) => n.role === "claims_reviewer" && n.targetNodeId === id && live(n.id));
-			const hardStop = runFraction(harness) >= 1;
+			const hardStop = fraction >= 1;
+			if (hardStop && !capped) {
+				capped = true;
+				queueMicrotask(() => {
+					const hasReport = harness.store.list<Report>("reports", { runId: run.id }).some((report) => report.kind === "final");
+					harness.finishRun(hasReport ? "done" : "stopped", "run budget exhausted");
+				});
+			}
 			for (const node of tree.all()) {
 				if (node.role !== "leaf" && node.role !== "internal") continue;
 				if (!live(node.id) || node.epoch !== run.epoch) continue;
 				if (!hardStop && tree.subtree(node.id).some((m) => underReview(m.id))) continue;
 				harness.stopSubtree(node.id, "done", hardStop ? "run budget exhausted" : "run budget nearly exhausted");
-			}
-			if (!warned) {
-				warned = true;
-				harness.deliver(
-					run.rootNodeId,
-					"[harness] The run budget is nearly exhausted. Branches were stopped, except findings already under review, which may still be accepted. Call write_report now (wait_for_children first if a review is pending), then finish.",
-				);
 			}
 		}
 	});

@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai";
 import { type Assumption, type BoardPost, type Finding, MemoryStore, type Question } from "@one-piece/core";
 import { boardModule } from "@one-piece/module-board";
 import { questionsModule } from "@one-piece/module-questions";
@@ -12,6 +13,30 @@ import { describe, expect, it } from "vitest";
 import { createHarness, simPolicy } from "../src/index.ts";
 
 describe("engine with every module plugged in", () => {
+	it("gives concurrent claims checks distinct copies of the same workspace", async () => {
+		const store = new MemoryStore();
+		const policy: FauxResponseFactory = (context, options, state, model) => {
+			const text = JSON.stringify(context.messages);
+			if (text.includes("ROLE: claims_reviewer") && text.includes("The simulated result is 42.") && !text.includes('"toolName":"run_check"')) {
+				return fauxAssistantMessage([
+					fauxToolCall("run_check", { command: "sleep 0.05 && pwd && cat result.md" }),
+					fauxToolCall("run_check", { command: "pwd && cat result.md" }),
+				], { stopReason: "toolUse" });
+			}
+			return simPolicy(context, options, state, model);
+		};
+		const router = new Router({ providers: [{ id: "sim", models: { default: "sim-a" }, maxConcurrent: 8, requestsPerMinute: 100000 }], simPolicy: policy });
+		const harness = createHarness({ store, router, modules: [workspaceModule()], config: { runDir: mkdtempSync(join(tmpdir(), "op-check-")), profile: { workspace: "active" } } });
+		const run = await harness.start({ title: "Concurrent checks", text: "Find the value." }, { tokens: 400_000 });
+		await harness.done;
+		const reviewer = harness.tree.all().find((node) => node.role === "claims_reviewer" && harness.tree.require(node.targetNodeId!).role === "leaf")!;
+		const checks = store.events(run.id, { nodeId: reviewer.id, types: ["tool.result"] }).filter((event) => event.data.tool === "run_check");
+		expect(checks).toHaveLength(2);
+		const outputs = checks.map((event) => String(event.data.text).split("\n"));
+		expect(outputs.every((lines) => lines[0] === "exit 0" && lines.includes("value = 42"))).toBe(true);
+		expect(outputs[0][1]).not.toBe(outputs[1][1]);
+	});
+
 	it("runs leaves in sandboxed workspaces with boards, questions and an evidence-rich report", async () => {
 		const store = new MemoryStore();
 		const runDir = mkdtempSync(join(tmpdir(), "op-mod-"));

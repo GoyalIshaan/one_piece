@@ -93,7 +93,7 @@ export interface SwarmNode {
 	oversight: BudgetVector;
 	/** Sum of the budgets handed to its children. */
 	allocatedToChildren: BudgetVector;
-	/** Leftover budgets returned by finished children. */
+	/** Net budget adjustment from finished children, including deductions for overspend. */
 	refunded: BudgetVector;
 	modules: Record<string, ModuleState>;
 	model?: ModelRef;

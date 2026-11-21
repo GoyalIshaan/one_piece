@@ -76,6 +76,9 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 				),
 			}),
 			async execute(params) {
+				if (tree.require(harness.run().rootNodeId).wrapUp) throw new Error("The run budget is reserved for outstanding reviews and the final report.");
+				const totalShare = params.children.reduce((sum, child) => sum + child.budget_share, 0);
+				if (totalShare > 1 + 1e-9) throw new Error("Child budget shares must add up to 1 or less.");
 				const menu = harness.router.menu();
 				for (const spec of params.children) {
 					if (spec.model && !menu.some((m) => m.key === spec.model)) {
@@ -91,9 +94,11 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 				}
 				const check = tree.canSpawn(node.id, params.children.length);
 				if (!check.ok) throw new Error(`${check.reason}. Ask your reviewer path to raise caps, or cut/merge children first.`);
+				const remaining = harness.workBudgetRemaining();
+				const budgets = params.children.map((c) => tree.carve(node.id, c.budget_share, 1, remaining));
+				if (budgets.some((budget) => budget.tokens === 0 || budget.usd === 0)) throw new Error("There is no model-call budget for one or more requested children.");
 				const live = harness.liveState(node.id);
 				live.spawnCalls += 1;
-				const budgets = params.children.map((c) => tree.carve(node.id, c.budget_share, 1));
 				const created: string[] = [];
 				params.children.forEach((spec, i) => {
 					const atDepthCap = node.depth + 2 > node.caps.maxDepth;
@@ -190,13 +195,13 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 				kind: union([lit("explore"), lit("work")]),
 			}),
 			async execute(params) {
+				if (tree.require(harness.run().rootNodeId).wrapUp) throw new Error("The run budget is reserved for outstanding reviews and the final report.");
 				const merged = params.child_ids.map(ensureChild);
 				const ids = new Set(merged.flatMap((c) => tree.subtree(c.id).map((n) => n.id)));
 				const context = merged.map((c) => `### ${c.goal.title} (${c.id})\n${c.checkpoint ?? "(no checkpoint)"}`).join("\n\n");
 				for (const child of merged) tree.reclaim(child.id, 1);
 				for (const child of merged) harness.stopSubtree(child.id, "merged", "merged into successor");
-				const budget = tree.carve(node.id, 1, 1);
-				const share = Object.fromEntries(Object.entries(budget).map(([k, v]) => [k, Math.floor(v * 0.6)]));
+				const share = tree.carve(node.id, 0.6, 1, harness.workBudgetRemaining());
 				const successor = tree.create({
 					runId: node.runId,
 					epoch: node.epoch,
@@ -269,19 +274,17 @@ export function commonTools(harness: Harness, node: SwarmNode) {
 			name: "finish",
 			description:
 				"End your work. status: finished (goal handled), needs_input (blocked). Report findings before finishing. " +
-				"Managers are refused while children are still working or findings are unresolved, unless they pass override_reason.",
+				"Managers are refused while descendants or claims reviews are still working, unless they pass override_reason.",
 			parameters: obj({ status: union([lit("finished"), lit("needs_input")]), summary: str(), override_reason: opt(str()) }),
 			async execute(params) {
 				if ((node.role === "root" || node.role === "internal") && !params.override_reason) {
 					const subtree = harness.tree.subtree(node.id).filter((n) => n.id !== node.id && ["internal", "leaf"].includes(n.role));
 					const live = subtree.filter((n) => !TERMINAL_STATUSES.includes(n.status));
 					const ids = new Set(subtree.map((n) => n.id));
-					const open = harness.store
-						.list<Finding>("findings", { runId: node.runId })
-						.filter((f) => ids.has(f.nodeId) && (f.status === "pending_review" || f.status === "needs_work"));
-					if (live.length || open.length) {
+					const reviews = harness.tree.all().filter((n) => n.role === "claims_reviewer" && n.targetNodeId && ids.has(n.targetNodeId) && !harness.tree.isTerminal(n.id));
+					if (live.length || reviews.length) {
 						throw new Error(
-							`Not finished yet: ${live.length} descendants still working${open.length ? ` and ${open.length} findings unresolved (${open.map((f) => f.id).join(", ")})` : ""}. ` +
+							`Not finished yet: ${live.length} descendants still working${reviews.length ? ` and ${reviews.length} claims reviews in progress` : ""}. ` +
 								"Wait for them (wait_for_children), cut them, or call finish again with override_reason explaining why their results are not needed.",
 						);
 					}

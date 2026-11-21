@@ -28,6 +28,19 @@ describe("budgets", () => {
 		expect(t.available(root.id, "tokens")).toBe(900);
 	});
 
+	it("deducts child overages and late review usage from the parent allocation", () => {
+		const t = tree();
+		const root = t.create({ runId: "r", epoch: 1, role: "root", goal: { title: "g", text: "g" }, budget: { tokens: 1000 } });
+		const child = t.create({ runId: "r", epoch: 1, role: "leaf", parentId: root.id, goal: { title: "c", text: "c" }, budget: { tokens: 400 } });
+		t.charge(child.id, { tokens: 390 });
+		t.chargeOversight(child.id, { tokens: 110 });
+		t.setStatus(child.id, "done");
+		expect(t.available(root.id, "tokens")).toBe(500);
+		t.chargeOversight(child.id, { tokens: 20 });
+		expect(t.available(root.id, "tokens")).toBe(480);
+		expect(t.carve(root.id, 0.5, 1, { tokens: 300 }).tokens).toBe(150);
+	});
+
 	it("enforces soft caps on children and depth", () => {
 		const t = tree();
 		const root = t.create({ runId: "r", epoch: 1, role: "root", goal: { title: "g", text: "g" }, budget: {}, caps: { maxChildren: 2, maxDepth: 1 } });
