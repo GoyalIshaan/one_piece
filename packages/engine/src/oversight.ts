@@ -79,7 +79,7 @@ export function installOversight(harness: Harness): void {
 	const { tree } = harness;
 
 	const scheduleReview = (nodeId: string | undefined, reason: string) => {
-		if (!nodeId) return;
+		if (!nodeId || !harness.config.hiddenReviews) return;
 		const node = tree.get(nodeId);
 		if (!node || !["internal", "leaf"].includes(node.role) || TERMINAL_STATUSES.includes(node.status)) return;
 		const run = harness.run();

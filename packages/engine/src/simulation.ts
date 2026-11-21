@@ -49,6 +49,11 @@ function pendingRecommendation(v: View): string | undefined {
 
 function manager(v: View, isRoot: boolean): AssistantMessage {
 	if (!count(v, "spawn_children")) {
+		if (isRoot && v.text.includes("This is a single-agent baseline")) {
+			return call("spawn_children", {
+				children: [{ title: "Complete task", goal: "Produce and verify the complete result.", kind: "work", budget_share: 0.85 }],
+			});
+		}
 		return call("spawn_children", {
 			children: isRoot
 				? [

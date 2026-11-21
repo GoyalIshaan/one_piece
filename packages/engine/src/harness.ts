@@ -32,6 +32,8 @@ export interface HarnessConfig {
 	/** Optional seed folder copied into each leaf's workspace. */
 	seedWorkspace?: string;
 	maxConcurrentAgents: number;
+	/** Enable background reviews of internal nodes and workers. */
+	hiddenReviews: boolean;
 	/** Budget fractions at which a node gets a hidden review. */
 	reviewFractions: number[];
 	claimsMaxRounds: number;
@@ -67,6 +69,7 @@ export interface HarnessConfig {
 
 export const DEFAULT_CONFIG: Omit<HarnessConfig, "runDir"> = {
 	maxConcurrentAgents: 6,
+	hiddenReviews: true,
 	reviewFractions: [0.25, 0.5, 0.75],
 	claimsMaxRounds: 3,
 	questionDeadlineMs: 15 * 60_000,

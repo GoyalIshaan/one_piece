@@ -69,6 +69,7 @@ share context.
 
 The Evals dashboard shows the current task, its last activity, and scores as tasks finish.
 Completed rounds save a report and machine-readable results in `./.one_piece/evals/`.
+Use `--mode solo` to run one worker and its claims reviewer under the same task budget.
 
 ## Configuration
 

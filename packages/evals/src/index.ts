@@ -249,7 +249,7 @@ export async function runTask(task: TaskSpec, options: EvalOptions, evalDir: str
 			maxConcurrentAgents: options.maxConcurrentAgents,
 			profile: options.profile,
 			caps: options.mode === "solo" ? { maxChildren: 1, maxDepth: 1 } : task.caps,
-			...(options.mode === "solo" ? { reviewFractions: [], epochCheckpoints: [], saturationWindow: 1e9, stallTurns: 1e9 } : {}),
+			...(options.mode === "solo" ? { hiddenReviews: false, epochCheckpoints: [] } : {}),
 			...options.extraConfig,
 		},
 	});
