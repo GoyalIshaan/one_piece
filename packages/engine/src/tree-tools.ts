@@ -52,6 +52,8 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 						goal: str({ description: "What the child must achieve; it is graded against this" }),
 						rubric: opt(str({ description: "What good looks like, which trade-offs matter" })),
 						targets: opt(arr(str(), { description: "Concrete measurable targets" })),
+						deliverable: opt(str({ description: "What exactly to hand back: files, format, the finding to report" })),
+						boundaries: opt(str({ description: "What this child must NOT do or touch (what siblings own), to avoid duplicated work" })),
 						kind: union([lit("explore"), lit("work")]),
 						budget_share: num({ minimum: 0.01, maximum: 1 }),
 						model: opt(str({ description: 'Optional model from your model menu, as "provider:model-id". Omit for the default.' })),
@@ -79,7 +81,7 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 						epoch: node.epoch,
 						role: spec.kind === "explore" && !atDepthCap ? "internal" : "leaf",
 						parentId: node.id,
-						goal: { title: spec.title, text: spec.goal, rubric: spec.rubric, targets: spec.targets },
+						goal: { title: spec.title, text: spec.goal, rubric: spec.rubric, targets: spec.targets, deliverable: spec.deliverable, boundaries: spec.boundaries },
 						budget: budgets[i],
 					});
 					if (spec.model) {

@@ -17,7 +17,10 @@ You own the whole research goal. You never do the work yourself.
 1. Think about the goal and the space of possible attacks. Prefer materially different angles.
 2. Write each angle as bottleneck -> mechanism -> expected effect, then spawn children with spawn_children:
    - "explore" children split their angle further; "work" children (leaves) do the actual work.
-   - Give each a goal and a decision rubric (what good looks like, which trade-offs matter, concrete targets).
+   - Give each a goal and a decision rubric (what good looks like, which trade-offs matter, concrete targets),
+     a deliverable (what exactly to hand back) and boundaries (what its siblings own). Vague delegation makes
+     children duplicate each other; independent attempts at the same thing are fine only when you mean them.
+   - Scale effort to the task: a simple, well-specified task needs one worker; spread wider only when angles truly differ.
    - Split your budget on purpose: more for the more promising angles; keep a reserve.
 3. Call wait_for_children. You wake when children report accepted findings, ask questions, or reviewers recommend actions.
 4. Act on what you learn: steer, cut, merge, reallocate budget, or spawn new angles. Reviewers only recommend; you decide.
@@ -26,7 +29,8 @@ Only you may ask the user (ask_user), and only for decisions your context cannot
 
 const INTERNAL = `ROLE: internal
 You own one angle of a larger goal. You never do the work yourself: you split, steer and integrate.
-1. Split your angle into sub-angles (bottleneck -> mechanism -> expected effect) and spawn_children with goals and rubrics.
+1. Split your angle into sub-angles (bottleneck -> mechanism -> expected effect) and spawn_children with goals, rubrics,
+   a deliverable and boundaries for each, so siblings do not duplicate each other.
 2. wait_for_children, then act on accepted findings, questions and reviewer recommendations: steer, cut, merge, reallocate.
 3. When your angle is answered, integrate your children's accepted findings into one finding and call report_finding.
    It is reviewed before it reaches your parent. Then call finish.
@@ -87,6 +91,8 @@ export function briefFor(node: SwarmNode, extra?: string): string {
 	const lines = [`# Your goal: ${node.goal.title}`, "", node.goal.text];
 	if (node.goal.rubric) lines.push("", "## Decision rubric (from your parent)", node.goal.rubric);
 	if (node.goal.targets?.length) lines.push("", "## Targets", ...node.goal.targets.map((t) => `- ${t}`));
+	if (node.goal.deliverable) lines.push("", "## Deliverable", node.goal.deliverable);
+	if (node.goal.boundaries) lines.push("", "## Boundaries (owned by others; do not duplicate)", node.goal.boundaries);
 	const budget = Object.entries(node.budget)
 		.map(([k, v]) => `${k}: ${v}`)
 		.join(", ");

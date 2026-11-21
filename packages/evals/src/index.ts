@@ -78,6 +78,14 @@ export interface TaskResult {
 		jobs: number;
 		modelsUsed: Record<string, number>;
 		childModelChoices: string[];
+		/** Time-weighted average number of agents running at once (SwarmBench's parallelism rate). */
+		parallelism: number;
+		/** Peak number of agents running at once. */
+		peakParallelism: number;
+		/** Tokens spent per point of score (lower is better; Infinity when the score is 0). */
+		tokensPerPoint: number;
+		/** Share of all tokens spent by background reviewers. */
+		oversightShare: number;
 	};
 }
 
@@ -159,6 +167,25 @@ export async function checkHealth(store: SqliteStore, dbPath: string, run: Run, 
 	}
 	const status = issues.some((i) => i.level === "fail") ? "fail" : issues.length ? "warn" : "ok";
 	return { status, issues };
+}
+
+/** Time-weighted and peak number of agents running at once, from node status events. */
+function parallelism(events: Array<{ type: string; ts: number; nodeId?: string; data: Record<string, unknown> }>, end: number): { parallelism: number; peakParallelism: number } {
+	const changes = events.filter((e) => e.type === "node.status" && e.nodeId);
+	if (!changes.length) return { parallelism: 0, peakParallelism: 0 };
+	const running = new Set<string>();
+	let last = changes[0].ts, area = 0, peak = 0;
+	for (const e of changes) {
+		area += running.size * (e.ts - last);
+		last = e.ts;
+		if (e.data.status === "running") running.add(e.nodeId!);
+		else running.delete(e.nodeId!);
+		peak = Math.max(peak, running.size);
+	}
+	const lastTs = Math.min(end, events.at(-1)?.ts ?? end);
+	area += running.size * Math.max(0, lastTs - last);
+	const span = Math.max(1, lastTs - changes[0].ts);
+	return { parallelism: Math.round((area / span) * 100) / 100, peakParallelism: peak };
 }
 
 function topCounts(items: string[], n: number): string {
@@ -281,8 +308,14 @@ export async function runTask(task: TaskSpec, options: EvalOptions, evalDir: str
 			jobs: store.list("jobs", { runId: run.id }).length,
 			modelsUsed: count(calls, (e) => `${e.data.provider}/${e.data.model}`),
 			childModelChoices: events.filter((e) => e.type === "tool.call" && e.data.tool === "spawn_children").flatMap((e) => [...String(JSON.stringify(e.data.args)).matchAll(/"model":"([^"]+)"/g)].map((m) => m[1])),
+			...parallelism(events, Date.now()),
+			tokensPerPoint: 0,
+			oversightShare: 0,
 		},
 	};
+	result.stats.tokensPerPoint = result.score > 0 ? Math.round(result.stats.tokens / result.score) : Number.POSITIVE_INFINITY;
+	const reviewerTokens = nodes.filter((n) => n.role.endsWith("reviewer")).reduce((a, n) => a + (n.spent.tokens ?? 0), 0);
+	result.stats.oversightShare = result.stats.tokens ? reviewerTokens / result.stats.tokens : 0;
 	log(`  ${task.id}: score ${result.score.toFixed(3)}, health ${health.status}${health.issues.length ? ` (${health.issues.map((i) => i.check).join(", ")})` : ""}`);
 	return result;
 }
@@ -334,11 +367,11 @@ export function renderReport(suite: string, results: TaskResult[]): string {
 		"",
 		`${results.length} tasks · mean score ${(results.reduce((a, r) => a + r.score, 0) / results.length).toFixed(3)} · ${ok}/${results.length} ran without breaking · ${total("tokens").toLocaleString()} tokens · $${total("usd").toFixed(2)} est.`,
 		"",
-		"| Task | Category | Score | Health | Tokens | Time | Agents | Findings | Errors |",
-		"| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+		"| Task | Category | Score | Health | Tokens | Tokens per point | Time | Parallelism (avg / peak) | Oversight share | Agents | Findings | Errors |",
+		"| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
 		...results.map(
 			(r) =>
-				`| ${r.task.id} | ${r.task.category} | ${r.score.toFixed(3)} | ${r.health.status} | ${r.stats.tokens.toLocaleString()} | ${Math.round(r.stats.durationMs / 1000)}s | ${Object.entries(r.stats.agents).map(([k, v]) => `${v} ${k}`).join(", ")} | ${Object.entries(r.stats.findings).map(([k, v]) => `${v} ${k}`).join(", ") || "none"} | ${r.stats.modelErrors} model, ${r.stats.toolErrors}/${r.stats.toolCalls} tool |`,
+				`| ${r.task.id} | ${r.task.category} | ${r.score.toFixed(3)} | ${r.health.status} | ${r.stats.tokens.toLocaleString()} | ${Number.isFinite(r.stats.tokensPerPoint) ? r.stats.tokensPerPoint.toLocaleString() : "∞"} | ${Math.round(r.stats.durationMs / 1000)}s | ${r.stats.parallelism} / ${r.stats.peakParallelism} | ${(r.stats.oversightShare * 100).toFixed(0)}% | ${Object.entries(r.stats.agents).map(([k, v]) => `${v} ${k}`).join(", ")} | ${Object.entries(r.stats.findings).map(([k, v]) => `${v} ${k}`).join(", ") || "none"} | ${r.stats.modelErrors} model, ${r.stats.toolErrors}/${r.stats.toolCalls} tool |`,
 		),
 		"",
 	];

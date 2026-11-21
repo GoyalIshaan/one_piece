@@ -49,6 +49,10 @@ export interface Goal {
 	rubric?: string;
 	/** Concrete, measurable targets where they exist ("1.2x faster on benchmark B"). */
 	targets?: string[];
+	/** What to hand back: files, format, the finding to report. */
+	deliverable?: string;
+	/** What not to do or touch (what siblings own), so siblings do not duplicate work. */
+	boundaries?: string;
 }
 
 /** The child's own plan, written for its own thinking and for reviewers to read. */
