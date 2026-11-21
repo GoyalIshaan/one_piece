@@ -28,6 +28,20 @@ function findingText(finding: Finding): string {
 /** Run one claims-review round with a reviewer on a different provider. */
 async function claimsReview(harness: Harness, author: SwarmNode, finding: Finding): Promise<Verdict> {
 	const goal = author.goal;
+	let evidenceAccess = "The author's workspace is readable through your file tools.";
+	if (author.role === "internal") {
+		const descendants = new Set(finding.buildsOn.length
+			? harness.tree.subtree(author.id).filter((node) => node.id !== author.id).map((node) => node.id)
+			: author.children);
+		const sources = harness.store.list<Finding>("findings", { runId: author.runId }).filter((source) =>
+			source.status === "accepted" && descendants.has(source.nodeId) && (!finding.buildsOn.length || finding.buildsOn.includes(source.id)),
+		);
+		evidenceAccess = [
+			"This is a synthesis. Check the inference against these accepted findings from descendants:",
+			...sources.map((source) => `- ${source.id} [${source.level}] ${source.claim}\n  Evidence: ${source.evidence.join(", ")}`),
+			...(sources.length ? [] : ["No matching accepted findings were provided."]),
+		].join("\n");
+	}
 	const reviewer = harness.tree.create({
 		runId: author.runId,
 		epoch: author.epoch,
@@ -35,10 +49,10 @@ async function claimsReview(harness: Harness, author: SwarmNode, finding: Findin
 		parentId: author.id,
 		goal: {
 			title: `Review ${finding.id}`,
-			text: `${findingText(finding)}\n\nThe author's goal was: ${goal.title}: ${goal.text}${goal.rubric ? `\nIts rubric: ${goal.rubric}` : ""}\n\nThe author's workspace is readable through your file tools.`,
+			text: `${findingText(finding)}\n\nThe author's goal was: ${goal.title}: ${goal.text}${goal.rubric ? `\nIts rubric: ${goal.rubric}` : ""}\n\n${evidenceAccess}`,
 		},
 		budget: {},
-		modules: author.modules,
+		modules: author.role === "internal" ? { ...author.modules, workspace: "off" } : author.modules,
 	});
 	harness.tree.update(reviewer.id, { targetNodeId: author.id, targetFindingId: finding.id });
 	await harness.runNode(reviewer, `${reviewer.goal.text}\n\nCheck it, then call submit_verdict.`);
@@ -93,7 +107,7 @@ export function trustTools(harness: Harness, node: SwarmNode) {
 					if (previous.rounds.length >= harness.config.claimsMaxRounds) {
 						throw new Error(`Finding ${previous.id} used all ${harness.config.claimsMaxRounds} review rounds; report a narrower claim instead.`);
 					}
-					finding = { ...previous, claim: params.claim, reasoning: params.reasoning, evidence: params.evidence, level: params.level as EvidenceLevel, assumptions: params.assumptions ?? previous.assumptions, status: "pending_review", updatedAt: now };
+					finding = { ...previous, claim: params.claim, reasoning: params.reasoning, evidence: params.evidence, level: params.level as EvidenceLevel, assumptions: params.assumptions ?? previous.assumptions, buildsOn: params.builds_on ?? previous.buildsOn, status: "pending_review", updatedAt: now };
 				} else {
 					finding = {
 						id: newId("finding"),

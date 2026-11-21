@@ -36,6 +36,9 @@ describe("engine with the simulator", () => {
 		expect(harness.tree.require(nested.parentId!).role).toBe("internal");
 		expect(harness.tree.children(nested.id).map((node) => [node.role, node.depth])).toEqual([["leaf", 3], ["leaf", 3]]);
 		expect(store.events(run.id, { nodeId: nested.id, types: ["tree.spawned"] })).toHaveLength(1);
+		const synthesisReview = harness.tree.all().find((node) => node.role === "claims_reviewer" && node.targetNodeId === nested.id);
+		expect(synthesisReview?.goal.text).toContain("accepted findings from descendants");
+		expect(synthesisReview?.goal.text).toContain("The simulated result is 42.");
 	});
 
 	it("runs a full swarm: spawn, work, claims review, oversight, report", async () => {

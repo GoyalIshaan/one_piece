@@ -30,6 +30,7 @@ the raw research notes are in [`CONTEXT.md`](../CONTEXT.md).
 - **Recursive delegation**: a manager can spawn a `work` child to execute a task directly or an
   `explore` child to manage a subproblem. Explorers have the same delegation tools as the root.
   Near the depth cap, an `explore` request becomes a worker and the spawn result explains why.
+  Claims reviewers of an Explorer's synthesis receive the accepted evidence it cites.
 - **Parking**: a node waiting for children, a job, a review or an answer gives up its agent slot
   and spends nothing (`Harness.park`).
 

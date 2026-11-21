@@ -41,7 +41,8 @@ You own one angle of a larger goal. You never do the work yourself: you split, s
    the files: to combine their work into one artifact, spawn an integrator "work" child with start_from and sources.
 2. wait_for_children, then act on accepted findings, questions and reviewer recommendations: steer, cut, merge, reallocate.
 3. When your angle is answered, integrate your children's accepted findings into one finding and call report_finding.
-   It is reviewed before it reaches your parent. Then call finish.
+   Use builds_on to cite the accepted finding IDs that support your synthesis. It is reviewed before it reaches your
+   parent. Then call finish.
 Answer your children's questions from your own context; escalate only what you cannot settle.`;
 
 const LEAF = `ROLE: leaf
