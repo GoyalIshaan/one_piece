@@ -27,6 +27,9 @@ the raw research notes are in [`CONTEXT.md`](../CONTEXT.md).
   is deducted (`core/src/tree.ts`).
 - **Soft caps**: about 8 live children per node and depth 6 by default; a parent can raise a
   child's caps when a reviewer recommends it.
+- **Recursive delegation**: a manager can spawn a `work` child to execute a task directly or an
+  `explore` child to manage a subproblem. Explorers have the same delegation tools as the root.
+  Near the depth cap, an `explore` request becomes a worker and the spawn result explains why.
 - **Parking**: a node waiting for children, a job, a review or an answer gives up its agent slot
   and spends nothing (`Harness.park`).
 
@@ -110,6 +113,8 @@ more detail on each part of the run.
 
 The Evals view shows a round's task queue, the current run's last event, and results as tasks
 finish. Eval rounds keep task scores and harness health checks together under `.one_piece/evals/`.
+Each eval shell or claims-check call is limited to 180 seconds so a long search can return
+control to its agent between checkpoints.
 
 ## Built on Pi
 

@@ -53,8 +53,11 @@ function listTree(root: string, dir: string, depth: number, out: string[]): void
 	}
 }
 
-export function workspaceModule(): HarnessModule {
+export function workspaceModule(options: { maxCommandSeconds?: number } = {}): HarnessModule {
 	let harness: HarnessApi;
+	const commandLimit = options.maxCommandSeconds ?? 3600;
+	const timeoutMs = (seconds: number | undefined) => Math.min(seconds ?? 300, commandLimit) * 1000;
+	const limitText = options.maxCommandSeconds ? ` Commands have a ${commandLimit}-second limit per call. Save intermediate results for longer searches.` : "";
 	return {
 		manifest: {
 			name: "workspace",
@@ -77,8 +80,8 @@ export function workspaceModule(): HarnessModule {
 			});
 		},
 		prompt(ctx: NodeContext) {
-			if (ctx.node.role === "leaf") return "Workspace: you have a private folder (a copy of the project). Use bash, read_file, write_file, edit_file, list_files. Commands run sandboxed: no sudo, no writes outside your folder. Every reported finding is committed.";
-			if (ctx.node.role === "claims_reviewer") return "You can read the author's workspace with read_file and list_files, and rerun commands in a scratch copy with run_check.";
+			if (ctx.node.role === "leaf") return "Workspace: you have a private folder (a copy of the project). Use bash, read_file, write_file, edit_file, list_files. Commands run sandboxed: no sudo, no writes outside your folder. Every reported finding is committed." + limitText;
+			if (ctx.node.role === "claims_reviewer") return "You can read the author's workspace with read_file and list_files, and rerun commands in a scratch copy with run_check." + limitText;
 			return "You can inspect the worker's workspace with read_file and list_files.";
 		},
 		tools(ctx: NodeContext) {
@@ -126,7 +129,7 @@ export function workspaceModule(): HarnessModule {
 							const scratch = mkdtempSync(join(dirname(workspace), `.check-${node.id}-`));
 							try {
 								cpSync(workspace, scratch, { recursive: true });
-								const result = await runCommand({ command: params.command, cwd: scratch, profile: "job", timeoutMs: (params.timeout_seconds ?? 300) * 1000, signal });
+								const result = await runCommand({ command: params.command, cwd: scratch, profile: "job", timeoutMs: timeoutMs(params.timeout_seconds), signal });
 								return harness.bus.redactor.redactText(`exit ${result.exitCode}${result.timedOut ? " (timed out)" : ""}\n${result.stdout}\n${result.stderr}`.trim());
 							} finally {
 								rmSync(scratch, { recursive: true, force: true });
@@ -170,7 +173,7 @@ export function workspaceModule(): HarnessModule {
 					parameters: obj({ command: str(), timeout_seconds: opt(num({ minimum: 1, maximum: 3600 })), capabilities: opt(arr(str())) }),
 					async execute(params, signal) {
 						const secrets = params.capabilities?.length ? harness.services.require("secrets").envFor(node.id, params.capabilities) : {};
-						const result = await runCommand({ command: params.command, cwd: root(), profile: "worker", env: secrets, timeoutMs: (params.timeout_seconds ?? 300) * 1000, signal });
+						const result = await runCommand({ command: params.command, cwd: root(), profile: "worker", env: secrets, timeoutMs: timeoutMs(params.timeout_seconds), signal });
 						harness.bus.emit(node.runId, "workspace.command", { command: params.command.slice(0, 500), exitCode: result.exitCode, durationMs: result.durationMs, sandboxed: result.sandboxed }, node.id);
 						return harness.bus.redactor.redactText(`exit ${result.exitCode}${result.timedOut ? " (timed out)" : ""}\n${result.stdout}${result.stderr ? `\n[stderr]\n${result.stderr}` : ""}`.trim());
 					},

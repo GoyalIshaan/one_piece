@@ -69,6 +69,7 @@ export interface TaskResult {
 		tokenBudget?: number;
 		usd: number;
 		agents: Record<string, number>;
+		maxDepth?: number;
 		findings: Record<string, number>;
 		modelCalls: number;
 		modelErrors: number;
@@ -304,6 +305,7 @@ export async function runTask(task: TaskSpec, options: EvalOptions, evalDir: str
 			tokenBudget: budget.tokens,
 			usd: nodes.reduce((a, n) => a + (n.spent.usd ?? 0), 0),
 			agents: count(nodes, (n) => n.role),
+			maxDepth: Math.max(0, ...nodes.filter((n) => !n.role.endsWith("_reviewer")).map((n) => n.depth)),
 			findings: count(store.list<Finding>("findings", { runId: run.id }), (f) => f.status),
 			modelCalls: calls.length,
 			modelErrors: events.filter((e) => e.type === "agent.error").length,

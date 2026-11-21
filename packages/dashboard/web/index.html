@@ -390,7 +390,7 @@ async function loadRuns() {
 	const runs = await api("/api/runs");
 	const sel = $("#run");
 	sel.innerHTML = runs.map((r) => `<option value="${esc(r.id)}">${esc(r.goal.title)} — ${esc(r.status)}, ${new Date(r.createdAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</option>`).join("") || "<option>No runs yet</option>";
-	if (!S.runId && runs[0]) S.runId = runs[0].id;
+	if (!runs.some((run) => run.id === S.runId)) S.runId = runs[0]?.id ?? null;
 	if (S.runId) sel.value = S.runId;
 	sel.onchange = () => { S.runId = sel.value; S.sel = null; S.family = null; S.epoch = null; S.feed = []; S.fitted = false; closeDrawer(); connect(); refresh(true); };
 }
@@ -698,9 +698,11 @@ function renderSwarm() {
 	if (!root) { stage.innerHTML = '<div class="page"><p class="empty">The root agent has not started yet.</p></div>'; return; }
 	const mode = S.treeMode;
 	const entries = treeEntries(root);
+	const agents = entries.filter(({ node }) => TREE.has(node.role));
+	const level = Math.max(0, ...agents.map(({ depth }) => depth));
 	const family = nodeOf(S.family);
 	const familyIds = family ? new Set([family.id, ...treeChildren(family).map((node) => node.id)]) : null;
-	const head = `<div class="graphHeading"><div><h1 class="view">Agent tree</h1><p class="soft">${entries.filter(({ node }) => TREE.has(node.role)).length} agents · ${entries.filter(({ node }) => !TREE.has(node.role)).length} reviewers shown</p></div>
+	const head = `<div class="graphHeading"><div><h1 class="view">Agent tree</h1><p class="soft">${agents.length} agents · ${entries.length - agents.length} reviewers shown · Depth ${level} · Root cap ${root.caps.maxDepth}</p></div>
 		<div class="tree-tools"><label for="treeEpoch">Epoch</label><select id="treeEpoch" onchange="pickEpoch(this.value)"><option value=""${S.epoch === null ? " selected" : ""}>Latest (${st.run.epoch})</option>${st.epochs.map((epoch) => `<option value="${epoch.number}"${epoch.number === S.epoch ? " selected" : ""}>Epoch ${epoch.number}</option>`).join("")}</select><label for="treeReviewers">Reviewers</label><select id="treeReviewers" onchange="S.reviewers=this.value;S.fitted=false;renderSwarm()">${[["all", "All"], ["live", "Active"], ["off", "Hidden"]].map(([value, label]) => `<option value="${value}"${value === S.reviewers ? " selected" : ""}>${label}</option>`).join("")}</select>
 		<button type="button" class="btn ${mode === "graph" ? "primary" : ""}" aria-pressed="${mode === "graph"}" onclick="setTreeMode('graph')">Graph</button>
 		<button type="button" class="btn ${mode === "outline" ? "primary" : ""}" aria-pressed="${mode === "outline"}" onclick="setTreeMode('outline')">Outline</button></div></div>`;
@@ -1200,7 +1202,7 @@ async function renderEvals() {
 		const tokenUse = st?.tokenBudget ? `${kfmt(st.tokens)} / ${kfmt(st.tokenBudget)} tokens` : st ? `${kfmt(st.tokens)} tokens` : "";
 		return `<div class="ecard"><div>
 			<div class="row"><b style="font-size:16px">${esc(x.task.title)}</b><span class="chip">${esc(x.task.category)}</span><span class="chip st s-${healthClass[x.health.status]}"><span class="dot"></span>${healthWord[x.health.status]}</span></div>
-			<div class="dim" style="font-size:12.5px;margin-top:2px">${esc(x.task.id)} · inspired by ${esc(x.task.inspiredBy)} · ${esc(x.status)}${st ? ` · ${dur(st.durationMs)} · ${tokenUse} · $${st.usd.toFixed(2)}` : ""}</div>
+			<div class="dim" style="font-size:12.5px;margin-top:2px">${esc(x.task.id)} · inspired by ${esc(x.task.inspiredBy)} · ${esc(x.status)}${st ? ` · ${dur(st.durationMs)} · ${tokenUse} · $${st.usd.toFixed(2)}${st.maxDepth === undefined ? "" : ` · depth ${st.maxDepth}`}` : ""}</div>
 			${x.best ? `<p class="prose" style="margin:10px 0 0">Best worker <b>${esc(x.best.title)}</b>: ${esc(x.best.details)}</p>` : `<p class="dim">No worker workspace was graded.</p>`}
 			${x.health.issues.length ? `<ul class="issues">${x.health.issues.map((i) => `<li class="${i.level}"><b>${esc(i.check)}</b>: ${esc(i.message)}</li>`).join("")}</ul>` : `<p class="dim" style="margin:6px 0 0">All health checks passed.</p>`}
 			${x.graded.length > 1 ? `<div class="wbars">${x.graded.map((g) => `<div class="wbar"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(g.title)}</span><span class="track"><i style="width:${(g.score * 100).toFixed(1)}%"></i></span><span class="num">${g.score.toFixed(2)}</span></div>`).join("")}</div>` : ""}
@@ -1260,6 +1262,10 @@ document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") { if (S.
 window.addEventListener("resize", () => { if (S.view === "swarm" && !S.fitted) fit(); });
 
 (async () => {
+	const params = new URLSearchParams(location.search);
+	const view = params.get("view");
+	if (NAVIGATION.flat().some(([key]) => key === view)) S.view = view;
+	S.runId = params.get("run");
 	try { await loadRuns(); connect(); await refresh(); } catch (e) { $("#stage").innerHTML = `<div class="page"><p class="empty">Could not reach the harness: ${esc(e.message)}</p></div>`; }
 	setInterval(async () => {
 		for (const time of document.querySelectorAll("[data-relative]")) time.textContent = ago(Number(time.dataset.relative));

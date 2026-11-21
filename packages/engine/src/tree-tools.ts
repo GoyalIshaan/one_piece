@@ -63,6 +63,7 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 		const available = Math.max(0, Math.floor(Math.min(remaining, tree.available(node.id, "tokens"))));
 		return Number.isFinite(available) ? `Up to ${available} tokens can still be allocated to new children before the report reserve.` : "";
 	};
+	const childRole = (kind: "explore" | "work") => kind === "explore" && node.depth + 2 <= node.caps.maxDepth ? "internal" : "leaf";
 
 	return [
 		defineTool({
@@ -114,11 +115,11 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 				live.spawnCalls += 1;
 				const created: string[] = [];
 				params.children.forEach((spec, i) => {
-					const atDepthCap = node.depth + 2 > node.caps.maxDepth;
+					const role = childRole(spec.kind);
 					const child = tree.create({
 						runId: node.runId,
 						epoch: node.epoch,
-						role: spec.kind === "explore" && !atDepthCap ? "internal" : "leaf",
+						role,
 						parentId: node.id,
 						goal: { title: spec.title, text: spec.goal, rubric: spec.rubric, targets: spec.targets, deliverable: spec.deliverable, boundaries: spec.boundaries },
 						budget: budgets[i],
@@ -129,7 +130,8 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 						tree.update(child.id, { model: { provider: choice.provider, id: choice.id } });
 					}
 					harness.launch(child, briefFor(child, integrationNote(harness, spec.start_from, spec.sources)));
-					created.push(`${child.id} (${child.role}${spec.model ? `, ${spec.model}` : ""}): ${spec.title}${child.budget.tokens === undefined ? "" : ` · ${child.budget.tokens} tokens`}`);
+					const capped = spec.kind === "explore" && role === "leaf" ? " · assigned a worker at the depth cap" : "";
+					created.push(`${child.id} (${child.role}${spec.model ? `, ${spec.model}` : ""}): ${spec.title}${child.budget.tokens === undefined ? "" : ` · ${child.budget.tokens} tokens`}${capped}`);
 				});
 				harness.bus.emit(node.runId, "tree.spawned", { count: created.length, call: live.spawnCalls }, node.id);
 				return [`Spawned ${created.length} children:`, ...created, allocatableTokens(), "Call wait_for_children to wait for their results."].filter(Boolean).join("\n");
@@ -218,7 +220,7 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 				const successor = tree.create({
 					runId: node.runId,
 					epoch: node.epoch,
-					role: params.kind === "explore" ? "internal" : "leaf",
+					role: childRole(params.kind),
 					parentId: node.id,
 					goal: { title: params.title, text: params.goal, rubric: params.rubric },
 					budget: share,
