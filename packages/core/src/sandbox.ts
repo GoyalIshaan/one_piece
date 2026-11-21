@@ -16,6 +16,15 @@ const DENY: Array<[RegExp, string]> = [
 	[/:\(\)\s*\{\s*:\|:&\s*\};:/, "fork bombs are not allowed"],
 ];
 
+/** Toolchain variables passed through to sandboxed commands (never secrets). */
+const PASSTHROUGH = ["SDKROOT", "DEVELOPER_DIR", "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS", "CPATH", "LIBRARY_PATH", "PKG_CONFIG_PATH", "RUSTUP_HOME", "CARGO_HOME", "JAVA_HOME", "GOROOT", "GOPATH", "VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONPATH", "CUDA_HOME"];
+
+function passthroughEnv(): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const key of PASSTHROUGH) if (process.env[key]) out[key] = process.env[key]!;
+	return out;
+}
+
 /** Returns a refusal reason, or undefined when the command may run. */
 export function commandPolicy(command: string): string | undefined {
 	for (const [pattern, reason] of DENY) if (pattern.test(command)) return reason;
@@ -78,7 +87,7 @@ export function runCommand(options: RunOptions): Promise<RunResult> {
 	return new Promise((resolve) => {
 		const child = spawn(argv[0] as string, argv[1] as string[], {
 			cwd: options.cwd,
-			env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? options.cwd, LANG: "en_US.UTF-8", TMPDIR: tmpdir(), ...options.env },
+			env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? options.cwd, LANG: "en_US.UTF-8", TMPDIR: tmpdir(), ...passthroughEnv(), ...options.env },
 			stdio: ["ignore", "pipe", "pipe"],
 			detached: true,
 		});
