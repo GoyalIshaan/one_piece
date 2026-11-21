@@ -45,6 +45,11 @@ export interface HarnessConfig {
 	maxNudges: number;
 	/** Fraction of the run budget kept back so the root can always write its report. */
 	reportReserve: number;
+	/** Retries (with exponential backoff) after temporary provider errors such as overload or rate limits. */
+	maxRetries: number;
+	retryBaseMs: number;
+	/** Agent turns between two hidden reviews of the same node. */
+	reviewCooldownTurns: number;
 	profile: HarnessProfile;
 	caps: { maxChildren: number; maxDepth: number };
 }
@@ -59,6 +64,9 @@ export const DEFAULT_CONFIG: Omit<HarnessConfig, "runDir"> = {
 	stallTurns: 8,
 	maxNudges: 3,
 	reportReserve: 0.05,
+	maxRetries: 4,
+	retryBaseMs: 5_000,
+	reviewCooldownTurns: 4,
 	profile: {},
 	caps: { maxChildren: 8, maxDepth: 6 },
 };
@@ -74,6 +82,8 @@ interface Live {
 	parked: number;
 	abort: AbortController;
 	nudges: number;
+	retries: number;
+	lastReviewTurn: number;
 	lastCheckpointTurn: number;
 	reviewedFractions: Set<number>;
 	reviewing: boolean;
@@ -231,6 +241,8 @@ export class Harness implements HarnessApi {
 				parked: 0,
 				abort: new AbortController(),
 				nudges: 0,
+				retries: 0,
+				lastReviewTurn: Number.NEGATIVE_INFINITY,
 				lastCheckpointTurn: 0,
 				reviewedFractions: new Set(),
 				reviewing: false,
@@ -298,8 +310,17 @@ export class Harness implements HarnessApi {
 					message = inbox.join("\n\n");
 					continue;
 				}
-				if (agent.state.errorMessage) {
-					this.bus.emit(node.runId, "agent.error", { error: agent.state.errorMessage }, node.id);
+				const error = agent.state.errorMessage;
+				if (error) {
+					this.bus.emit(node.runId, "agent.error", { error }, node.id);
+					if (TRANSIENT.test(error) && live.retries < this.config.maxRetries) {
+						const delay = this.config.retryBaseMs * 3 ** live.retries;
+						live.retries += 1;
+						this.bus.emit(node.runId, "agent.retry", { attempt: live.retries, delayMs: delay }, node.id);
+						await this.park(node.id, new Promise((resolve) => setTimeout(resolve, delay)));
+						message = "The previous model call failed with a temporary provider error. Continue where you left off.";
+						continue;
+					}
 				}
 				if (live.nudges >= this.config.maxNudges) {
 					node.finishedSummary = "Stopped: the agent ended its turn repeatedly without calling finish.";
@@ -444,6 +465,9 @@ export class Harness implements HarnessApi {
 		}
 	}
 }
+
+/** Provider errors worth retrying: overload, rate limits, timeouts, 5xx, dropped connections. */
+const TRANSIENT = /overloaded|rate.?limit|too many requests|\b429\b|\b5\d\d\b|timed? ?out|timeout|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|temporarily unavailable|try again/i;
 
 function truncateJson(value: unknown, max: number): unknown {
 	const text = JSON.stringify(value) ?? "";

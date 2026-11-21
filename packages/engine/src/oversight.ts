@@ -91,7 +91,10 @@ export function installOversight(harness: Harness): void {
 		if (harness.run().status !== "running") return;
 		const live = harness.liveState(nodeId);
 		if (live.reviewing) return;
+		// Space reviews out: one review every few turns per node, so oversight stays cheaper than the work.
+		if (node.turns - live.lastReviewTurn < harness.config.reviewCooldownTurns) return;
 		live.reviewing = true;
+		live.lastReviewTurn = node.turns;
 		void runHiddenReview(node, reason)
 			.catch((error) => harness.bus.emit(node.runId, "review.error", { error: String(error) }, nodeId))
 			.finally(() => {
@@ -206,21 +209,18 @@ export function installOversight(harness: Harness): void {
 			if (node.role === "root") continue;
 			const live = harness.liveState(node.id);
 			const fraction = tree.fractionSpent(node.id);
-			for (const threshold of harness.config.reviewFractions) {
-				if (fraction >= threshold && !live.reviewedFractions.has(threshold)) {
-					live.reviewedFractions.add(threshold);
-					scheduleReview(node.id, `spent ${Math.round(threshold * 100)}% of its budget`);
-					break;
-				}
+			// Mark every threshold already crossed at once, so a fast spender gets one review, not three in a row.
+			const crossed = harness.config.reviewFractions.filter((t) => fraction >= t && !live.reviewedFractions.has(t));
+			if (crossed.length) {
+				for (const t of crossed) live.reviewedFractions.add(t);
+				scheduleReview(node.id, `spent ${Math.round(Math.max(...crossed) * 100)}% of its budget`);
 			}
 		}
 		const fraction = runFraction(harness);
-		for (const threshold of harness.config.epochCheckpoints) {
-			if (fraction >= threshold && !state.checkpointsDone.has(threshold)) {
-				state.checkpointsDone.add(threshold);
-				void consultRootReviewer("C_checkpoint");
-				break;
-			}
+		const crossedRun = harness.config.epochCheckpoints.filter((t) => fraction >= t && !state.checkpointsDone.has(t));
+		if (crossedRun.length) {
+			for (const t of crossedRun) state.checkpointsDone.add(t);
+			void consultRootReviewer("C_checkpoint");
 		}
 	});
 

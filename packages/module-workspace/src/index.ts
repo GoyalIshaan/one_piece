@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { arr, num, obj, opt, str } from "@earendil-works/pi-schema";
 import { defineTool, type HarnessApi, type HarnessEvent, type HarnessModule, type NodeContext, runCommand } from "@one-piece/core";
@@ -117,7 +117,9 @@ export function workspaceModule(): HarnessModule {
 						description: "Rerun a command in a scratch copy of the author's workspace (the original is never changed).",
 						parameters: obj({ command: str(), timeout_seconds: opt(num({ minimum: 1, maximum: 3600 })) }),
 						async execute(params, signal) {
+							// A fresh copy per check: never reuse a previous run's state (or its read-only git objects).
 							const scratch = join(harness.workspaceOf(node.id)!, "..", `.check-${node.id}`);
+							rmSync(scratch, { recursive: true, force: true });
 							cpSync(root(), scratch, { recursive: true });
 							const result = await runCommand({ command: params.command, cwd: scratch, profile: "job", timeoutMs: (params.timeout_seconds ?? 300) * 1000, signal });
 							return harness.bus.redactor.redactText(`exit ${result.exitCode}${result.timedOut ? " (timed out)" : ""}\n${result.stdout}\n${result.stderr}`.trim());
