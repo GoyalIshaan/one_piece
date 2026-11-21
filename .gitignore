@@ -6,3 +6,5 @@ dist/
 *.log
 runs/
 .one_piece/
+vendor/pi/packages/ai/src/providers/data/
+*.tsbuildinfo
