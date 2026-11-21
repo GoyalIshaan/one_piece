@@ -44,5 +44,19 @@ describe("engine with the simulator", () => {
 		const root = nodes.find((n) => n.role === "root")!;
 		expect(harness.tree.subtreeSpent(root.id).tokens).toBeGreaterThan(0);
 		expect(store.events(run.id, { types: ["run.finished"] }).length).toBe(1);
+
+		// Accounting: every model call is counted once, on the agent that made it. Reviewers keep
+		// their own spend, and the reviewed agent records it separately as oversight.
+		const calls = store.events(run.id, { types: ["model.call"] }).reduce((a, e) => a + Number(e.data.totalTokens), 0);
+		const own = nodes.reduce((a, n) => a + (n.spent.tokens ?? 0), 0);
+		const reviewers = nodes.filter((n) => n.role.endsWith("reviewer"));
+		const reviewerOwn = reviewers.reduce((a, n) => a + (n.spent.tokens ?? 0), 0);
+		const oversight = nodes.reduce((a, n) => a + (n.oversight.tokens ?? 0), 0);
+		expect(own).toBe(calls);
+		expect(reviewerOwn).toBeGreaterThan(0);
+		expect(oversight).toBe(reviewerOwn);
+		const leaf = leaves[0];
+		const leafCalls = store.events(run.id, { types: ["model.call"], nodeId: leaf.id }).reduce((a, e) => a + Number(e.data.totalTokens), 0);
+		expect(leaf.spent.tokens).toBe(leafCalls);
 	});
 });

@@ -80,8 +80,13 @@ export interface SwarmNode {
 	statusReason?: string;
 	/** Budget this node was given (includes what it later hands to children). */
 	budget: BudgetVector;
-	/** What this node's own agent spent. Subtree totals are computed by the budget ledger. */
+	/** What this node's own agent spent: its own model calls and jobs, nothing else. */
 	spent: BudgetVector;
+	/**
+	 * What background reviewers (claims and hidden reviews) spent overseeing this node. Kept apart
+	 * from `spent` so an agent's own number is honest, but it counts against the node's budget.
+	 */
+	oversight: BudgetVector;
 	/** Sum of the budgets handed to its children. */
 	allocatedToChildren: BudgetVector;
 	/** Leftover budgets returned by finished children. */

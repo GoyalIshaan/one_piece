@@ -433,12 +433,13 @@ export class Harness implements HarnessApi {
 	}
 
 	private recordCall(node: SwarmNode, record: CallRecord): void {
-		// Reviewers' spend is charged to the node they oversee: oversight is part of its cost.
-		const payer = TREE_ROLES.includes(node.role) ? node.id : (node.targetNodeId ?? this.run().rootNodeId);
-		if (this.tree.get(payer)) {
-			this.tree.charge(payer, { tokens: record.totalTokens, usd: record.usd, [`tokens:${record.provider}`]: record.totalTokens });
-		}
-		this.bus.emit(node.runId, "model.call", { ...record, role: node.role, payer }, node.id);
+		const usage = { tokens: record.totalTokens, usd: record.usd, [`tokens:${record.provider}`]: record.totalTokens };
+		// Every agent's own spend is its own, reviewers included. A reviewer's spend is also recorded
+		// as oversight on the node it reviews, which counts against that node's budget.
+		this.tree.charge(node.id, usage);
+		const target = TREE_ROLES.includes(node.role) ? undefined : (node.targetNodeId ?? this.run().rootNodeId);
+		if (target && this.tree.get(target)) this.tree.chargeOversight(target, usage);
+		this.bus.emit(node.runId, "model.call", { ...record, role: node.role, target }, node.id);
 		for (const hook of this.callHooks) hook(node, record);
 	}
 

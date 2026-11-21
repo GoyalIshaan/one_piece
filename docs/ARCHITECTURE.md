@@ -17,6 +17,10 @@ the raw research notes are in [`CONTEXT.md`](../CONTEXT.md).
   decision rubric, allocate budget, steer, cut and merge (`engine/src/tree-tools.ts`).
 - **Leaves** write a contract (success and kill criteria, first decisive check, target evidence
   level), work in a private sandboxed workspace, keep a compact checkpoint, and report findings.
+- **Spend is counted once, on the agent that spent it.** A node's `spent` is its own model calls
+  and jobs. Background reviewers keep their own spend, and it is also recorded as `oversight` on
+  the node they review, which counts against that node's budget. Branch and family totals add
+  these up; a parent's number never includes its children's.
 - **Budgets are inherited vectors** (`tokens`, `usd`, `cpu_seconds`, `gpu_minutes`...). A parent
   hands part of its available budget to each child; spend rolls up; a finished child's leftover
   returns to its parent (`core/src/tree.ts`).

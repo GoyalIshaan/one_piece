@@ -63,6 +63,7 @@ export class SwarmTree {
 			status: "pending",
 			budget: { ...options.budget },
 			spent: {},
+			oversight: {},
 			allocatedToChildren: {},
 			refunded: {},
 			modules: { ...(options.modules ?? parent?.modules ?? {}) },
@@ -169,16 +170,16 @@ export class SwarmTree {
 
 	// ---- budgets ----------------------------------------------------------------------------
 
-	/** Everything spent by this node and all its descendants. */
+	/** Everything spent by this node and its descendants, including the reviews of them (for budgets). */
 	subtreeSpent(id: string): BudgetVector {
-		return this.subtree(id).reduce((acc, n) => add(acc, n.spent), {} as BudgetVector);
+		return this.subtree(id).reduce((acc, n) => add(add(acc, n.spent), n.oversight ?? {}), {} as BudgetVector);
 	}
 
 	/** What this node may still spend itself or hand to new children, per resource. */
 	available(id: string, kind: string): number {
 		const node = this.require(id);
 		if (node.budget[kind] === undefined) return Number.POSITIVE_INFINITY;
-		return node.budget[kind] - (node.spent[kind] ?? 0) - (node.allocatedToChildren[kind] ?? 0) + (node.refunded[kind] ?? 0);
+		return node.budget[kind] - (node.spent[kind] ?? 0) - (node.oversight?.[kind] ?? 0) - (node.allocatedToChildren[kind] ?? 0) + (node.refunded[kind] ?? 0);
 	}
 
 	/** Largest fraction of any budgeted resource the subtree has used. */
@@ -203,6 +204,14 @@ export class SwarmTree {
 		node.updatedAt = Date.now();
 		this.persist(node);
 		this.bus.emit(node.runId, "budget.charged", { usage }, id);
+	}
+
+	/** Record what a background reviewer spent overseeing a node (counts against that node's budget). */
+	chargeOversight(id: string, usage: BudgetVector): void {
+		const node = this.require(id);
+		node.oversight = add(node.oversight ?? {}, usage);
+		node.updatedAt = Date.now();
+		this.persist(node);
 	}
 
 	/** Split part of the parent's available budget into one child's allocation. */
