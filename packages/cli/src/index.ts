@@ -137,6 +137,7 @@ async function main(): Promise<void> {
 			};
 			process.once("SIGINT", stop);
 			await harness.done;
+			process.removeListener("SIGINT", stop);
 			console.log(`\nDone. Report: ${join(runDir, "report.md")}`);
 			for (const module of modules) await module.dispose?.();
 			if (dashboard) console.log(`The dashboard keeps serving at ${dashboard.url} (Ctrl+C to quit).`);

@@ -3,311 +3,844 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>one_piece telemetry</title>
+<title>one_piece · swarm telemetry</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
 <style>
 :root {
-	--bg: #fbfbfa; --panel: #ffffff; --line: #e6e4df; --ink: #1d1c1a; --quiet: #6b6862; --faint: #f2f1ee;
-	--accent: #2f6fd6; --good: #23864f; --warn: #b7791f; --bad: #c2412d; --violet: #6d4bd1;
-	--mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+	--paper: oklch(97.6% 0.007 85);
+	--panel: oklch(99.2% 0.004 85);
+	--wash: oklch(94.6% 0.009 80);
+	--line: oklch(89.5% 0.009 80);
+	--line-2: oklch(83% 0.01 80);
+	--ink: oklch(23% 0.014 65);
+	--ink-2: oklch(43% 0.013 65);
+	--ink-3: oklch(60% 0.011 70);
+	--run: oklch(54% 0.15 258);
+	--park: oklch(57% 0.075 300);
+	--done: oklch(55% 0.11 152);
+	--cut: oklch(57% 0.17 33);
+	--still: oklch(72% 0.012 80);
+	--wait: oklch(70% 0.12 75);
+	--focus: oklch(70% 0.15 68);
+	--focus-soft: oklch(70% 0.15 68 / 0.16);
+	--serif: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+	--sans: "Instrument Sans", ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+	--code: ui-monospace, "SF Mono", Menlo, monospace;
+	--ease: cubic-bezier(0.22, 1, 0.36, 1);
+	color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-	:root { --bg: #151514; --panel: #1c1c1b; --line: #2e2d2b; --ink: #ecebe8; --quiet: #9b988f; --faint: #232321; --accent: #6b9cf0; --good: #4cbf7f; --warn: #e0a84a; --bad: #ec6f5c; --violet: #a48af0; }
+	:root {
+		--paper: oklch(18.5% 0.009 70); --panel: oklch(21.5% 0.009 70); --wash: oklch(25% 0.01 70);
+		--line: oklch(30% 0.01 70); --line-2: oklch(37% 0.012 70);
+		--ink: oklch(93% 0.008 85); --ink-2: oklch(76% 0.01 80); --ink-3: oklch(60% 0.01 80);
+		--run: oklch(70% 0.13 258); --park: oklch(70% 0.07 300); --done: oklch(70% 0.12 152);
+		--cut: oklch(68% 0.15 33); --still: oklch(52% 0.012 80); --wait: oklch(78% 0.12 75);
+		--focus: oklch(80% 0.14 75); --focus-soft: oklch(80% 0.14 75 / 0.18);
+		color-scheme: dark;
+	}
 }
 * { box-sizing: border-box; }
-body { margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; background: var(--bg); color: var(--ink); }
-header { display: flex; gap: 16px; align-items: center; padding: 10px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 5; flex-wrap: wrap; }
-header h1 { font-size: 15px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
-header select { font: inherit; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); max-width: 360px; }
-.kpis { display: flex; gap: 18px; color: var(--quiet); font-size: 13px; flex-wrap: wrap; }
-.kpis b { color: var(--ink); font-weight: 600; }
-nav { display: flex; gap: 2px; padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--panel); overflow-x: auto; }
-nav button { font: inherit; background: none; border: 0; padding: 9px 12px; color: var(--quiet); cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; }
-nav button.on { color: var(--ink); border-color: var(--ink); }
-nav .count { font-size: 11px; background: var(--faint); border-radius: 8px; padding: 0 6px; margin-left: 4px; }
-nav .count.hot { background: var(--bad); color: white; }
-main { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 0; min-height: calc(100vh - 92px); }
-main.wide { grid-template-columns: minmax(0, 1fr); }
-section.view { padding: 16px 20px; overflow: auto; }
-aside { border-left: 1px solid var(--line); background: var(--panel); padding: 16px; overflow: auto; max-height: calc(100vh - 92px); position: sticky; top: 92px; }
-@media (max-width: 900px) { main { grid-template-columns: 1fr; } aside { position: static; max-height: none; border-left: 0; border-top: 1px solid var(--line); } }
-h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--quiet); margin: 18px 0 8px; font-weight: 600; }
-h2:first-child { margin-top: 0; }
-.card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; margin-bottom: 10px; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 14px/1.5 var(--sans); font-feature-settings: "tnum" 1; -webkit-font-smoothing: antialiased; overflow: hidden; }
+button { font: inherit; color: inherit; }
+a { color: var(--run); }
+.num { font-variant-numeric: tabular-nums; }
+.code { font-family: var(--code); font-size: 12px; }
+.dim { color: var(--ink-3); }
+.soft { color: var(--ink-2); }
+
+/* ---------- top bar ---------- */
+.top { height: 60px; display: flex; align-items: center; gap: 22px; padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.brand { font-family: var(--serif); font-size: 25px; letter-spacing: -0.01em; line-height: 1; white-space: nowrap; }
+.brand i { color: var(--ink-3); }
+.runpick { display: flex; flex-direction: column; min-width: 0; }
+.runpick label { font-size: 11px; color: var(--ink-3); letter-spacing: .02em; }
+.runpick select { appearance: none; border: 0; background: none; font: 600 14px var(--sans); color: var(--ink); padding: 0 18px 0 0; max-width: 360px; text-overflow: ellipsis; cursor: pointer;
+	background-image: linear-gradient(45deg, transparent 50%, var(--ink-3) 50%), linear-gradient(135deg, var(--ink-3) 50%, transparent 50%); background-position: calc(100% - 7px) 9px, calc(100% - 3px) 9px; background-size: 4px 4px; background-repeat: no-repeat; }
+.strip { display: flex; gap: 26px; margin-left: auto; align-items: center; }
+.metric { display: flex; flex-direction: column; line-height: 1.15; }
+.metric b { font-size: 17px; font-weight: 600; }
+.metric span { font-size: 11px; color: var(--ink-3); }
+.meter { width: 120px; height: 5px; background: var(--wash); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+.meter i { display: block; height: 100%; background: var(--ink); border-radius: 3px; transition: width .6s var(--ease); }
+.meter.warn i { background: var(--wait); }
+.ask-btn { border: 1px solid var(--wait); background: color-mix(in oklch, var(--wait) 14%, var(--panel)); color: var(--ink); border-radius: 999px; padding: 5px 12px; font-weight: 600; cursor: pointer; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 9px; border-radius: 999px; background: var(--wash); color: var(--ink-2); white-space: nowrap; line-height: 1.6; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; background: var(--still); }
+.s-running { --c: var(--run); } .s-parked { --c: var(--park); } .s-done { --c: var(--done); } .s-cut, .s-failed { --c: var(--cut); }
+.s-merged, .s-archived { --c: var(--still); } .s-pending { --c: var(--line-2); }
+.s-accepted { --c: var(--done); } .s-rejected { --c: var(--cut); } .s-needs_work, .s-pending_review { --c: var(--wait); }
+.chip.st { background: color-mix(in oklch, var(--c, var(--still)) 13%, transparent); color: color-mix(in oklch, var(--c, var(--ink-2)) 80%, var(--ink)); }
+.chip.st .dot, .dot.st { background: var(--c, var(--still)); }
+
+/* ---------- layout ---------- */
+.app { display: grid; grid-template-columns: 188px minmax(0, 1fr) auto; height: calc(100vh - 60px); }
+.rail { border-right: 1px solid var(--line); padding: 18px 10px; display: flex; flex-direction: column; gap: 2px; background: var(--paper); overflow: auto; }
+.rail button { display: flex; align-items: center; justify-content: space-between; text-align: left; border: 0; background: none; padding: 7px 10px; border-radius: 7px; color: var(--ink-2); cursor: pointer; font-weight: 500; }
+.rail button:hover { background: var(--wash); color: var(--ink); }
+.rail button.on { background: var(--ink); color: var(--paper); }
+.rail button .n { font-size: 11px; color: var(--ink-3); }
+.rail button.on .n { color: color-mix(in oklch, var(--paper) 70%, transparent); }
+.rail button .n.hot { background: var(--wait); color: var(--ink); border-radius: 999px; padding: 0 7px; }
+.rail .sep { height: 1px; background: var(--line); margin: 12px 6px; }
+.rail .legend { padding: 4px 10px; font-size: 12px; color: var(--ink-3); display: grid; gap: 5px; }
+.rail .legend div { display: flex; align-items: center; gap: 8px; }
+.stage { position: relative; overflow: auto; min-width: 0; }
+.page { padding: 26px clamp(20px, 3vw, 40px) 60px; max-width: 1180px; }
+h1.view { font-family: var(--serif); font-weight: 400; font-size: 34px; letter-spacing: -0.015em; margin: 0 0 4px; }
+.lede { color: var(--ink-2); margin: 0 0 26px; max-width: 70ch; }
+h3 { font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); margin: 30px 0 12px; }
+.empty { color: var(--ink-3); padding: 30px 0; max-width: 56ch; }
+
+/* ---------- graph ---------- */
+.graph { position: absolute; inset: 0; overflow: hidden; background:
+	radial-gradient(circle at 1px 1px, color-mix(in oklch, var(--ink) 7%, transparent) 1px, transparent 0) 0 0 / 22px 22px, var(--paper); cursor: grab; }
+.graph.drag { cursor: grabbing; }
+.graph svg { width: 100%; height: 100%; display: block; }
+.ring { fill: none; stroke: var(--line); stroke-dasharray: 2 5; }
+.link { fill: none; stroke: var(--line-2); stroke-width: 1.3; transition: opacity .3s; }
+.link.hi { stroke: var(--focus); stroke-width: 2.2; }
+.gnode { cursor: pointer; transition: opacity .3s var(--ease); }
+.gnode .body { stroke-width: 2; transition: r .5s var(--ease); }
+.gnode.leaf .body { fill: var(--c); stroke: var(--panel); }
+.gnode.internal .body { fill: color-mix(in oklch, var(--c) 18%, var(--panel)); stroke: var(--c); stroke-width: 2.6; }
+.gnode.root .body { fill: var(--panel); stroke: var(--c); stroke-width: 3; }
+.gnode.root .core { fill: var(--c); }
+.gnode .halo { fill: none; stroke: var(--focus); stroke-width: 3; opacity: 0; transition: opacity .2s; }
+.gnode.sel .halo { opacity: 1; }
+.gnode:hover .body { filter: brightness(1.06); }
+.gnode .orbit { fill: none; stroke: var(--c); stroke-width: 1.2; stroke-dasharray: 3 4; opacity: .75; transform-box: fill-box; transform-origin: center; animation: spin 6s linear infinite; }
+.gnode .sat { fill: var(--wait); stroke: var(--panel); stroke-width: 1; }
+.glabel { font-size: 11.5px; fill: var(--ink-2); pointer-events: none; paint-order: stroke; stroke: var(--paper); stroke-width: 4px; stroke-linejoin: round; }
+.glabel.strong { fill: var(--ink); font-weight: 600; }
+.gsub { font-size: 10.5px; fill: var(--ink-3); pointer-events: none; paint-order: stroke; stroke: var(--paper); stroke-width: 4px; }
+.faded { opacity: .18; }
+.famband { fill: var(--focus-soft); stroke: var(--focus); stroke-width: 1; stroke-dasharray: 4 4; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .gnode .orbit { animation: none; } * { transition: none !important; } }
+.gtools { position: absolute; left: 16px; top: 14px; display: flex; gap: 8px; align-items: center; z-index: 2; flex-wrap: wrap; }
+.gtools .group { display: flex; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.gtools .group button { border: 0; background: none; padding: 5px 10px; cursor: pointer; color: var(--ink-2); }
+.gtools .group button + button { border-left: 1px solid var(--line); }
+.gtools .group button:hover { background: var(--wash); color: var(--ink); }
+.gtools .group button.on { background: var(--ink); color: var(--paper); }
+.famtag { background: var(--focus-soft); border: 1px solid var(--focus); border-radius: 8px; padding: 4px 6px 4px 10px; font-size: 13px; display: flex; gap: 8px; align-items: center; }
+.famtag button { border: 0; background: none; cursor: pointer; color: var(--ink-2); padding: 0 4px; font-size: 15px; line-height: 1; }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--paper); padding: 8px 10px; border-radius: 8px; font-size: 12px; max-width: 300px; z-index: 5; opacity: 0; transform: translateY(4px); transition: opacity .12s, transform .12s; }
+.tip.on { opacity: 1; transform: none; }
+.tip b { display: block; font-size: 13px; margin-bottom: 2px; }
+.gfoot { position: absolute; left: 16px; bottom: 14px; font-size: 12px; color: var(--ink-3); z-index: 2; background: color-mix(in oklch, var(--paper) 85%, transparent); padding: 4px 8px; border-radius: 6px; }
+
+/* ---------- drawer ---------- */
+.drawer { width: 0; overflow: hidden; border-left: 1px solid var(--line); background: var(--panel); transition: width .35s var(--ease); }
+.drawer.open { width: min(460px, 42vw); }
+.drawer .inner { width: min(460px, 42vw); height: 100%; display: flex; flex-direction: column; }
+.dhead { padding: 18px 20px 12px; border-bottom: 1px solid var(--line); }
+.dhead .kicker { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--ink-3); }
+.dhead h2 { font-family: var(--serif); font-weight: 400; font-size: 26px; line-height: 1.15; margin: 6px 0 4px; }
+.dhead .close { margin-left: auto; border: 0; background: none; font-size: 20px; color: var(--ink-3); cursor: pointer; padding: 0 2px; }
+.tabs { display: flex; gap: 2px; padding: 0 14px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.tabs button { border: 0; background: none; padding: 9px 9px; color: var(--ink-3); cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap; font-weight: 500; }
+.tabs button.on { color: var(--ink); border-color: var(--ink); }
+.dbody { padding: 16px 20px 40px; overflow: auto; flex: 1; }
+.kv { display: grid; grid-template-columns: 104px 1fr; gap: 7px 12px; font-size: 13px; margin: 0; }
+.kv dt { color: var(--ink-3); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.prose { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; color: var(--ink); }
+.box { background: var(--wash); border-radius: 8px; padding: 10px 12px; margin: 6px 0; }
+.gauges { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin: 4px 0 6px; }
+.gauge { padding: 10px 0 0; border-top: 2px solid var(--line); }
+.gauge b { font-size: 19px; font-weight: 600; display: block; }
+.gauge span { font-size: 11.5px; color: var(--ink-3); }
+.bar { height: 6px; border-radius: 3px; background: var(--wash); overflow: hidden; margin-top: 6px; }
+.bar i { display: block; height: 100%; background: var(--ink-2); border-radius: 3px; }
+.tl { position: relative; padding-left: 18px; }
+.tl::before { content: ""; position: absolute; left: 5px; top: 4px; bottom: 4px; width: 1px; background: var(--line); }
+.tl .ev { position: relative; margin: 0 0 12px; }
+.tl .ev::before { content: ""; position: absolute; left: -17px; top: 7px; width: 9px; height: 9px; border-radius: 50%; background: var(--panel); border: 2px solid var(--ink-3); }
+.tl .ev.think::before { border-color: var(--park); }
+.tl .ev.tool::before { border-color: var(--run); }
+.tl .ev.res::before { border-color: var(--done); }
+.tl .ev.err::before { border-color: var(--cut); }
+.tl .ev.msg::before { border-color: var(--wait); background: var(--wait); }
+.tl .meta { font-size: 11.5px; color: var(--ink-3); }
+.tl .meta b { color: var(--ink-2); font-weight: 600; }
+details.fold summary { cursor: pointer; list-style: none; }
+details.fold summary::-webkit-details-marker { display: none; }
+details.fold[open] summary .more { display: none; }
+.pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--code); font-size: 11.5px; background: var(--wash); border-radius: 6px; padding: 7px 9px; margin-top: 4px; max-height: 260px; overflow: auto; color: var(--ink-2); }
+.crumbs { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 13px; }
+.crumbs button, .linkbtn { border: 0; background: none; padding: 1px 2px; color: var(--run); cursor: pointer; text-align: left; }
+.crumbs .sep { color: var(--ink-3); }
+.mlist { display: grid; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.mrow { display: grid; grid-template-columns: 12px 1fr auto; gap: 10px; align-items: center; padding: 8px 10px; background: var(--panel); cursor: pointer; }
+.mrow:hover { background: var(--wash); }
+.mrow .t { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mrow .a { grid-column: 2 / 4; font-size: 12px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: -4px; }
+.btn { border: 1px solid var(--line-2); background: var(--panel); border-radius: 7px; padding: 5px 11px; cursor: pointer; font-weight: 500; }
+.btn:hover { background: var(--wash); }
+.btn.primary { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.btn.focus { border-color: var(--focus); background: var(--focus-soft); }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* ---------- tables, lists ---------- */
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
-th { text-align: left; color: var(--quiet); font-weight: 500; border-bottom: 1px solid var(--line); padding: 6px 8px; white-space: nowrap; }
-td { border-bottom: 1px solid var(--line); padding: 6px 8px; vertical-align: top; }
-tr.click { cursor: pointer; } tr.click:hover td { background: var(--faint); }
-.mono { font-family: var(--mono); font-size: 12px; }
-.quiet { color: var(--quiet); }
-.pill { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px; background: var(--faint); color: var(--quiet); white-space: nowrap; }
-.pill.running { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--accent); }
-.pill.parked { background: color-mix(in srgb, var(--violet) 16%, transparent); color: var(--violet); }
-.pill.done, .pill.accepted, .pill.succeeded, .pill.cached { background: color-mix(in srgb, var(--good) 16%, transparent); color: var(--good); }
-.pill.cut, .pill.failed, .pill.rejected, .pill.cancelled { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
-.pill.needs_work, .pill.pending_review, .pill.queued, .pill.gated, .pill.escalated, .pill.open { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
-.pill.merged, .pill.archived { background: var(--faint); color: var(--quiet); }
-.tree ul { list-style: none; margin: 0; padding-left: 18px; border-left: 1px dashed var(--line); }
-.tree > ul { padding-left: 0; border: 0; }
-.tree li { margin: 4px 0; }
-.node { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); cursor: pointer; }
-.node:hover { border-color: var(--quiet); }
-.node.sel { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-.node .title { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.node .act { color: var(--quiet); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; grid-column: 2 / 4; }
-.role { font-size: 10px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--quiet); width: 52px; }
-.bar { height: 4px; background: var(--faint); border-radius: 2px; overflow: hidden; width: 80px; }
-.bar > i { display: block; height: 100%; background: var(--accent); }
-.bar.hot > i { background: var(--warn); }
-.metrics { display: flex; gap: 10px; align-items: center; font-size: 12px; color: var(--quiet); }
-.reviewers { margin: 2px 0 0 0; font-size: 11px; color: var(--quiet); }
-pre, .msg { white-space: pre-wrap; word-break: break-word; font-family: var(--mono); font-size: 12px; background: var(--faint); padding: 8px 10px; border-radius: 6px; margin: 6px 0; max-height: 360px; overflow: auto; }
-.msg.thinking { border-left: 3px solid var(--violet); }
-.msg.tool { border-left: 3px solid var(--accent); }
-.feed .row { display: grid; grid-template-columns: 70px 150px 160px 1fr; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
-.md h1 { font-size: 20px; } .md h2 { text-transform: none; letter-spacing: 0; font-size: 16px; color: var(--ink); } .md h3 { font-size: 14px; }
-.md table td, .md table th { border: 1px solid var(--line); }
-textarea { width: 100%; font: inherit; padding: 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--ink); min-height: 60px; }
-button.primary { font: inherit; background: var(--ink); color: var(--bg); border: 0; border-radius: 6px; padding: 6px 12px; cursor: pointer; margin-top: 6px; }
-svg text { fill: var(--quiet); font-size: 11px; }
-.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
-.empty { color: var(--quiet); padding: 24px 0; }
-dl { display: grid; grid-template-columns: 110px 1fr; gap: 4px 10px; margin: 0; font-size: 13px; }
-dt { color: var(--quiet); }
-dd { margin: 0; overflow-wrap: anywhere; }
+th { text-align: left; font-weight: 500; color: var(--ink-3); font-size: 12px; padding: 7px 10px; border-bottom: 1px solid var(--line-2); white-space: nowrap; cursor: default; }
+th.sort { cursor: pointer; } th.sort:hover { color: var(--ink); }
+td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr.click { cursor: pointer; } tr.click:hover td { background: var(--wash); }
+td.r, th.r { text-align: right; }
+.hbar { display: grid; grid-template-columns: minmax(140px, 260px) 1fr 110px; gap: 12px; align-items: center; padding: 6px 0; font-size: 13px; cursor: pointer; }
+.hbar:hover .lbl { color: var(--ink); }
+.hbar .lbl { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hbar .track { position: relative; height: 14px; background: var(--wash); border-radius: 3px; }
+.hbar .fill { position: absolute; inset: 0 auto 0 0; border-radius: 3px; background: var(--ink-2); }
+.hbar .cap { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--ink); }
+.hbar .v { text-align: right; }
+.split { display: flex; height: 26px; border-radius: 4px; overflow: hidden; margin: 8px 0 10px; }
+.split div { height: 100%; }
+.keys { display: flex; gap: 18px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2); }
+.keys span { display: inline-flex; align-items: center; gap: 7px; }
+.sq { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.chart text { fill: var(--ink-3); font-size: 11px; font-family: var(--sans); }
+.cols2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 30px 40px; }
+
+/* families */
+.fam { display: grid; grid-template-columns: 96px 1fr auto; gap: 18px; align-items: center; padding: 16px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+.fam:hover .ft { text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; }
+.fam .ft { font-weight: 600; font-size: 15px; }
+.fam .fs { display: flex; gap: 16px; font-size: 12.5px; color: var(--ink-2); flex-wrap: wrap; margin-top: 4px; }
+.fam.on { background: linear-gradient(90deg, var(--focus-soft), transparent 70%); }
+
+/* findings */
+.find { display: grid; grid-template-columns: 110px 1fr 120px; gap: 18px; padding: 14px 0; border-bottom: 1px solid var(--line); cursor: pointer; align-items: start; }
+.find:hover .claim { color: var(--ink); }
+.find .claim { color: var(--ink-2); }
+.steps { display: flex; gap: 4px; margin-top: 6px; }
+.steps i { width: 18px; height: 5px; border-radius: 3px; background: var(--c); }
+.lvl { font-size: 11px; letter-spacing: .03em; text-transform: uppercase; color: var(--ink-3); }
+
+/* boards */
+.boards { display: grid; grid-template-columns: 230px 1fr; gap: 28px; }
+.blist button { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 8px 10px; border-radius: 7px; cursor: pointer; color: var(--ink-2); }
+.blist button.on { background: var(--wash); color: var(--ink); font-weight: 600; }
+.blist button .n { float: right; color: var(--ink-3); font-weight: 400; }
+.cps { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.cp { border-top: 2px solid var(--c, var(--line-2)); padding-top: 8px; }
+.cp .who { font-weight: 600; font-size: 13px; }
+.post { display: grid; grid-template-columns: 26px 1fr; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.avatar { width: 26px; height: 26px; border-radius: 50%; background: var(--wash); display: grid; place-items: center; font-size: 11px; font-weight: 700; color: var(--ink-2); }
+.post .kind { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-3); }
+.post.peer_review .kind { color: var(--done); }
+
+/* epochs */
+.etrack { display: flex; height: 54px; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); margin: 6px 0 24px; }
+.etrack div { display: flex; flex-direction: column; justify-content: center; padding: 0 12px; border-right: 1px solid var(--line); background: var(--panel); min-width: 90px; cursor: pointer; }
+.etrack div.cur { background: var(--focus-soft); }
+.etrack b { font-size: 13px; } .etrack span { font-size: 11.5px; color: var(--ink-3); }
+.epoch { padding: 18px 0 22px; border-bottom: 1px solid var(--line); }
+
+/* inbox */
+.q { padding: 18px 20px; border: 1px solid var(--wait); background: color-mix(in oklch, var(--wait) 7%, var(--panel)); border-radius: 10px; margin-bottom: 14px; }
+.q h4 { margin: 0 0 6px; font-size: 16px; }
+.q textarea { width: 100%; min-height: 72px; margin-top: 10px; border: 1px solid var(--line-2); border-radius: 8px; padding: 9px 10px; font: inherit; background: var(--panel); color: var(--ink); resize: vertical; }
+.opts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.report-row { display: grid; grid-template-columns: 1fr auto; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+.report-row:hover b { text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--line-2); }
+.md { max-width: 78ch; font-size: 15px; line-height: 1.65; }
+.md h1 { font-family: var(--serif); font-weight: 400; font-size: 34px; line-height: 1.15; margin: 0 0 14px; }
+.md h2 { font-family: var(--serif); font-weight: 400; font-size: 25px; margin: 30px 0 8px; }
+.md h3 { margin-top: 24px; }
+.md table { font-size: 12.5px; margin: 10px 0; display: block; overflow-x: auto; }
+.md td { border: 1px solid var(--line); }
+.md code { font-family: var(--code); font-size: 12.5px; background: var(--wash); padding: 1px 4px; border-radius: 4px; }
+.md pre { background: var(--wash); padding: 10px 12px; border-radius: 8px; overflow: auto; font-size: 12.5px; }
+
+/* feed */
+.filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; align-items: center; }
+.filters button { border: 1px solid var(--line-2); background: var(--panel); border-radius: 999px; padding: 3px 11px; cursor: pointer; font-size: 12.5px; color: var(--ink-2); }
+.filters button.on { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+.filters input { border: 1px solid var(--line-2); border-radius: 999px; padding: 4px 12px; font: inherit; font-size: 13px; background: var(--panel); color: var(--ink); min-width: 220px; }
+.frow { display: grid; grid-template-columns: 72px 130px minmax(120px, 200px) 1fr; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
+.frow .ty { color: var(--ink-2); font-weight: 600; }
+
+@media (max-width: 980px) {
+	.app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+	.rail { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); padding: 8px; }
+	.rail .sep, .rail .legend { display: none; }
+	.drawer.open { position: fixed; inset: 60px 0 0 auto; width: 100vw; z-index: 10; }
+	.drawer .inner { width: 100vw; }
+	.strip .metric:nth-child(n+3) { display: none; }
+	.boards { grid-template-columns: 1fr; }
+}
 </style>
 </head>
 <body>
-<header>
-	<h1>one_piece</h1>
-	<select id="run"></select>
-	<div class="kpis" id="kpis"></div>
+<header class="top">
+	<div class="brand">one<i>_</i>piece</div>
+	<div class="runpick"><label for="run">Run</label><select id="run"></select></div>
+	<div class="strip" id="strip"></div>
 </header>
-<nav id="tabs"></nav>
-<main id="main">
-	<section class="view" id="view"></section>
-	<aside id="side"></aside>
-</main>
+<div class="app">
+	<nav class="rail" id="rail"></nav>
+	<section class="stage" id="stage"></section>
+	<aside class="drawer" id="drawer"><div class="inner" id="dinner"></div></aside>
+</div>
+<div class="tip" id="tip"></div>
 <script>
-const $ = (s) => document.querySelector(s);
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-const fmt = (n) => (n ?? 0).toLocaleString();
-const ago = (ts) => { const s = Math.round((Date.now() - ts) / 1000); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`; };
-const pill = (s) => `<span class="pill ${esc(s)}">${esc(String(s).replace(/_/g, " "))}</span>`;
-let state = null, runId = null, tab = "tree", selected = null, feed = [], source = null;
+const fmt = (n) => Math.round(n ?? 0).toLocaleString();
+const kfmt = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(n >= 1e4 ? 0 : 1)}k` : `${Math.round(n ?? 0)}`);
+const ago = (ts) => { const s = Math.max(0, Math.round((Date.now() - ts) / 1000)); return s < 60 ? `${s}s ago` : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 3600)} h ago` : new Date(ts).toLocaleDateString(); };
+const dur = (ms) => { const s = Math.round(ms / 1000); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`; };
+const ROLE_NAME = { root: "Root", internal: "Explorer", leaf: "Worker", claims_reviewer: "Claims reviewer", hidden_reviewer: "Hidden reviewer", root_reviewer: "Root reviewer" };
+const TREE = new Set(["root", "internal", "leaf"]);
+const LIVE = new Set(["running", "parked", "pending"]);
+const statusChip = (s) => `<span class="chip st s-${esc(s)}"><span class="dot"></span>${esc(String(s).replace(/_/g, " "))}</span>`;
 
-const TABS = [["tree", "Tree"], ["inbox", "Inbox"], ["findings", "Findings"], ["boards", "Boards"], ["resources", "Resources"], ["tokens", "Tokens"], ["epochs", "Epochs"], ["live", "Live"]];
+const S = { state: null, runId: null, view: "swarm", sel: null, selFinding: null, family: null, epoch: null, drawerTab: "overview", feed: [], feedFilter: "all", feedQuery: "", sort: { key: "tokens", dir: -1 }, boardFam: null, reader: null, zoom: { k: 1, x: 0, y: 0 }, fitted: false, source: null };
 
-function md(text) {
-	const lines = esc(text).split("\n"); let out = "", inCode = false, inTable = false, inList = false;
-	const inline = (s) => s.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-	for (const line of lines) {
-		if (line.startsWith("```")) { out += inCode ? "</pre>" : "<pre>"; inCode = !inCode; continue; }
-		if (inCode) { out += line + "\n"; continue; }
-		if (/^\|.*\|$/.test(line.trim())) {
-			if (/^\|[\s:|-]+\|$/.test(line.trim())) continue;
-			if (!inTable) { out += "<table>"; inTable = true; }
-			out += "<tr>" + line.trim().slice(1, -1).split(/(?<!\\)\|/).map((c) => `<td>${inline(c.trim())}</td>`).join("") + "</tr>"; continue;
-		} else if (inTable) { out += "</table>"; inTable = false; }
-		if (/^\s*[-*] /.test(line)) { if (!inList) { out += "<ul>"; inList = true; } out += `<li>${inline(line.replace(/^\s*[-*] /, ""))}</li>`; continue; }
-		else if (inList) { out += "</ul>"; inList = false; }
-		const h = /^(#{1,4}) (.*)/.exec(line);
-		if (h) { out += `<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`; continue; }
-		out += line.trim() ? `<p>${inline(line)}</p>` : "";
-	}
-	if (inTable) out += "</table>"; if (inList) out += "</ul>"; if (inCode) out += "</pre>";
-	return `<div class="md">${out}</div>`;
-}
-
-async function api(path, init) { const r = await fetch(path, init); if (!r.ok) throw new Error(await r.text()); return r.json(); }
-
+// ---------- data ----------
+async function api(path, init) { const r = await fetch(path, init); if (!r.ok) throw new Error((await r.text()) || r.statusText); return r.json(); }
 async function loadRuns() {
 	const runs = await api("/api/runs");
 	const sel = $("#run");
-	sel.innerHTML = runs.map((r) => `<option value="${esc(r.id)}">${esc(r.goal.title)} · ${esc(r.status)} · ${new Date(r.createdAt).toLocaleString()}</option>`).join("") || "<option>No runs yet</option>";
-	if (!runId && runs[0]) runId = runs[0].id;
-	if (runId) sel.value = runId;
-	sel.onchange = () => { runId = sel.value; selected = null; feed = []; connect(); refresh(); };
+	sel.innerHTML = runs.map((r) => `<option value="${esc(r.id)}">${esc(r.goal.title)} — ${esc(r.status)}, ${new Date(r.createdAt).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</option>`).join("") || "<option>No runs yet</option>";
+	if (!S.runId && runs[0]) S.runId = runs[0].id;
+	if (S.runId) sel.value = S.runId;
+	sel.onchange = () => { S.runId = sel.value; S.sel = null; S.family = null; S.epoch = null; S.feed = []; S.fitted = false; closeDrawer(); connect(); refresh(true); };
 }
-
 function connect() {
-	source?.close();
-	if (!runId) return;
-	source = new EventSource(`/api/runs/${encodeURIComponent(runId)}/stream`);
-	source.onmessage = (m) => {
+	S.source?.close();
+	if (!S.runId) return;
+	S.source = new EventSource(`/api/runs/${encodeURIComponent(S.runId)}/stream`);
+	S.source.onmessage = (m) => {
 		const { events } = JSON.parse(m.data);
-		feed.push(...events); if (feed.length > 1500) feed = feed.slice(-1500);
-		if (tab === "live") render();
-		if (selected && events.some((e) => e.nodeId === selected)) renderSide();
+		S.feed.push(...events); if (S.feed.length > 3000) S.feed = S.feed.slice(-3000);
+		if (S.view === "feed") renderView();
+		if (S.sel && S.drawerTab === "activity" && events.some((e) => e.nodeId === S.sel)) renderDrawer();
 	};
 }
-
-async function refresh() {
-	if (!runId) return;
-	state = await api(`/api/runs/${encodeURIComponent(runId)}/state`);
-	state.byId = Object.fromEntries(state.nodes.map((n) => [n.id, n]));
-	render();
+async function refresh(force) {
+	if (!S.runId) { renderAll(); return; }
+	const st = await api(`/api/runs/${encodeURIComponent(S.runId)}/state`);
+	// Re-render only when something happened, so the page never flickers under the pointer.
+	if (!force && S.state && st.lastSeq === S.state.lastSeq && st.run?.id === S.state.run?.id) return;
+	st.byId = Object.fromEntries(st.nodes.map((n) => [n.id, n]));
+	st.tree = st.nodes.filter((n) => TREE.has(n.role));
+	st.sub = {};
+	const subOf = (id) => { if (st.sub[id] !== undefined) return st.sub[id]; const n = st.byId[id]; if (!n) return 0; return (st.sub[id] = (n.spent?.tokens ?? 0) + (n.children || []).reduce((a, c) => a + subOf(c), 0)); };
+	for (const n of st.nodes) subOf(n.id);
+	st.reviewersOf = {};
+	for (const n of st.nodes) if (n.targetNodeId && !TREE.has(n.role)) (st.reviewersOf[n.targetNodeId] ??= []).push(n);
+	S.state = st;
+	if (!S.epoch) S.epoch = st.run?.epoch ?? 1;
+	renderAll();
 }
 
-const spentOf = (n) => n.spent?.tokens ?? 0;
-function subtreeSpent(id) { const n = state.byId[id]; if (!n) return 0; return spentOf(n) + (n.children || []).reduce((a, c) => a + subtreeSpent(c), 0); }
+// ---------- helpers on state ----------
+const nodeOf = (id) => S.state?.byId[id];
+const titleOf = (id) => nodeOf(id)?.goal.title ?? id;
+function rootOfEpoch(epoch) { const e = S.state.epochs.find((x) => x.number === epoch); return e ? nodeOf(e.rootNodeId) : S.state.tree.find((n) => n.role === "root"); }
+function families() {
+	return S.state.tree.filter((n) => n.children?.some((c) => TREE.has(nodeOf(c)?.role))).map((head) => {
+		const members = head.children.map(nodeOf).filter((m) => m && TREE.has(m.role));
+		const ids = new Set(members.map((m) => m.id));
+		return {
+			head, members,
+			tokens: members.reduce((a, m) => a + S.state.sub[m.id], 0),
+			running: members.filter((m) => m.status === "running").length,
+			live: members.filter((m) => LIVE.has(m.status)).length,
+			accepted: S.state.findings.filter((f) => f.status === "accepted" && [...ids].some((i) => i === f.nodeId || isDescendant(f.nodeId, i))).length,
+			posts: S.state.posts.filter((p) => p.familyId === head.id).length,
+			recs: S.state.recommendations.filter((r) => r.status === "open" && r.deciderNodeId === head.id).length,
+		};
+	});
+}
+function isDescendant(id, ancestorId) { let n = nodeOf(id); while (n?.parentId) { if (n.parentId === ancestorId) return true; n = nodeOf(n.parentId); } return false; }
+function lineage(id) { const out = []; let n = nodeOf(id); while (n?.parentId) { n = nodeOf(n.parentId); if (n) out.unshift(n); } return out; }
 
-function renderHeader() {
-	const r = state.run; if (!r) return;
-	const total = state.nodes.reduce((a, n) => a + spentOf(n), 0);
-	const usd = state.nodes.reduce((a, n) => a + (n.spent?.usd ?? 0), 0);
-	const running = state.nodes.filter((n) => n.status === "running").length;
-	const parked = state.nodes.filter((n) => n.status === "parked").length;
-	const accepted = state.findings.filter((f) => f.status === "accepted").length;
-	$("#kpis").innerHTML = [
-		`${pill(r.status)}`, `epoch <b>${r.epoch}</b>`,
-		`tokens <b>${fmt(total)}</b>${r.budget.tokens ? ` / ${fmt(r.budget.tokens)}` : ""}`, `cost <b>$${usd.toFixed(2)}</b>`,
-		`agents <b>${state.nodes.length}</b> (${running} running, ${parked} parked)`, `accepted findings <b>${accepted}</b>`,
-	].join("<span>·</span>");
-	const waiting = state.questions.filter((q) => q.holder === "user" && q.status !== "answered").length;
-	$("#tabs").innerHTML = TABS.map(([k, label]) => {
-		const n = k === "inbox" ? waiting : k === "findings" ? state.findings.length : 0;
-		return `<button class="${tab === k ? "on" : ""}" data-tab="${k}">${label}${n ? `<span class="count ${k === "inbox" ? "hot" : ""}">${n}</span>` : ""}</button>`;
-	}).join("");
-	document.querySelectorAll("#tabs button").forEach((b) => (b.onclick = () => { tab = b.dataset.tab; render(); }));
+// ---------- chrome ----------
+function renderStrip() {
+	const st = S.state, r = st?.run;
+	if (!r) { $("#strip").innerHTML = ""; return; }
+	const total = st.nodes.reduce((a, n) => a + (n.spent?.tokens ?? 0), 0);
+	const usd = st.nodes.reduce((a, n) => a + (n.spent?.usd ?? 0), 0);
+	const frac = r.budget.tokens ? total / r.budget.tokens : 0;
+	const running = st.nodes.filter((n) => n.status === "running").length;
+	const parked = st.nodes.filter((n) => n.status === "parked").length;
+	const acc = st.findings.filter((f) => f.status === "accepted").length;
+	const waiting = st.questions.filter((q) => q.holder === "user" && q.status !== "answered").length;
+	$("#strip").innerHTML = `
+		<div class="metric"><span>Status</span>${statusChip(r.status)}</div>
+		<div class="metric"><b class="num">${fmt(total)}</b><span>tokens${r.budget.tokens ? ` of ${kfmt(r.budget.tokens)}` : ""}</span>${r.budget.tokens ? `<div class="meter ${frac > 0.8 ? "warn" : ""}"><i style="width:${Math.min(100, frac * 100).toFixed(1)}%"></i></div>` : ""}</div>
+		<div class="metric"><b class="num">$${usd.toFixed(2)}</b><span>est. cost${r.budget.usd ? ` of $${r.budget.usd}` : ""}</span></div>
+		<div class="metric"><b class="num">${running}<span class="dim" style="font-size:13px"> + ${parked} waiting</span></b><span>agents working</span></div>
+		<div class="metric"><b class="num">${acc}</b><span>accepted findings</span></div>
+		<div class="metric"><b class="num">${r.epoch}</b><span>epoch</span></div>
+		${waiting ? `<button class="ask-btn" onclick="go('inbox')">${waiting} question${waiting > 1 ? "s" : ""} for you</button>` : ""}`;
+}
+const VIEWS = [["swarm", "Swarm"], ["families", "Families"], ["findings", "Findings"], ["boards", "Boards"], ["tokens", "Tokens"], ["epochs", "Epochs"], ["inbox", "Inbox"], ["feed", "Live feed"]];
+function renderRail() {
+	const st = S.state;
+	const count = { families: st ? families().length : 0, findings: st?.findings.length ?? 0, boards: st?.posts.length ?? 0, epochs: st?.epochs.length ?? 0 };
+	const waiting = st ? st.questions.filter((q) => q.holder === "user" && q.status !== "answered").length : 0;
+	$("#rail").innerHTML = VIEWS.map(([k, l]) => `<button class="${S.view === k ? "on" : ""}" onclick="go('${k}')">${l}${k === "inbox" && waiting ? `<span class="n hot">${waiting}</span>` : count[k] ? `<span class="n num">${count[k]}</span>` : ""}</button>`).join("") +
+		`<div class="sep"></div><div class="legend">
+			<div><svg width="14" height="14"><circle cx="7" cy="7" r="5" fill="var(--panel)" stroke="var(--ink-2)" stroke-width="2.4"/><circle cx="7" cy="7" r="2" fill="var(--ink-2)"/></svg>Root</div>
+			<div><svg width="14" height="14"><circle cx="7" cy="7" r="5" fill="var(--wash)" stroke="var(--ink-2)" stroke-width="2.2"/></svg>Explorer (splits work)</div>
+			<div><svg width="14" height="14"><circle cx="7" cy="7" r="5.5" fill="var(--ink-2)"/></svg>Worker (does work)</div>
+			<div><svg width="14" height="14"><circle cx="7" cy="7" r="3" fill="var(--wait)"/></svg>Reviewer at work</div>
+			<div style="margin-top:4px"><span class="dot st s-running"></span>running</div>
+			<div><span class="dot st s-parked"></span>waiting (costs nothing)</div>
+			<div><span class="dot st s-done"></span>done</div>
+			<div><span class="dot st s-cut"></span>cut or failed</div>
+			<div><span class="dot st s-archived"></span>merged or archived</div>
+			<div style="margin-top:4px">Size = tokens used by the branch</div>
+		</div>`;
+}
+function go(view) { S.view = view; S.reader = null; renderAll(); }
+function renderAll() { renderStrip(); renderRail(); renderView(); renderDrawer(); }
+
+// ---------- views ----------
+function renderView() {
+	const stage = $("#stage");
+	if (!S.state?.run) { stage.innerHTML = `<div class="page"><h1 class="view">No runs yet</h1><p class="lede">Start one from a project folder: <span class="code">one-piece run "your goal" --dashboard</span>. This page fills in as the swarm works.</p></div>`; return; }
+	if (S.reader) return renderReader();
+	if (S.view === "swarm") return renderSwarm();
+	const page = { families: viewFamilies, findings: viewFindings, boards: viewBoards, tokens: viewTokens, epochs: viewEpochs, inbox: viewInbox, feed: viewFeed }[S.view]();
+	const keepScroll = stage.scrollTop;
+	stage.innerHTML = `<div class="page">${page}</div>`;
+	stage.scrollTop = keepScroll;
+	bindPage(stage);
 }
 
-function nodeCard(n) {
-	const sub = subtreeSpent(n.id), budget = n.budget?.tokens;
-	const frac = budget ? Math.min(1, sub / budget) : 0;
-	const reviewers = state.nodes.filter((r) => r.targetNodeId === n.id && r.role !== "root" && r.parentId === n.id);
-	const rv = reviewers.length ? `<div class="reviewers">${reviewers.filter((r) => r.role === "claims_reviewer").length} claims reviews · ${reviewers.filter((r) => r.role === "hidden_reviewer").length} hidden reviews</div>` : "";
-	return `<div class="node ${selected === n.id ? "sel" : ""}" data-node="${esc(n.id)}">
-		<span class="role">${esc(n.role)}</span>
-		<span class="title" title="${esc(n.goal.text)}">${esc(n.goal.title)}</span>
-		<span class="metrics">${n.grade !== undefined ? `grade ${n.grade.toFixed(2)}` : ""} ${pill(n.status)} <span class="bar ${frac > 0.75 ? "hot" : ""}"><i style="width:${(frac * 100).toFixed(0)}%"></i></span> <span class="mono">${fmt(sub)}</span></span>
-		<span class="act">${esc(n.model ? `${n.model.provider}/${n.model.id} · ` : "")}${esc(n.activity ?? n.statusReason ?? "")}</span>
-	</div>${rv}`;
+// ---------- swarm graph ----------
+const RING = 150;
+function layout(root) {
+	const kids = (n) => (n.children || []).map(nodeOf).filter((c) => c && TREE.has(c.role));
+	const leaves = {};
+	const count = (n) => (leaves[n.id] = kids(n).length ? kids(n).reduce((a, c) => a + count(c), 0) : 1);
+	count(root);
+	const pos = {};
+	const place = (n, a0, a1, depth) => {
+		const a = (a0 + a1) / 2;
+		pos[n.id] = { a, r: depth * RING, depth, x: Math.sin(a) * depth * RING, y: -Math.cos(a) * depth * RING };
+		let cur = a0;
+		for (const c of kids(n)) { const span = ((a1 - a0) * leaves[c.id]) / leaves[n.id]; place(c, cur, cur + span, depth + 1); cur += span; }
+	};
+	const top = kids(root).length;
+	place(root, top === 1 ? -0.6 : 0, top === 1 ? 0.6 : Math.PI * 2, 0);
+	return pos;
+}
+function polar(a, r) { return [Math.sin(a) * r, -Math.cos(a) * r]; }
+function linkPath(p, c) {
+	if (p.depth === 0) { const m = polar(c.a, c.r * 0.55); return `M0 0 Q${m[0].toFixed(1)} ${m[1].toFixed(1)} ${c.x.toFixed(1)} ${c.y.toFixed(1)}`; }
+	const c1 = polar(p.a, p.r + RING * 0.5), c2 = polar(c.a, c.r - RING * 0.5);
+	return `M${p.x.toFixed(1)} ${p.y.toFixed(1)} C${c1[0].toFixed(1)} ${c1[1].toFixed(1)} ${c2[0].toFixed(1)} ${c2[1].toFixed(1)} ${c.x.toFixed(1)} ${c.y.toFixed(1)}`;
+}
+function renderSwarm() {
+	const st = S.state, stage = $("#stage");
+	const root = rootOfEpoch(S.epoch) ?? st.tree.find((n) => n.role === "root");
+	if (!root) { stage.innerHTML = `<div class="page"><p class="empty">The root agent has not started yet.</p></div>`; return; }
+	const pos = layout(root);
+	const ids = Object.keys(pos);
+	const maxSub = Math.max(1, ...ids.filter((i) => i !== root.id).map((i) => st.sub[i]));
+	const famIds = S.family ? new Set([S.family, ...(nodeOf(S.family)?.children || [])]) : null;
+	const depthMax = Math.max(...ids.map((i) => pos[i].depth));
+	let g = "";
+	for (let d = 1; d <= depthMax; d++) g += `<circle class="ring" r="${d * RING}"/>`;
+	if (famIds && pos[S.family]) {
+		const head = pos[S.family];
+		const ch = (nodeOf(S.family).children || []).filter((c) => pos[c]).map((c) => pos[c]);
+		if (ch.length) {
+			const r = ch[0].r, a0 = Math.min(...ch.map((c) => c.a)) - 0.12, a1 = Math.max(...ch.map((c) => c.a)) + 0.12;
+			const [x0, y0] = polar(a0, r + 30), [x1, y1] = polar(a1, r + 30), [x2, y2] = polar(a1, Math.max(0, head.r - 24)), [x3, y3] = polar(a0, Math.max(0, head.r - 24));
+			const big = a1 - a0 > Math.PI ? 1 : 0;
+			g += `<path class="famband" d="M${x3} ${y3} L${x0} ${y0} A${r + 30} ${r + 30} 0 ${big} 1 ${x1} ${y1} L${x2} ${y2} ${head.r > 24 ? `A${head.r - 24} ${head.r - 24} 0 ${big} 0 ${x3} ${y3}` : ""} Z"/>`;
+		}
+	}
+	for (const id of ids) {
+		const n = nodeOf(id);
+		for (const c of n.children || []) {
+			if (!pos[c]) continue;
+			const hi = famIds && famIds.has(c) && id === S.family;
+			const dim = famIds && !(famIds.has(c) && famIds.has(id));
+			g += `<path class="link ${hi ? "hi" : ""} ${dim ? "faded" : ""}" d="${linkPath(pos[id], pos[c])}"/>`;
+		}
+	}
+	const order = ids.sort((a, b) => pos[b].depth - pos[a].depth);
+	for (const id of order) {
+		const n = nodeOf(id), p = pos[id];
+		const r = n.role === "root" ? 17 : 6 + 13 * Math.sqrt(st.sub[id] / maxSub);
+		const dim = famIds && !famIds.has(id);
+		const revs = (st.reviewersOf[id] || []).filter((x) => LIVE.has(x.status));
+		let sats = "";
+		revs.slice(0, 6).forEach((_, i) => { const a = (i / Math.max(1, revs.length)) * Math.PI * 2 - Math.PI / 4; sats += `<circle class="sat" cx="${(Math.cos(a) * (r + 7)).toFixed(1)}" cy="${(Math.sin(a) * (r + 7)).toFixed(1)}" r="3.2"/>`; });
+		const side = p.depth === 0 ? "mid" : Math.sin(p.a) >= 0 ? "start" : "end";
+		const lx = p.depth === 0 ? 0 : (r + 10) * (side === "start" ? 1 : -1);
+		const ly = p.depth === 0 ? r + 18 : 4;
+		const title = n.goal.title.length > 30 ? `${n.goal.title.slice(0, 29)}…` : n.goal.title;
+		g += `<g class="gnode ${n.role} s-${n.status} ${S.sel === id ? "sel" : ""} ${dim ? "faded" : ""}" data-id="${esc(id)}" transform="translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})">
+			<circle class="halo" r="${(r + 6).toFixed(1)}"/>
+			${n.status === "running" ? `<circle class="orbit" r="${(r + 4).toFixed(1)}"/>` : ""}
+			<circle class="body" r="${r.toFixed(1)}"/>${n.role === "root" ? `<circle class="core" r="5"/>` : ""}
+			${sats}
+			<text class="glabel ${p.depth <= 1 || S.sel === id ? "strong" : ""}" x="${lx}" y="${ly}" text-anchor="${side === "mid" ? "middle" : side}">${esc(title)}</text>
+			<text class="gsub" x="${lx}" y="${ly + 14}" text-anchor="${side === "mid" ? "middle" : side}">${kfmt(st.sub[id])} tok${n.grade !== undefined ? ` · grade ${n.grade.toFixed(2)}` : ""}</text>
+		</g>`;
+	}
+	let svg = $("#gsvg");
+	if (!svg) {
+		stage.innerHTML = `<div class="graph" id="graph"><div class="gtools" id="gtools"></div><svg id="gsvg"><g id="gview"></g></svg><div class="gfoot" id="gfoot"></div></div>`;
+		svg = $("#gsvg");
+		attachPanZoom();
+	}
+	const famTag = S.family ? `<div class="famtag">Family of <b>${esc(titleOf(S.family))}</b><button title="Clear" onclick="selectFamily(null)">×</button></div>` : "";
+	const epochBtns = st.epochs.length > 1 ? `<div class="group">${[...st.epochs].sort((a, b) => a.number - b.number).map((e) => `<button onclick="pickEpoch(${e.number})" class="${e.number === S.epoch ? "on" : ""}">Epoch ${e.number}</button>`).join("")}</div>` : "";
+	$("#gtools").innerHTML = `<div class="group"><button onclick="zoomBy(1.25)" title="Zoom in">+</button><button onclick="zoomBy(0.8)" title="Zoom out">−</button><button onclick="S.userMoved=false;fit()">Fit</button></div>${epochBtns}${famTag}`;
+	$("#gview").innerHTML = g;
+	$("#gfoot").textContent = `${ids.length} agents in this tree · click a node for details · shift-click selects the family it heads · drag to pan, scroll to zoom`;
+	for (const el of document.querySelectorAll(".gnode")) {
+		el.onclick = (ev) => { ev.stopPropagation(); hideTip(); const id = el.dataset.id; if (ev.shiftKey) selectFamily(nodeOf(id)?.children?.length ? id : nodeOf(id)?.parentId ?? null); else selectNode(id); };
+		el.onmouseenter = (ev) => showTip(ev, el.dataset.id);
+		el.onmousemove = (ev) => moveTip(ev);
+		el.onmouseleave = hideTip;
+	}
+	S.bounds = ids.reduce((b, id) => ({ x0: Math.min(b.x0, pos[id].x), x1: Math.max(b.x1, pos[id].x), y0: Math.min(b.y0, pos[id].y), y1: Math.max(b.y1, pos[id].y) }), { x0: 0, x1: 0, y0: 0, y1: 0 });
+	if (!S.fitted) { S.fitted = true; S.userMoved = false; requestAnimationFrame(fit); } else applyZoom();
+}
+function pickEpoch(n) { S.epoch = n; S.family = null; S.fitted = false; renderSwarm(); }
+function attachPanZoom() {
+	const graph = $("#graph");
+	let drag = null;
+	new ResizeObserver(() => { if (!S.userMoved) fit(); }).observe(graph);
+	graph.addEventListener("wheel", (ev) => {
+		ev.preventDefault();
+		const rect = graph.getBoundingClientRect();
+		const mx = ev.clientX - rect.left, my = ev.clientY - rect.top;
+		S.userMoved = true;
+		const f = Math.exp(-ev.deltaY * 0.0015), z = S.zoom, k = Math.min(4, Math.max(0.2, z.k * f));
+		z.x = mx - ((mx - z.x) * k) / z.k; z.y = my - ((my - z.y) * k) / z.k; z.k = k; applyZoom();
+	}, { passive: false });
+	graph.addEventListener("pointerdown", (ev) => { if (ev.target.closest(".gnode, .gtools")) return; drag = { x: ev.clientX, y: ev.clientY, zx: S.zoom.x, zy: S.zoom.y, moved: false }; graph.classList.add("drag"); graph.setPointerCapture(ev.pointerId); });
+	graph.addEventListener("pointermove", (ev) => { if (!drag) return; S.zoom.x = drag.zx + ev.clientX - drag.x; S.zoom.y = drag.zy + ev.clientY - drag.y; drag.moved ||= Math.abs(ev.clientX - drag.x) + Math.abs(ev.clientY - drag.y) > 3; if (drag.moved) S.userMoved = true; applyZoom(); });
+	graph.addEventListener("pointerup", () => { if (drag && !drag.moved) { S.sel = null; closeDrawer(); } drag = null; graph.classList.remove("drag"); });
+}
+function applyZoom() { const v = $("#gview"); if (v) v.setAttribute("transform", `translate(${S.zoom.x.toFixed(1)} ${S.zoom.y.toFixed(1)}) scale(${S.zoom.k.toFixed(3)})`); }
+function fit() {
+	const graph = $("#graph"); if (!graph || !S.bounds) return;
+	const w = graph.clientWidth, h = graph.clientHeight, b = S.bounds;
+	if (!w || !h) return;
+	const bw = b.x1 - b.x0 + 560, bh = b.y1 - b.y0 + 170;
+	const k = Math.min(1.6, Math.max(0.25, Math.min(w / bw, h / bh)));
+	S.zoom = { k, x: w / 2 - ((b.x0 + b.x1) / 2) * k, y: h / 2 - ((b.y0 + b.y1) / 2) * k + 10 };
+	applyZoom();
+}
+function zoomBy(f) { S.userMoved = true; const g = $("#graph"); const cx = g.clientWidth / 2, cy = g.clientHeight / 2, z = S.zoom, k = Math.min(4, Math.max(0.2, z.k * f)); z.x = cx - ((cx - z.x) * k) / z.k; z.y = cy - ((cy - z.y) * k) / z.k; z.k = k; applyZoom(); }
+function showTip(ev, id) {
+	const n = nodeOf(id), tip = $("#tip");
+	const revs = (S.state.reviewersOf[id] || []).filter((x) => LIVE.has(x.status)).length;
+	tip.innerHTML = `<b>${esc(n.goal.title)}</b>${esc(ROLE_NAME[n.role])} · ${esc(n.status)} · ${fmt(S.state.sub[id])} tokens${revs ? ` · ${revs} reviewer${revs > 1 ? "s" : ""} at work` : ""}${n.activity ? `<div style="opacity:.75;margin-top:4px">${esc(n.activity)}</div>` : ""}`;
+	tip.classList.add("on"); moveTip(ev);
+}
+function moveTip(ev) { const tip = $("#tip"); tip.style.left = `${Math.min(window.innerWidth - 320, ev.clientX + 14)}px`; tip.style.top = `${ev.clientY + 14}px`; }
+function hideTip() { $("#tip").classList.remove("on"); }
+
+// ---------- selection & drawer ----------
+function selectNode(id) { S.sel = id; S.selFinding = null; S.drawerTab = S.drawerTab === "family-only" ? "overview" : S.drawerTab; openDrawer(); renderAll(); }
+function selectFamily(headId) { S.family = headId; if (headId) { S.view = S.view === "families" ? "families" : "swarm"; } renderAll(); }
+function selectFinding(id) { S.selFinding = id; S.sel = null; openDrawer(); renderDrawer(); }
+function openDrawer() { $("#drawer").classList.add("open"); }
+function closeDrawer() { $("#drawer").classList.remove("open"); S.sel = null; S.selFinding = null; if (S.view === "swarm") renderSwarm(); }
+function setTab(t) { S.drawerTab = t; renderDrawer(); }
+
+async function renderDrawer() {
+	const box = $("#dinner");
+	if (S.selFinding) return renderFindingDrawer(box);
+	const n = S.sel && nodeOf(S.sel);
+	if (!n) { $("#drawer").classList.remove("open"); return; }
+	const tabs = [["overview", "Overview"], ["activity", "Activity"], ["family", "Family"], ["findings", "Findings"], ["board", "Board"], ["reviews", "Reviews"]];
+	const tab = tabs.some(([k]) => k === S.drawerTab) ? S.drawerTab : "overview";
+	const keep = $("#dbody") && S.lastDrawer === `${n.id}:${tab}` ? $("#dbody").scrollTop : 0;
+	S.lastDrawer = `${n.id}:${tab}`;
+	box.innerHTML = `<div class="dhead"><div class="kicker">${esc(ROLE_NAME[n.role])}${n.epoch ? ` · epoch ${n.epoch}` : ""} ${statusChip(n.status)}<button class="close" onclick="closeDrawer()" aria-label="Close">×</button></div>
+		<h2>${esc(n.goal.title)}</h2><div class="dim" style="font-size:12.5px">${esc(n.model ? `${n.model.provider} / ${n.model.id}` : "model not picked yet")}${n.activity ? ` · ${esc(n.activity)}` : ""}</div></div>
+		<div class="tabs">${tabs.map(([k, l]) => `<button class="${k === tab ? "on" : ""}" onclick="setTab('${k}')">${l}</button>`).join("")}</div>
+		<div class="dbody" id="dbody">${tab === "activity" ? '<p class="dim">Loading…</p>' : drawerTab(n, tab)}</div>`;
+	if (tab === "activity") $("#dbody").innerHTML = await activityTab(n);
+	$("#dbody").scrollTop = keep;
+	bindPage(box);
+}
+function drawerTab(n, tab) {
+	const st = S.state;
+	if (tab === "overview") {
+		const sub = st.sub[n.id], budget = n.budget?.tokens;
+		const frac = budget ? sub / budget : 0;
+		const c = n.contract;
+		return `<div class="gauges">
+				<div class="gauge"><b class="num">${kfmt(sub)}</b><span>tokens${budget ? ` of ${kfmt(budget)}` : ""} (branch)</span>${budget ? `<div class="bar"><i style="width:${Math.min(100, frac * 100)}%"></i></div>` : ""}</div>
+				<div class="gauge"><b class="num">${n.grade !== undefined ? n.grade.toFixed(2) : "—"}</b><span>reviewer grade</span></div>
+				<div class="gauge"><b class="num">${n.promise.toFixed(2)}</b><span>promise (priority)</span></div>
+			</div>
+			<h3>Goal from its parent</h3><div class="prose">${esc(n.goal.text)}</div>
+			${n.goal.rubric ? `<h3>Decision rubric</h3><div class="prose soft">${esc(n.goal.rubric)}</div>` : ""}
+			${n.goal.targets?.length ? `<h3>Targets</h3><ul>${n.goal.targets.map((t) => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
+			${c ? `<h3>Its contract · v${c.version}</h3><dl class="kv"><dt>Success</dt><dd>${c.success.map(esc).join("<br>")}</dd><dt>Kill if</dt><dd>${c.kill.map(esc).join("<br>")}</dd><dt>First check</dt><dd>${esc(c.firstCheck)}</dd><dt>Aims for</dt><dd>${esc(c.evidenceLevel.replace(/_/g, " "))}</dd></dl>` : ""}
+			${n.checkpoint ? `<h3>Latest checkpoint</h3><div class="box prose">${esc(n.checkpoint)}</div>` : ""}
+			<h3>Details</h3><dl class="kv"><dt>Agent id</dt><dd class="code">${esc(n.id)}</dd><dt>Turns</dt><dd class="num">${n.turns}</dd><dt>Own spend</dt><dd class="num">${fmt(n.spent?.tokens)} tokens · $${(n.spent?.usd ?? 0).toFixed(3)}</dd><dt>Budget</dt><dd class="code">${esc(Object.entries(n.budget).map(([k, v]) => `${k} ${v}`).join(" · ") || "unbounded")}</dd><dt>Soft caps</dt><dd>${n.caps.maxChildren} children · depth ${n.caps.maxDepth}</dd><dt>Started</dt><dd>${ago(n.createdAt)}</dd>${n.statusReason ? `<dt>Note</dt><dd>${esc(n.statusReason)}</dd>` : ""}${n.finishedSummary ? `<dt>Summary</dt><dd>${esc(n.finishedSummary)}</dd>` : ""}</dl>`;
+	}
+	if (tab === "family") {
+		const anc = lineage(n.id);
+		const sibs = n.parentId ? (nodeOf(n.parentId)?.children || []).map(nodeOf).filter((m) => m && TREE.has(m.role)) : [];
+		const kids = (n.children || []).map(nodeOf).filter((m) => m && TREE.has(m.role));
+		const row = (m) => `<div class="mrow" data-node="${esc(m.id)}"><span class="dot st s-${m.status}"></span><span class="t">${esc(m.goal.title)}${m.id === n.id ? ' <span class="dim">(this agent)</span>' : ""}</span><span class="num dim">${kfmt(st.sub[m.id])}</span><span class="a">${esc(ROLE_NAME[m.role])} · ${esc(m.status)}${m.activity ? ` · ${esc(m.activity)}` : ""}</span></div>`;
+		return `<h3 style="margin-top:4px">Lineage</h3><div class="crumbs">${anc.length ? anc.map((a) => `<button data-node="${esc(a.id)}">${esc(a.goal.title)}</button><span class="sep">›</span>`).join("") : ""}<b>${esc(n.goal.title)}</b></div>
+			${n.parentId ? `<h3>Family it belongs to · ${sibs.length} siblings</h3><div class="row" style="margin-bottom:10px"><button class="btn ${S.family === n.parentId ? "focus" : ""}" onclick="selectFamily('${esc(n.parentId)}')">Highlight this family</button></div><div class="mlist">${sibs.map(row).join("")}</div>` : ""}
+			${kids.length ? `<h3>Family it heads · ${kids.length} children</h3><div class="row" style="margin-bottom:10px"><button class="btn ${S.family === n.id ? "focus" : ""}" onclick="selectFamily('${esc(n.id)}')">Highlight this family</button></div><div class="mlist">${kids.map(row).join("")}</div>` : `<p class="dim">${n.role === "leaf" ? "Workers do not spawn children." : "No children yet."}</p>`}`;
+	}
+	if (tab === "findings") {
+		const fs = st.findings.filter((f) => f.nodeId === n.id);
+		return fs.length ? fs.map(findingRow).join("") : `<p class="empty">No findings reported yet. ${n.role === "leaf" ? "Workers report results through report_finding; each is checked by a claims reviewer before it reaches the parent." : ""}</p>`;
+	}
+	if (tab === "board") {
+		const fam = n.parentId;
+		const posts = fam ? st.posts.filter((p) => p.familyId === fam) : [];
+		const own = st.posts.filter((p) => p.familyId === n.id);
+		return `${fam ? `<h3 style="margin-top:4px">Board it shares with its siblings</h3>${boardFeed(posts, 12)}` : ""}${own.length ? `<h3>Its children's board</h3>${boardFeed(own, 12)}` : ""}${!posts.length && !own.length ? `<p class="empty">No board posts yet. Siblings post checkpoints and peer reviews here.</p>` : ""}`;
+	}
+	if (tab === "reviews") {
+		const recs = st.recommendations.filter((r) => r.targetNodeId === n.id).sort((a, b) => b.createdAt - a.createdAt);
+		const about = st.recommendations.filter((r) => r.deciderNodeId === n.id && r.targetNodeId !== n.id && r.status === "open");
+		const revs = st.reviewersOf[n.id] || [];
+		return `<p class="soft" style="margin-top:0">${revs.filter((r) => r.role === "hidden_reviewer").length} hidden reviews and ${revs.filter((r) => r.role === "claims_reviewer").length} claims reviews so far. The agent never sees hidden reviews; its parent decides what to do with them.</p>
+			${about.length ? `<h3>Waiting on this agent's decision</h3>${about.map(recRow).join("")}` : ""}
+			<h3>Hidden reviews of this agent</h3>${recs.length ? recs.map(recRow).join("") : `<p class="dim">None yet.</p>`}`;
+	}
+	return "";
+}
+function recRow(r) {
+	return `<div style="padding:10px 0;border-bottom:1px solid var(--line)"><div class="row"><span class="chip">${esc(r.action.replace(/_/g, " "))}</span><span class="num soft">grade ${r.grade.toFixed(2)} · promise ${r.promise.toFixed(2)}</span><span class="dim" style="margin-left:auto">${esc(r.status)} · ${ago(r.createdAt)}</span></div><div class="prose" style="margin-top:6px">${esc(r.reason)}</div>${r.details ? `<div class="prose dim">${esc(r.details)}</div>` : ""}<div class="dim" style="font-size:12px">about <button class="linkbtn" data-node="${esc(r.targetNodeId)}">${esc(titleOf(r.targetNodeId))}</button></div></div>`;
+}
+async function activityTab(n) {
+	const evs = await api(`/api/runs/${encodeURIComponent(S.runId)}/events?node=${encodeURIComponent(n.id)}&limit=200&types=agent.message,tool.call,tool.result,node.delivered,agent.error,agent.retry,review.started,finding.verdict,question.asked`);
+	if (!evs.length) return `<p class="empty">Nothing yet. Activity appears here as the agent thinks, calls tools and receives messages.</p>`;
+	const items = evs.slice(-120).reverse().map((e) => {
+		const d = e.data, t = new Date(e.ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+		if (e.type === "agent.message") {
+			const parts = [];
+			if (d.thinking) parts.push(`<div class="ev think"><div class="meta"><b>Thinking</b> · ${t}</div><details class="fold"><summary class="prose soft">${esc(String(d.thinking).slice(0, 220))}<span class="more">${String(d.thinking).length > 220 ? " … more" : ""}</span></summary><div class="prose soft">${esc(String(d.thinking).slice(220))}</div></details></div>`);
+			if (d.text) parts.push(`<div class="ev"><div class="meta"><b>Says</b> · ${t}</div><div class="prose">${esc(d.text)}</div></div>`);
+			if (d.error) parts.push(`<div class="ev err"><div class="meta"><b>Model error</b> · ${t}</div><div class="prose">${esc(d.error)}</div></div>`);
+			return parts.join("");
+		}
+		if (e.type === "tool.call") return `<div class="ev tool"><div class="meta"><b>Calls ${esc(d.tool)}</b> · ${t}</div><details class="fold"><summary class="code soft">${esc(JSON.stringify(d.args).slice(0, 140))}<span class="more">${JSON.stringify(d.args).length > 140 ? " … more" : ""}</span></summary><div class="pre">${esc(JSON.stringify(d.args, null, 2))}</div></details></div>`;
+		if (e.type === "tool.result") return `<div class="ev ${d.isError ? "err" : "res"}"><div class="meta"><b>${esc(d.tool)} ${d.isError ? "failed" : "returned"}</b> · ${t}</div><details class="fold"><summary class="code soft">${esc(String(d.text).slice(0, 160))}<span class="more">${String(d.text).length > 160 ? " … more" : ""}</span></summary><div class="pre">${esc(d.text)}</div></details></div>`;
+		if (e.type === "node.delivered") return `<div class="ev msg"><div class="meta"><b>Message in</b> · ${t}</div><div class="prose soft">${esc(d.text)}</div></div>`;
+		if (e.type === "agent.error") return `<div class="ev err"><div class="meta"><b>Error</b> · ${t}</div><div class="prose">${esc(d.error)}</div></div>`;
+		if (e.type === "agent.retry") return `<div class="ev err"><div class="meta"><b>Retrying</b> · ${t}</div><div class="prose soft">attempt ${esc(d.attempt)} after ${dur(d.delayMs)}</div></div>`;
+		return `<div class="ev"><div class="meta"><b>${esc(e.type)}</b> · ${t}</div><div class="prose soft">${esc(d.reason ?? d.question ?? d.verdict ?? "")}</div></div>`;
+	});
+	return `<div class="tl">${items.join("")}</div>`;
+}
+function findingRow(f) {
+	return `<div class="find" data-finding="${esc(f.id)}" style="grid-template-columns:96px 1fr"><div>${statusChip(f.status)}<div class="steps">${f.rounds.map((r) => `<i class="s-${r.verdict}" title="round ${r.round}: ${esc(r.verdict)}"></i>`).join("")}</div></div><div><div class="lvl">${esc(f.level.replace(/_/g, " "))}${f.confidence !== undefined ? ` · confidence ${f.confidence.toFixed(2)}` : ""}</div><div class="claim">${esc(f.claim)}</div></div></div>`;
+}
+function renderFindingDrawer(box) {
+	const f = S.state.findings.find((x) => x.id === S.selFinding);
+	if (!f) { closeDrawer(); return; }
+	box.innerHTML = `<div class="dhead"><div class="kicker">Finding · ${esc(f.level.replace(/_/g, " "))} ${statusChip(f.status)}<button class="close" onclick="closeDrawer()" aria-label="Close">×</button></div><h2 style="font-size:21px">${esc(f.claim)}</h2><div class="dim" style="font-size:12.5px">from <button class="linkbtn" data-node="${esc(f.nodeId)}">${esc(titleOf(f.nodeId))}</button> · ${ago(f.createdAt)}</div></div>
+		<div class="dbody">
+			<div class="gauges"><div class="gauge"><b class="num">${f.confidence !== undefined ? f.confidence.toFixed(2) : "—"}</b><span>reviewer confidence</span></div><div class="gauge"><b class="num">${f.rounds.length}</b><span>review rounds</span></div><div class="gauge"><b>${esc(f.level.replace(/_/g, " "))}</b><span>evidence level</span></div></div>
+			<h3>Reasoning</h3><div class="prose">${esc(f.reasoning)}</div>
+			<h3>Evidence</h3><ul>${f.evidence.map((e) => `<li class="prose">${esc(e)}</li>`).join("") || "<li>none given</li>"}</ul>
+			${f.assumptions.length ? `<h3>Assumptions</h3><ul>${f.assumptions.map((a) => `<li class="prose soft">${esc(a)}</li>`).join("")}</ul>` : ""}
+			<h3>Review rounds</h3><div class="tl">${f.rounds.map((r) => `<div class="ev ${r.verdict === "accepted" ? "res" : r.verdict === "rejected" ? "err" : "msg"}"><div class="meta"><b>Round ${r.round}: ${esc(r.verdict.replace(/_/g, " "))}</b>${r.confidence !== undefined ? ` · confidence ${r.confidence.toFixed(2)}` : ""} · ${esc(r.reviewerModel ? `${r.reviewerModel.provider}/${r.reviewerModel.id}` : "")}</div><div class="prose">${esc(r.message)}</div>${r.checksRun.length ? `<div class="dim" style="font-size:12px;margin-top:4px">Checks run: ${r.checksRun.map(esc).join("; ")}</div>` : ""}</div>`).join("") || '<p class="dim">Waiting for its reviewer.</p>'}</div>
+		</div>`;
+	bindPage(box);
 }
 
-function renderTree() {
-	const roots = state.nodes.filter((n) => n.role === "root").sort((a, b) => b.epoch - a.epoch);
-	const build = (n) => `<li>${nodeCard(n)}${n.children?.length ? `<ul>${n.children.map((c) => state.byId[c]).filter(Boolean).map(build).join("")}</ul>` : ""}</li>`;
-	return `<div class="tree"><ul>${roots.map(build).join("")}</ul></div>`;
+// ---------- other pages ----------
+function viewFamilies() {
+	const fams = families().sort((a, b) => (b.live - a.live) || (b.tokens - a.tokens));
+	if (!fams.length) return `<h1 class="view">Families</h1><p class="empty">A family is a parent and the children it spawned. None yet.</p>`;
+	return `<h1 class="view">Families</h1><p class="lede">Each family is one parent and the children it spawned to attack its piece of the goal. Select one to highlight it in the swarm and open its members.</p>
+		${fams.map((f) => {
+			const maxT = Math.max(1, ...f.members.map((m) => S.state.sub[m.id]));
+			const dots = f.members.map((m, i) => { const a = (i / f.members.length) * Math.PI * 2 - Math.PI / 2, r = 3 + 7 * Math.sqrt(S.state.sub[m.id] / maxT); return `<circle cx="${(48 + Math.cos(a) * 30).toFixed(1)}" cy="${(40 + Math.sin(a) * 30).toFixed(1)}" r="${r.toFixed(1)}" fill="var(--c)" class="s-${m.status}"/><line x1="48" y1="40" x2="${(48 + Math.cos(a) * 30).toFixed(1)}" y2="${(40 + Math.sin(a) * 30).toFixed(1)}" stroke="var(--line-2)"/>`; }).join("");
+			return `<div class="fam ${S.family === f.head.id ? "on" : ""}" data-family="${esc(f.head.id)}"><svg width="96" height="80" viewBox="0 0 96 80">${dots}<circle cx="48" cy="40" r="7" fill="var(--panel)" stroke="var(--ink-2)" stroke-width="2"/></svg>
+				<div><div class="ft">${esc(f.head.goal.title)}</div><div class="fs"><span>${esc(ROLE_NAME[f.head.role])} with ${f.members.length} children</span><span>${f.running} running · ${f.live} live</span><span class="num">${kfmt(f.tokens)} tokens</span><span>${f.accepted} accepted findings</span><span>${f.posts} board posts</span>${f.recs ? `<span style="color:var(--wait);font-weight:600">${f.recs} recommendation${f.recs > 1 ? "s" : ""} to decide</span>` : ""}</div></div>
+				<div class="row"><button class="btn" data-family-show="${esc(f.head.id)}">Show in swarm</button></div></div>`;
+		}).join("")}`;
 }
-
-function renderInbox() {
-	const qs = state.questions.filter((q) => q.holder === "user");
-	const recs = state.recommendations.filter((r) => r.status === "open");
-	const reports = [...state.reports].sort((a, b) => b.createdAt - a.createdAt);
-	return `<h2>Questions for you</h2>${qs.length ? qs.map((q) => `<div class="card"><div>${pill(q.status)} <b>${esc(q.question)}</b></div>
-		<p class="quiet">${esc(q.context)}</p>${q.options.length ? `<p>Options: ${q.options.map(esc).join(" · ")}</p>` : ""}<p class="quiet">Default: ${esc(q.default)} · asked by ${esc(q.fromNode)} · ${ago(q.createdAt)}</p>
-		${q.status === "answered" ? `<p>Your answer: <b>${esc(q.answer)}</b></p>` : `<textarea id="ans-${esc(q.id)}" placeholder="Your answer"></textarea><button class="primary" data-answer="${esc(q.id)}">Send answer</button>`}</div>`).join("") : `<div class="empty">Nothing needs you right now.</div>`}
-		<h2>Reports</h2>${reports.length ? reports.map((r) => `<div class="card click" data-report="${esc(r.id)}"><b>${esc(r.title)}</b> <span class="pill">${esc(r.kind)}</span> <span class="quiet">epoch ${r.epoch} · ${ago(r.createdAt)}</span></div>`).join("") : `<div class="empty">No reports yet.</div>`}
-		<h2>Open reviewer recommendations</h2>${recs.length ? `<table><tr><th>Action</th><th>About</th><th>Grade</th><th>Promise</th><th>Reason</th><th>Decider</th></tr>${recs.map((r) => `<tr><td>${pill(r.action)}</td><td>${esc(state.byId[r.targetNodeId]?.goal.title ?? r.targetNodeId)}</td><td>${r.grade.toFixed(2)}</td><td>${r.promise.toFixed(2)}</td><td>${esc(r.reason)}</td><td class="mono">${esc(r.deciderNodeId)}</td></tr>`).join("")}</table>` : `<div class="empty">None open.</div>`}`;
-}
-
-function renderFindings() {
+function viewFindings() {
 	const order = { accepted: 0, needs_work: 1, pending_review: 2, rejected: 3 };
-	const fs = [...state.findings].sort((a, b) => order[a.status] - order[b.status] || b.updatedAt - a.updatedAt);
-	return fs.length ? `<table><tr><th>Status</th><th>Level</th><th>Conf.</th><th>Rounds</th><th>Claim</th><th>From</th></tr>${fs.map((f) => `<tr class="click" data-finding="${esc(f.id)}"><td>${pill(f.status)}</td><td>${esc(f.level)}</td><td>${f.confidence?.toFixed(2) ?? ""}</td><td>${f.rounds.length}</td><td>${esc(f.claim)}</td><td>${esc(state.byId[f.nodeId]?.goal.title ?? f.nodeId)}</td></tr>`).join("")}</table>` : `<div class="empty">No findings yet.</div>`;
+	const fs = [...S.state.findings].sort((a, b) => order[a.status] - order[b.status] || b.updatedAt - a.updatedAt);
+	const count = (s) => fs.filter((f) => f.status === s).length;
+	if (!fs.length) return `<h1 class="view">Findings</h1><p class="empty">No findings yet. When a worker reports a result, a claims reviewer on another model checks it; only accepted findings travel up the tree.</p>`;
+	return `<h1 class="view">Findings</h1><p class="lede">${count("accepted")} accepted, ${count("needs_work")} sent back for more work, ${count("pending_review")} under review, ${count("rejected")} rejected. Bars show each review round.</p>
+		${fs.map((f) => `<div class="find" data-finding="${esc(f.id)}"><div>${statusChip(f.status)}<div class="steps">${f.rounds.map((r) => `<i class="s-${r.verdict}" title="round ${r.round}: ${esc(r.verdict)}"></i>`).join("")}</div></div><div><div class="lvl">${esc(f.level.replace(/_/g, " "))}${f.confidence !== undefined ? ` · confidence ${f.confidence.toFixed(2)}` : ""}</div><div class="claim">${esc(f.claim)}</div></div><div class="dim" style="font-size:12.5px;text-align:right">${esc(titleOf(f.nodeId))}<br>${ago(f.updatedAt)}</div></div>`).join("")}`;
 }
-
-function renderBoards() {
+function boardFeed(posts, limit) {
+	const latest = new Map();
+	for (const p of posts) if (p.kind === "checkpoint") latest.set(p.authorNode, p);
+	const others = posts.filter((p) => p.kind !== "checkpoint").slice(-limit).reverse();
+	const initials = (id) => esc(titleOf(id).split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase());
+	return `${latest.size ? `<div class="cps" style="margin-bottom:14px">${[...latest.values()].map((p) => `<div class="cp s-${nodeOf(p.authorNode)?.status ?? "done"}" style="--c:var(--c)"><div class="who"><button class="linkbtn" data-node="${esc(p.authorNode)}" style="color:var(--ink);font-weight:600">${esc(titleOf(p.authorNode))}</button></div><div class="dim" style="font-size:11.5px">checkpoint · ${ago(p.createdAt)}</div><div class="prose soft" style="font-size:13px;margin-top:4px">${esc(p.body)}</div></div>`).join("")}</div>` : ""}
+		${others.map((p) => `<div class="post ${esc(p.kind)}"><div class="avatar">${initials(p.authorNode)}</div><div><div class="kind">${esc(p.kind.replace(/_/g, " "))} · <span class="dim" style="text-transform:none">${ago(p.createdAt)}</span></div><div><b>${esc(p.title)}</b> <span class="dim">by</span> <button class="linkbtn" data-node="${esc(p.authorNode)}">${esc(titleOf(p.authorNode))}</button></div><div class="prose soft">${esc(p.body)}</div></div></div>`).join("")}`;
+}
+function viewBoards() {
 	const fams = {};
-	for (const p of state.posts) (fams[p.familyId] ??= []).push(p);
-	const keys = Object.keys(fams);
-	return keys.length ? keys.map((fid) => `<div class="card"><b>Family of ${esc(state.byId[fid]?.goal.title ?? fid)}</b> <span class="quiet mono">${esc(fid)}</span>${fams[fid].slice(-40).reverse().map((p) => `<div style="margin-top:8px">${pill(p.kind)} <b>${esc(p.title)}</b> <span class="quiet">by ${esc(state.byId[p.authorNode]?.goal.title ?? p.authorNode)} · ${ago(p.createdAt)}</span><div class="msg">${esc(p.body)}</div></div>`).join("")}</div>`).join("") : `<div class="empty">No board posts yet.</div>`;
+	for (const p of S.state.posts) (fams[p.familyId] ??= []).push(p);
+	const ids = Object.keys(fams).sort((a, b) => fams[b].at(-1).createdAt - fams[a].at(-1).createdAt);
+	if (!ids.length) return `<h1 class="view">Boards</h1><p class="empty">Siblings in a family share one board: their latest checkpoints, notes, and the peer review each must post before reporting a finding. Nothing posted yet.</p>`;
+	if (!S.boardFam || !fams[S.boardFam]) S.boardFam = ids[0];
+	return `<h1 class="view">Boards</h1><p class="lede">One board per family. Siblings see only their own family's board; the parent can read it but does not post there.</p>
+		<div class="boards"><div class="blist">${ids.map((id) => `<button class="${id === S.boardFam ? "on" : ""}" data-board="${esc(id)}">${esc(titleOf(id))}<span class="n num">${fams[id].length}</span></button>`).join("")}</div>
+		<div><h3 style="margin-top:0">Family of ${esc(titleOf(S.boardFam))}</h3>${boardFeed(fams[S.boardFam], 60)}</div></div>`;
 }
-
-function renderResources() {
-	const pools = {};
-	for (const j of state.jobs) { const p = (pools[j.spec.pool] ??= { queued: 0, running: 0, done: 0, failed: 0, cached: 0, units: 0 }); const k = j.status === "succeeded" ? "done" : j.status === "gated" ? "queued" : j.status === "cancelled" ? "failed" : j.status; p[k] = (p[k] ?? 0) + 1; p.units += j.unitsUsed ?? 0; }
-	const jobs = [...state.jobs].sort((a, b) => b.queuedAt - a.queuedAt).slice(0, 200);
-	const prov = Object.entries(state.providers);
-	return `<h2>Resource pools</h2>${Object.keys(pools).length ? `<table><tr><th>Pool</th><th>Queued</th><th>Running</th><th>Done</th><th>Cached</th><th>Failed</th><th>Units used</th></tr>${Object.entries(pools).map(([k, p]) => `<tr><td>${esc(k)}</td><td>${p.queued}</td><td>${p.running}</td><td>${p.done}</td><td>${p.cached}</td><td>${p.failed}</td><td>${p.units.toFixed(2)}</td></tr>`).join("")}</table>` : `<div class="empty">No jobs submitted yet.</div>`}
-		<h2>Model providers</h2>${prov.length ? `<table><tr><th>Provider</th><th>Calls</th><th>Tokens</th><th>Cost</th><th>Avg wait for quota</th><th>Errors</th><th>Models</th></tr>${prov.map(([p, s]) => `<tr><td>${esc(p)}</td><td>${fmt(s.calls)}</td><td>${fmt(s.tokens)}</td><td>$${s.usd.toFixed(2)}</td><td>${(s.waitedMs / Math.max(1, s.calls) / 1000).toFixed(1)}s</td><td>${s.errors}</td><td class="mono">${Object.entries(s.models).map(([m, c]) => `${esc(m)}×${c}`).join(", ")}</td></tr>`).join("")}</table>` : `<div class="empty">No model calls yet.</div>`}
-		<h2>Jobs</h2>${jobs.length ? `<table><tr><th>Status</th><th>Pool</th><th>Command</th><th>Agent</th><th>Units</th><th>Queued</th></tr>${jobs.map((j) => `<tr><td>${pill(j.status)}</td><td>${esc(j.spec.pool)}</td><td class="mono">${esc(j.spec.command.slice(0, 120))}</td><td>${esc(state.byId[j.nodeId]?.goal.title ?? j.nodeId)}</td><td>${(j.unitsUsed ?? 0).toFixed(2)}</td><td>${ago(j.queuedAt)}</td></tr>`).join("")}</table>` : ""}`;
+function hbars(items, max) {
+	return items.map((it) => `<div class="hbar" ${it.node ? `data-node="${esc(it.node)}"` : ""}><span class="lbl" title="${esc(it.label)}">${esc(it.label)}</span><span class="track"><span class="fill" style="width:${((it.value / max) * 100).toFixed(1)}%;${it.color ? `background:${it.color}` : ""}"></span>${it.cap ? `<span class="cap" style="left:${Math.min(100, (it.cap / max) * 100).toFixed(1)}%" title="budget ${fmt(it.cap)}"></span>` : ""}</span><span class="v num">${kfmt(it.value)}${it.cap ? ` <span class="dim">/ ${kfmt(it.cap)}</span>` : ""}</span></div>`).join("");
 }
-
-function chart(points, label, color) {
-	if (points.length < 2) return `<div class="empty">Not enough data yet.</div>`;
-	const W = 560, H = 160, P = 28; const x0 = points[0][0], x1 = points.at(-1)[0], ymax = Math.max(1, ...points.map((p) => p[1]));
-	const X = (t) => P + ((t - x0) / Math.max(1, x1 - x0)) * (W - 2 * P), Y = (v) => H - P + 4 - (v / ymax) * (H - 2 * P);
+function lineChart(points, opts) {
+	const W = 900, H = 230, L = 52, R = 16, T = 14, B = 26;
+	if (points.length < 2) return `<p class="empty">The curve appears once the swarm has made a few model calls.</p>`;
+	const x0 = points[0][0], x1 = Math.max(points.at(-1)[0], x0 + 1000);
+	const ymax = Math.max(opts.cap ?? 0, ...points.map((p) => p[1])) * 1.06 || 1;
+	const X = (t) => L + ((t - x0) / (x1 - x0)) * (W - L - R), Y = (v) => T + (1 - v / ymax) * (H - T - B);
 	const d = points.map((p, i) => `${i ? "L" : "M"}${X(p[0]).toFixed(1)} ${Y(p[1]).toFixed(1)}`).join(" ");
-	return `<svg viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(label)}"><line x1="${P}" x2="${W - P}" y1="${H - P + 4}" y2="${H - P + 4}" stroke="var(--line)"/><path d="${d}" fill="none" stroke="${color}" stroke-width="2"/><text x="${P}" y="14">${esc(label)} · max ${fmt(ymax)}</text><text x="${W - P}" y="${H - 6}" text-anchor="end">${Math.round((x1 - x0) / 60000)} min</text></svg>`;
+	const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => ymax * f);
+	let g = ticks.map((v) => `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--line)"/><text x="${L - 8}" y="${Y(v) + 4}" text-anchor="end">${kfmt(v)}</text>`).join("");
+	if (opts.cap) g += `<line x1="${L}" x2="${W - R}" y1="${Y(opts.cap)}" y2="${Y(opts.cap)}" stroke="var(--ink)" stroke-dasharray="5 4"/><text x="${W - R}" y="${Y(opts.cap) - 6}" text-anchor="end" style="fill:var(--ink)">budget ${kfmt(opts.cap)}</text>`;
+	for (const m of opts.marks ?? []) if (m.t >= x0) g += `<line x1="${X(m.t)}" x2="${X(m.t)}" y1="${T}" y2="${H - B}" stroke="var(--focus)" stroke-dasharray="3 3"/><text x="${X(m.t) + 4}" y="${T + 10}" style="fill:var(--ink-2)">${esc(m.label)}</text>`;
+	g += `<path d="${d} L${X(points.at(-1)[0])} ${Y(0)} L${X(points[0][0])} ${Y(0)} Z" fill="color-mix(in oklch, var(--ink) 6%, transparent)"/><path d="${d}" fill="none" stroke="var(--ink)" stroke-width="2"/>`;
+	for (const a of opts.dots ?? []) if (a >= x0) g += `<circle cx="${X(a)}" cy="${H - B}" r="4" fill="var(--done)"/>`;
+	g += `<text x="${L}" y="${H - 6}">0</text><text x="${W - R}" y="${H - 6}" text-anchor="end">${dur(x1 - x0)}</text>`;
+	return `<svg class="chart" viewBox="0 0 ${W} ${H}" width="100%" role="img" aria-label="${esc(opts.label)}">${g}</svg>`;
+}
+function viewTokens() {
+	const st = S.state, run = st.run;
+	const total = st.nodes.reduce((a, n) => a + (n.spent?.tokens ?? 0), 0);
+	const groups = { Workers: ["leaf"], Managers: ["root", "internal"], Oversight: ["claims_reviewer", "hidden_reviewer", "root_reviewer"] };
+	const colors = { Workers: "var(--run)", Managers: "var(--ink-2)", Oversight: "var(--wait)" };
+	const byGroup = Object.fromEntries(Object.entries(groups).map(([g, roles]) => [g, roles.reduce((a, r) => a + (st.roles?.[r]?.tokens ?? 0), 0)]));
+	const gsum = Math.max(1, Object.values(byGroup).reduce((a, b) => a + b, 0));
+	const root = rootOfEpoch(st.run.epoch);
+	const branches = (root?.children || []).map(nodeOf).filter((n) => n && TREE.has(n.role)).map((n) => ({ label: n.goal.title, value: st.sub[n.id], cap: n.budget?.tokens, node: n.id })).sort((a, b) => b.value - a.value);
+	const fams = families().map((f) => ({ label: f.head.goal.title, value: f.tokens, node: f.head.id })).sort((a, b) => b.value - a.value);
+	const maxB = Math.max(1, ...branches.map((b) => Math.max(b.value, b.cap ?? 0)));
+	const maxF = Math.max(1, ...fams.map((b) => b.value));
+	const marks = st.epochs.filter((e) => e.number > 1).map((e) => ({ t: e.startedAt, label: `epoch ${e.number}` }));
+	const dots = st.series.accepted.map((p) => p[0]);
+	const key = S.sort.key, dir = S.sort.dir;
+	const agents = st.nodes.map((n) => ({ n, tokens: n.spent?.tokens ?? 0, sub: st.sub[n.id], usd: n.spent?.usd ?? 0, turns: n.turns }))
+		.sort((a, b) => (key === "name" ? a.n.goal.title.localeCompare(b.n.goal.title) : (a[key] ?? 0) - (b[key] ?? 0)) * dir).slice(0, 80);
+	const th = (k, l, cls = "") => `<th class="sort ${cls}" data-sort="${k}">${l}${key === k ? (dir < 0 ? " ↓" : " ↑") : ""}</th>`;
+	const prov = Object.entries(st.providers);
+	return `<h1 class="view">Tokens</h1><p class="lede"><b class="num">${fmt(total)}</b> tokens spent${run.budget.tokens ? ` of a ${fmt(run.budget.tokens)} budget (${((total / run.budget.tokens) * 100).toFixed(1)}%)` : ""}, about <b>$${st.nodes.reduce((a, n) => a + (n.spent?.usd ?? 0), 0).toFixed(2)}</b> at list prices. Green dots mark accepted findings.</p>
+		${lineChart(st.series.tokens, { label: "Tokens over time", cap: run.budget.tokens, marks, dots })}
+		<h3>Who spent them</h3>
+		<div class="split">${Object.entries(byGroup).map(([g, v]) => `<div style="width:${(v / gsum) * 100}%;background:${colors[g]}" title="${g}: ${fmt(v)}"></div>`).join("")}</div>
+		<div class="keys">${Object.entries(byGroup).map(([g, v]) => `<span><i class="sq" style="background:${colors[g]}"></i>${g} <b class="num">${kfmt(v)}</b> <span class="dim">${((v / gsum) * 100).toFixed(0)}%</span></span>`).join("")}</div>
+		<div class="cols2" style="margin-top:10px">
+			<div><h3>By branch of the root</h3>${branches.length ? hbars(branches, maxB) : '<p class="dim">No branches yet.</p>'}<p class="dim" style="font-size:12px">Bar = tokens used by the branch; mark = its budget.</p></div>
+			<div><h3>By family</h3>${fams.length ? hbars(fams, maxF) : '<p class="dim">No families yet.</p>'}</div>
+		</div>
+		<h3>By provider and model</h3>${prov.length ? `<table><tr><th>Provider</th><th class="r">Calls</th><th class="r">Tokens</th><th class="r">Est. cost</th><th class="r">Avg. wait for quota</th><th class="r">Errors</th><th>Models</th></tr>${prov.map(([p, s]) => `<tr><td>${esc(p)}</td><td class="r num">${fmt(s.calls)}</td><td class="r num">${fmt(s.tokens)}</td><td class="r num">$${s.usd.toFixed(2)}</td><td class="r num">${(s.waitedMs / Math.max(1, s.calls) / 1000).toFixed(1)}s</td><td class="r num">${s.errors}</td><td class="soft">${Object.entries(s.models).map(([m, c]) => `${esc(m)} <span class="dim">×${c}</span>`).join(", ")}</td></tr>`).join("")}</table>` : '<p class="dim">No model calls yet.</p>'}
+		<h3>By agent</h3><table><tr>${th("name", "Agent")}<th>Role</th><th>Status</th>${th("tokens", "Own tokens", "r")}${th("sub", "Branch tokens", "r")}${th("usd", "Est. cost", "r")}${th("turns", "Turns", "r")}</tr>
+		${agents.map(({ n, tokens, sub, usd, turns }) => `<tr class="click" data-node="${esc(n.id)}"><td>${esc(n.goal.title)}</td><td class="soft">${esc(ROLE_NAME[n.role])}</td><td>${statusChip(n.status)}</td><td class="r num">${fmt(tokens)}</td><td class="r num">${TREE.has(n.role) ? fmt(sub) : ""}</td><td class="r num">$${usd.toFixed(3)}</td><td class="r num">${turns}</td></tr>`).join("")}</table>
+		<p class="dim" style="font-size:12px">A reviewer's spend is charged to the agent it reviews, so oversight shows up in that agent's budget.</p>`;
+}
+function md(text) {
+	const lines = esc(text).split("\n"); let out = "", code = false, table = false, list = false;
+	const inl = (s) => s.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/`([^`]+)`/g, "<code>$1</code>").replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+	for (const line of lines) {
+		if (line.startsWith("```")) { out += code ? "</pre>" : "<pre>"; code = !code; continue; }
+		if (code) { out += `${line}\n`; continue; }
+		const tl = line.trim();
+		if (/^\|.*\|$/.test(tl)) { if (/^\|[\s:|-]+\|$/.test(tl)) continue; if (!table) { out += "<table>"; table = true; } out += `<tr>${tl.slice(1, -1).split(/(?<!\\)\|/).map((c) => `<td>${inl(c.trim())}</td>`).join("")}</tr>`; continue; }
+		if (table) { out += "</table>"; table = false; }
+		if (/^\s*[-*] /.test(line)) { if (!list) { out += "<ul>"; list = true; } out += `<li>${inl(line.replace(/^\s*[-*] /, ""))}</li>`; continue; }
+		if (list) { out += "</ul>"; list = false; }
+		const h = /^(#{1,4}) (.*)/.exec(line);
+		if (h) { out += `<h${h[1].length}>${inl(h[2])}</h${h[1].length}>`; continue; }
+		if (tl) out += `<p>${inl(line)}</p>`;
+	}
+	if (table) out += "</table>"; if (list) out += "</ul>"; if (code) out += "</pre>";
+	return `<div class="md">${out}</div>`;
+}
+function viewEpochs() {
+	const eps = [...S.state.epochs].sort((a, b) => a.number - b.number);
+	const now = Date.now(), t0 = eps[0]?.startedAt ?? now;
+	const span = Math.max(1, (S.state.run.status === "running" ? now : (eps.at(-1)?.endedAt ?? S.state.run.updatedAt)) - t0);
+	return `<h1 class="view">Epochs</h1><p class="lede">An epoch is one root and its tree. The root reviewer starts a new one when the search saturates (A), the framing turns out wrong (B), or at a scheduled checkpoint (C); the mode decides what carries over.</p>
+		<div class="etrack">${eps.map((e) => { const end = e.endedAt ?? (S.state.run.status === "running" ? now : S.state.run.updatedAt); return `<div class="${e.number === S.state.run.epoch ? "cur" : ""}" style="flex:${Math.max(0.12, (end - e.startedAt) / span)}" onclick="pickEpoch(${e.number});go('swarm')"><b>Epoch ${e.number}</b><span>${dur(end - e.startedAt)}${e.trigger ? ` · ${esc(e.trigger.replace(/_/g, " "))}` : ""}</span></div>`; }).join("")}</div>
+		${[...eps].reverse().map((e) => `<div class="epoch"><div class="row"><b style="font-size:16px">Epoch ${e.number}</b>${e.trigger ? `<span class="chip">${esc(e.trigger.replace(/_/g, " "))}</span>` : `<span class="chip">first</span>`}${e.mode ? `<span class="chip">mode: ${esc(e.mode)}</span>` : ""}<span class="dim">${new Date(e.startedAt).toLocaleString()}${e.endedAt ? ` → ${new Date(e.endedAt).toLocaleTimeString()}` : " · current"}</span><button class="btn" style="margin-left:auto" onclick="pickEpoch(${e.number});go('swarm')">View its tree</button></div>
+			${e.carried.length ? `<div class="soft" style="margin-top:8px">Carried over: ${e.carried.map((id) => `<button class="linkbtn" data-node="${esc(id)}">${esc(titleOf(id))}</button>`).join(", ")}</div>` : ""}
+			${e.handoff ? `<h3>State of knowledge handed over</h3><div class="box">${md(e.handoff)}</div>` : ""}</div>`).join("")}`;
+}
+function viewInbox() {
+	const st = S.state;
+	const qs = st.questions.filter((q) => q.holder === "user").sort((a, b) => (a.status === "answered") - (b.status === "answered") || b.createdAt - a.createdAt);
+	const reports = [...st.reports].sort((a, b) => b.createdAt - a.createdAt);
+	const recs = st.recommendations.filter((r) => r.status === "open");
+	return `<h1 class="view">Inbox</h1><p class="lede">Questions only you can answer, the swarm's reports, and reviewer recommendations its managers still have to act on.</p>
+		<h3 style="margin-top:0">Questions for you</h3>${qs.length ? qs.map((q) => `<div class="q"><div class="row"><span class="chip st s-${q.status === "answered" ? "done" : "needs_work"}">${q.status === "answered" ? "answered" : "waiting for you"}</span><span class="dim">asked by <button class="linkbtn" data-node="${esc(q.fromNode)}">${esc(titleOf(q.fromNode))}</button> · ${ago(q.createdAt)}</span></div>
+			<h4 style="margin-top:10px">${esc(q.question)}</h4><div class="prose soft">${esc(q.context)}</div>
+			${q.status === "answered" ? `<p>You answered: <b>${esc(q.answer)}</b></p>` : `${q.options.length ? `<div class="opts">${q.options.map((o) => `<button class="btn" data-fill="${esc(q.id)}" data-text="${esc(o)}">${esc(o)}</button>`).join("")}</div>` : ""}<textarea id="ans-${esc(q.id)}" placeholder="Your answer (their default: ${esc(q.default)})"></textarea><div class="row" style="margin-top:8px"><button class="btn primary" data-answer="${esc(q.id)}">Send answer</button><span class="dim">Only the branch that asked is waiting; the rest keeps working.</span></div>`}</div>`).join("") : `<p class="dim">Nothing needs you. Agents ask their parents first; only the root can escalate to you.</p>`}
+		<h3>Reports</h3>${reports.length ? reports.map((r) => `<div class="report-row" data-report="${esc(r.id)}"><div><b>${esc(r.title)}</b><div class="dim" style="font-size:12.5px">${esc(r.kind)} report · epoch ${r.epoch} · ${ago(r.createdAt)}</div></div><span class="soft">Read →</span></div>`).join("") : `<p class="dim">The final report appears here when the root finishes.</p>`}
+		<h3>Recommendations waiting on a manager</h3>${recs.length ? recs.map(recRow).join("") : `<p class="dim">None open.</p>`}`;
+}
+async function renderReader() {
+	const r = await api(`/api/runs/${encodeURIComponent(S.runId)}/reports/${encodeURIComponent(S.reader)}`);
+	$("#stage").innerHTML = `<div class="page"><button class="btn" onclick="S.reader=null;renderView()">← Back to inbox</button><div style="margin-top:26px">${md(r.markdown)}</div></div>`;
+}
+const FEED_GROUPS = { all: null, agents: ["agent.message", "agent.error", "agent.retry", "node.spawned", "node.status", "node.checkpoint", "node.contract"], tools: ["tool.call", "tool.result", "workspace.command"], findings: ["finding.reported", "finding.verdict"], reviews: ["review.started", "recommendations.updated", "epoch.consulted", "epoch.decision", "epoch.started"], questions: ["question.asked", "question.answered", "question.escalated_to_user", "node.delivered"], jobs: ["job.submitted", "job.started", "job.finished", "job.cached"], money: ["model.call", "budget.transferred", "budget.reclaimed"] };
+function viewFeed() {
+	const allow = FEED_GROUPS[S.feedFilter], q = S.feedQuery.toLowerCase();
+	const rows = S.feed.filter((e) => (!allow || allow.includes(e.type)) && !e.type.endsWith(".updated") || (allow && allow.includes(e.type))).filter((e) => !q || `${e.type} ${titleOf(e.nodeId)} ${JSON.stringify(e.data)}`.toLowerCase().includes(q)).slice(-500).reverse();
+	return `<h1 class="view">Live feed</h1><p class="lede">Every event as it happens. Click a row to open its agent.</p>
+		<div class="filters">${Object.keys(FEED_GROUPS).map((k) => `<button class="${S.feedFilter === k ? "on" : ""}" data-feed="${k}">${k}</button>`).join("")}<input id="feedq" placeholder="Filter by text, agent or type" value="${esc(S.feedQuery)}"></div>
+		${rows.length ? rows.map((e) => `<div class="frow ${e.nodeId ? "click" : ""}" ${e.nodeId ? `data-node="${esc(e.nodeId)}" style="cursor:pointer"` : ""}><span class="dim num">${new Date(e.ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" })}</span><span class="ty">${esc(e.type)}</span><span class="soft" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(e.nodeId ? titleOf(e.nodeId) : "")}</span><span class="code dim" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(JSON.stringify(e.data).slice(0, 260))}</span></div>`).join("") : `<p class="empty">Waiting for events. This feed shows what happens from the moment the page opened.</p>`}`;
 }
 
-function renderTokens() {
-	const roots = state.nodes.filter((n) => n.role === "root");
-	const trees = roots.flatMap((r) => (r.children || []).map((c) => state.byId[c])).filter(Boolean);
-	const families = state.nodes.filter((n) => (n.role === "root" || n.role === "internal") && n.children?.length);
-	const agents = [...state.nodes].sort((a, b) => spentOf(b) - spentOf(a)).slice(0, 60);
-	const row = (n, v) => `<tr class="click" data-node="${esc(n.id)}"><td>${esc(n.goal.title)}</td><td>${esc(n.role)}</td><td>${pill(n.status)}</td><td class="mono">${fmt(v)}</td><td class="mono">${fmt(n.budget?.tokens)}</td><td class="mono">${esc(n.model ? n.model.provider + "/" + n.model.id : "")}</td></tr>`;
-	return `<div class="grid2"><div class="card">${chart(state.series.tokens, "Tokens used over time", "var(--accent)")}</div><div class="card">${chart(state.series.accepted, "Accepted findings over time", "var(--good)")}</div></div>
-		<h2>By tree (root's branches)</h2><table><tr><th>Branch</th><th>Role</th><th>Status</th><th>Tokens (subtree)</th><th>Budget</th><th>Model</th></tr>${trees.map((n) => row(n, subtreeSpent(n.id))).join("")}</table>
-		<h2>By family (parent and its children)</h2><table><tr><th>Family head</th><th>Role</th><th>Status</th><th>Children's tokens</th><th>Budget</th><th>Model</th></tr>${families.map((n) => row(n, n.children.reduce((a, c) => a + subtreeSpent(c), 0))).join("")}</table>
-		<h2>By agent (own spend, includes its reviews)</h2><table><tr><th>Agent</th><th>Role</th><th>Status</th><th>Tokens</th><th>Budget</th><th>Model</th></tr>${agents.map((n) => row(n, spentOf(n))).join("")}</table>`;
-}
-
-function renderEpochs() {
-	return [...state.epochs].sort((a, b) => b.number - a.number).map((e) => `<div class="card"><b>Epoch ${e.number}</b> ${e.trigger ? pill(e.trigger) : ""} ${e.mode ? pill(e.mode) : ""} <span class="quiet">${new Date(e.startedAt).toLocaleString()}${e.endedAt ? ` → ${new Date(e.endedAt).toLocaleString()}` : " (current)"} · carried ${e.carried.length}</span>${e.handoff ? md(e.handoff) : ""}</div>`).join("") || `<div class="empty">One epoch so far.</div>`;
-}
-
-function renderLive() {
-	const rows = feed.slice(-400).reverse();
-	return `<div class="feed">${rows.map((e) => `<div class="row"><span class="quiet">${new Date(e.ts).toLocaleTimeString()}</span><span class="mono">${esc(e.type)}</span><span>${esc(state.byId[e.nodeId]?.goal.title ?? e.nodeId ?? "")}</span><span class="mono quiet">${esc(JSON.stringify(e.data).slice(0, 220))}</span></div>`).join("") || `<div class="empty">Waiting for events…</div>`}</div>`;
-}
-
-async function renderSide() {
-	const side = $("#side");
-	if (!selected || !state?.byId[selected]) { side.innerHTML = `<div class="quiet">Select an agent to see its goal, contract, checkpoint, thinking and tool calls.</div>`; return; }
-	const n = state.byId[selected];
-	const events = await api(`/api/runs/${encodeURIComponent(runId)}/events?node=${encodeURIComponent(selected)}&limit=120&types=agent.message,tool.call,tool.result,node.delivered,review.started`);
-	const fs = state.findings.filter((f) => f.nodeId === n.id);
-	side.innerHTML = `<h2>${esc(n.role)} · ${pill(n.status)}</h2><div style="font-weight:600;font-size:15px">${esc(n.goal.title)}</div>
-		<dl style="margin-top:8px"><dt>Id</dt><dd class="mono">${esc(n.id)}</dd><dt>Model</dt><dd>${esc(n.model ? n.model.provider + "/" + n.model.id : "")}</dd><dt>Spent</dt><dd class="mono">${esc(JSON.stringify(n.spent))}</dd><dt>Budget</dt><dd class="mono">${esc(JSON.stringify(n.budget))}</dd><dt>Turns</dt><dd>${n.turns}</dd>${n.grade !== undefined ? `<dt>Grade</dt><dd>${n.grade.toFixed(2)} (promise ${n.promise.toFixed(2)})</dd>` : ""}${n.statusReason ? `<dt>Status</dt><dd>${esc(n.statusReason)}</dd>` : ""}</dl>
-		<h2>Goal</h2><div class="msg">${esc(n.goal.text)}${n.goal.rubric ? `\n\nRubric: ${esc(n.goal.rubric)}` : ""}</div>
-		${n.contract ? `<h2>Contract v${n.contract.version}</h2><div class="msg">success: ${esc(n.contract.success.join("; "))}\nkill: ${esc(n.contract.kill.join("; "))}\nfirst check: ${esc(n.contract.firstCheck)}\naims for: ${esc(n.contract.evidenceLevel)}</div>` : ""}
-		${n.checkpoint ? `<h2>Checkpoint</h2><div class="msg">${esc(n.checkpoint)}</div>` : ""}
-		${fs.length ? `<h2>Findings</h2>${fs.map((f) => `<div class="card click" data-finding="${esc(f.id)}">${pill(f.status)} ${esc(f.claim)}</div>`).join("")}` : ""}
-		<h2>What it is thinking and doing</h2>${events.slice(-60).reverse().map((e) => e.type === "agent.message" ? `${e.data.thinking ? `<div class="msg thinking">${esc(e.data.thinking)}</div>` : ""}${e.data.text ? `<div class="msg">${esc(e.data.text)}</div>` : ""}` : e.type === "tool.call" ? `<div class="msg tool">→ ${esc(e.data.tool)} ${esc(JSON.stringify(e.data.args).slice(0, 600))}</div>` : e.type === "tool.result" ? `<div class="msg tool">← ${esc(e.data.tool)}${e.data.isError ? " (error)" : ""}\n${esc(e.data.text)}</div>` : `<div class="msg">${esc(e.type)}: ${esc(e.data.text ?? e.data.reason ?? "")}</div>`).join("") || `<div class="empty">No activity yet.</div>`}`;
-	bindClicks(side);
-}
-
-async function showFinding(id) {
-	const f = state.findings.find((x) => x.id === id); if (!f) return;
-	$("#side").innerHTML = `<h2>Finding ${pill(f.status)}</h2><div style="font-weight:600">${esc(f.claim)}</div><dl style="margin-top:8px"><dt>Level</dt><dd>${esc(f.level)}</dd><dt>Confidence</dt><dd>${f.confidence ?? "n/a"}</dd><dt>From</dt><dd>${esc(state.byId[f.nodeId]?.goal.title ?? f.nodeId)}</dd><dt>Evidence</dt><dd>${f.evidence.map(esc).join("<br>")}</dd><dt>Assumptions</dt><dd>${f.assumptions.map(esc).join("<br>") || "none"}</dd></dl><h2>Reasoning</h2><div class="msg">${esc(f.reasoning)}</div><h2>Review rounds</h2>${f.rounds.map((r) => `<div class="card">${pill(r.verdict)} round ${r.round} · ${esc(r.reviewerModel ? r.reviewerModel.provider + "/" + r.reviewerModel.id : "")}<div class="msg">${esc(r.message)}</div>${r.checksRun.length ? `<div class="quiet">checks: ${r.checksRun.map(esc).join("; ")}</div>` : ""}</div>`).join("") || `<div class="empty">Not reviewed yet.</div>`}`;
-}
-
-async function showReport(id) {
-	const r = await api(`/api/runs/${encodeURIComponent(runId)}/reports/${encodeURIComponent(id)}`);
-	tab = "report"; $("#main").className = "wide"; $("#view").innerHTML = `<button class="primary" id="back">← Back to inbox</button><div class="card" style="margin-top:12px">${md(r.markdown)}</div>`;
-	$("#back").onclick = () => { tab = "inbox"; render(); };
-}
-
-function bindClicks(root) {
-	root.querySelectorAll("[data-node]").forEach((el) => (el.onclick = () => { selected = el.dataset.node; if (tab !== "tree" && tab !== "tokens") tab = "tree"; render(); }));
-	root.querySelectorAll("[data-finding]").forEach((el) => (el.onclick = (ev) => { ev.stopPropagation(); showFinding(el.dataset.finding); }));
-	root.querySelectorAll("[data-report]").forEach((el) => (el.onclick = () => showReport(el.dataset.report)));
+// ---------- event binding ----------
+function bindPage(root) {
+	root.querySelectorAll("[data-node]").forEach((el) => (el.onclick = (ev) => { ev.stopPropagation(); selectNode(el.dataset.node); }));
+	root.querySelectorAll("[data-finding]").forEach((el) => (el.onclick = (ev) => { ev.stopPropagation(); selectFinding(el.dataset.finding); }));
+	root.querySelectorAll("[data-family]").forEach((el) => (el.onclick = () => { S.family = el.dataset.family; selectNode(el.dataset.family); S.drawerTab = "family"; renderAll(); }));
+	root.querySelectorAll("[data-family-show]").forEach((el) => (el.onclick = (ev) => { ev.stopPropagation(); S.family = el.dataset.familyShow; S.view = "swarm"; S.sel = el.dataset.familyShow; S.drawerTab = "family"; openDrawer(); renderAll(); }));
+	root.querySelectorAll("[data-board]").forEach((el) => (el.onclick = () => { S.boardFam = el.dataset.board; renderView(); }));
+	root.querySelectorAll("[data-report]").forEach((el) => (el.onclick = () => { S.reader = el.dataset.report; renderView(); }));
+	root.querySelectorAll("[data-sort]").forEach((el) => (el.onclick = () => { const k = el.dataset.sort; S.sort = { key: k, dir: S.sort.key === k ? -S.sort.dir : k === "name" ? 1 : -1 }; renderView(); }));
+	root.querySelectorAll("[data-feed]").forEach((el) => (el.onclick = () => { S.feedFilter = el.dataset.feed; renderView(); }));
+	const fq = root.querySelector("#feedq");
+	if (fq) fq.oninput = () => { S.feedQuery = fq.value; const pos = fq.selectionStart; renderView(); const n = $("#feedq"); n.focus(); n.setSelectionRange(pos, pos); };
+	root.querySelectorAll("[data-fill]").forEach((el) => (el.onclick = () => { const t = document.getElementById(`ans-${el.dataset.fill}`); t.value = el.dataset.text; t.focus(); }));
 	root.querySelectorAll("[data-answer]").forEach((el) => (el.onclick = async () => {
-		const id = el.dataset.answer, answer = document.getElementById(`ans-${id}`).value;
-		try { await api(`/api/questions/${encodeURIComponent(id)}/answer`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer }) }); el.textContent = "Sent; the swarm picks it up within seconds"; el.disabled = true; } catch (e) { alert(e.message); }
+		const id = el.dataset.answer, answer = document.getElementById(`ans-${id}`).value.trim();
+		if (!answer) return;
+		el.disabled = true; el.textContent = "Sending…";
+		try { await api(`/api/questions/${encodeURIComponent(id)}/answer`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ answer }) }); el.textContent = "Sent. The swarm picks it up within seconds."; }
+		catch (e) { el.disabled = false; el.textContent = "Send answer"; alert(e.message); }
 	}));
 }
-
-function render() {
-	if (!state) { $("#view").innerHTML = `<div class="empty">No runs yet. Start one with <span class="mono">one-piece run "your goal"</span>.</div>`; return; }
-	renderHeader();
-	$("#main").className = tab === "tree" || tab === "tokens" ? "" : "wide";
-	const views = { tree: renderTree, inbox: renderInbox, findings: renderFindings, boards: renderBoards, resources: renderResources, tokens: renderTokens, epochs: renderEpochs, live: renderLive };
-	if (!views[tab]) return;
-	$("#view").innerHTML = views[tab]();
-	bindClicks($("#view"));
-	if (tab === "tree" || tab === "tokens") renderSide();
-}
+document.addEventListener("keydown", (ev) => { if (ev.key === "Escape") { if (S.family) selectFamily(null); else closeDrawer(); } });
+window.addEventListener("resize", () => { if (S.view === "swarm" && !S.fitted) fit(); });
 
 (async () => {
-	await loadRuns(); connect(); await refresh();
+	try { await loadRuns(); connect(); await refresh(); } catch (e) { $("#stage").innerHTML = `<div class="page"><p class="empty">Could not reach the harness: ${esc(e.message)}</p></div>`; }
 	setInterval(async () => {
-		const typing = [...document.querySelectorAll("textarea")].some((t) => t.value || t === document.activeElement);
-		if (tab !== "report" && !typing) await refresh();
-	}, 3000);
-	setInterval(loadRuns, 15000);
+		const typing = [...document.querySelectorAll("textarea, input")].some((t) => t === document.activeElement || (t.tagName === "TEXTAREA" && t.value));
+		if (S.reader || typing) return;
+		try { await refresh(); } catch {}
+	}, 2500);
+	setInterval(() => loadRuns().catch(() => {}), 15000);
 })();
 </script>
 </body>

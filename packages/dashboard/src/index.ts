@@ -50,6 +50,18 @@ function series(events: HarnessEvent[]) {
 	return { tokens: thin(tokens, 400), accepted };
 }
 
+function roleStats(events: HarnessEvent[]) {
+	const out: Record<string, { calls: number; tokens: number; usd: number }> = {};
+	for (const e of events) {
+		if (e.type !== "model.call") continue;
+		const s = (out[String(e.data.role)] ??= { calls: 0, tokens: 0, usd: 0 });
+		s.calls += 1;
+		s.tokens += Number(e.data.totalTokens ?? 0);
+		s.usd += Number(e.data.usd ?? 0);
+	}
+	return out;
+}
+
 function providerStats(events: HarnessEvent[]) {
 	const out: Record<string, { calls: number; tokens: number; usd: number; waitedMs: number; errors: number; models: Record<string, number> }> = {};
 	for (const e of events) {
@@ -69,7 +81,7 @@ function providerStats(events: HarnessEvent[]) {
 
 export function startDashboard(options: DashboardOptions): { server: Server; url: string; close(): void } {
 	const store = new SqliteStore(options.dbPath);
-	const page = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "web", "index.html"), "utf8");
+	const pagePath = join(dirname(fileURLToPath(import.meta.url)), "..", "web", "index.html");
 	const host = options.host ?? "127.0.0.1";
 	const port = options.port ?? 4747;
 
@@ -79,7 +91,7 @@ export function startDashboard(options: DashboardOptions): { server: Server; url
 			const parts = url.pathname.split("/").filter(Boolean);
 			if (req.method === "GET" && url.pathname === "/") {
 				res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-				res.end(page);
+				res.end(readFileSync(pagePath, "utf8"));
 				return;
 			}
 			if (parts[0] !== "api") return json(res, 404, { error: "not found" });
@@ -110,6 +122,7 @@ export function startDashboard(options: DashboardOptions): { server: Server; url
 					epochs: store.list<Epoch>("epochs", { runId }),
 					reports: store.list<Report>("reports", { runId }).map((r) => ({ ...r, markdown: undefined, size: r.markdown.length })),
 					providers: providerStats(all),
+					roles: roleStats(all),
 					series: series(all),
 					lastSeq: store.lastSeq(runId),
 				});
