@@ -5,6 +5,18 @@ import { briefFor } from "./prompts.ts";
 
 const evidenceLevel = union(EVIDENCE_LEVELS.map((l) => lit(l)) as any);
 
+function integrationNote(harness: Harness, startFrom?: string, sources?: string[]): string | undefined {
+	if (!startFrom && !sources?.length) return undefined;
+	const lines = ["## Integration"];
+	if (startFrom) lines.push(`Your workspace starts as a copy of worker ${startFrom}'s workspace, not the original files.`);
+	if (sources?.length) {
+		lines.push("Read these workers' workspaces (read-only; copy what you need into your own with bash, e.g. cp or diff):");
+		for (const id of sources) lines.push(`- ${id}: ${harness.workspaceOf(id)}`);
+	}
+	lines.push("Combine their work into one deliverable in your own workspace, verify it end to end, then report.");
+	return lines.join("\n");
+}
+
 export function childSummary(harness: Harness, child: SwarmNode): string {
 	const spent = harness.tree.subtreeSpent(child.id);
 	const findings = harness.store.list<Finding>("findings", { runId: child.runId }).filter((f) => f.nodeId === child.id);
@@ -57,6 +69,8 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 						kind: union([lit("explore"), lit("work")]),
 						budget_share: num({ minimum: 0.01, maximum: 1 }),
 						model: opt(str({ description: 'Optional model from your model menu, as "provider:model-id". Omit for the default.' })),
+						start_from: opt(str({ description: "For an integrating 'work' child: id of a worker in your subtree whose workspace it starts from instead of the original files" })),
+						sources: opt(arr(str(), { description: "For an integrating 'work' child: ids of workers in your subtree whose workspaces it may read and combine" })),
 					}),
 					{ minItems: 1 },
 				),
@@ -67,6 +81,13 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 					if (spec.model && !menu.some((m) => m.key === spec.model)) {
 						throw new Error(`Unknown model "${spec.model}". Choose from: ${menu.map((m) => m.key).join(", ")}`);
 					}
+				}
+				const mine = new Set(tree.subtree(node.id).filter((n) => n.role === "leaf").map((n) => n.id));
+				for (const spec of params.children) {
+					for (const id of [spec.start_from, ...(spec.sources ?? [])].filter((x): x is string => !!x)) {
+						if (!mine.has(id)) throw new Error(`${id} is not a worker in your subtree; start_from and sources take worker (leaf) ids from list_children`);
+					}
+					if ((spec.start_from || spec.sources?.length) && spec.kind !== "work") throw new Error("start_from and sources are only for 'work' children");
 				}
 				const check = tree.canSpawn(node.id, params.children.length);
 				if (!check.ok) throw new Error(`${check.reason}. Ask your reviewer path to raise caps, or cut/merge children first.`);
@@ -84,11 +105,12 @@ export function managerTools(harness: Harness, node: SwarmNode) {
 						goal: { title: spec.title, text: spec.goal, rubric: spec.rubric, targets: spec.targets, deliverable: spec.deliverable, boundaries: spec.boundaries },
 						budget: budgets[i],
 					});
+					if (spec.start_from || spec.sources?.length) tree.update(child.id, { startFrom: spec.start_from, sources: spec.sources });
 					if (spec.model) {
 						const choice = menu.find((m) => m.key === spec.model)!;
 						tree.update(child.id, { model: { provider: choice.provider, id: choice.id } });
 					}
-					harness.launch(child, briefFor(child));
+					harness.launch(child, briefFor(child, integrationNote(harness, spec.start_from, spec.sources)));
 					created.push(`${child.id} (${child.role}${spec.model ? `, ${spec.model}` : ""}): ${spec.title}`);
 				});
 				harness.bus.emit(node.runId, "tree.spawned", { count: created.length, call: live.spawnCalls }, node.id);

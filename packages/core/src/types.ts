@@ -111,6 +111,10 @@ export interface SwarmNode {
 	targetFindingId?: string;
 	/** Set when the agent called finish. */
 	finishedSummary?: string;
+	/** For an integrating leaf: the leaf whose workspace this one starts from instead of the seed. */
+	startFrom?: string;
+	/** For an integrating leaf: other leaves whose workspaces it may read (not write). */
+	sources?: string[];
 	/** Set once the agent was told to wrap up (budget running low): skip optional ceremony. */
 	wrapUp?: boolean;
 	turns: number;

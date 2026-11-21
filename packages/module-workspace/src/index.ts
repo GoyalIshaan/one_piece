@@ -22,7 +22,10 @@ export function ensureWorkspace(harness: HarnessApi, nodeId: string): string {
 	if (!dir) throw new Error("This agent has no workspace");
 	if (existsSync(dir)) return dir;
 	mkdirSync(dir, { recursive: true });
-	const seed = harness.run().workspace;
+	// An integrating leaf starts from another leaf's workspace (its latest state, not its history).
+	const from = harness.tree.get(nodeId)?.startFrom;
+	const fromDir = from ? harness.workspaceOf(from) : undefined;
+	const seed = fromDir && existsSync(fromDir) ? fromDir : harness.run().workspace;
 	if (seed && existsSync(seed)) {
 		cpSync(seed, dir, { recursive: true, filter: (src) => !SKIP.has(src.split("/").pop() ?? "") });
 	}
