@@ -17,7 +17,8 @@
 		"@one-piece/module-board": "0.1.0",
 		"@one-piece/module-questions": "0.1.0",
 		"@one-piece/module-secrets": "0.1.0",
-		"@one-piece/module-workspace": "0.1.0"
+		"@one-piece/module-workspace": "0.1.0",
+		"@one-piece/evals": "0.1.0"
 	},
 	"bin": {
 		"one-piece": "./bin/one-piece.mjs"

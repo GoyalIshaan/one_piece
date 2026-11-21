@@ -23,6 +23,8 @@ Usage:
   one-piece run "<goal>" [options]     Plan, search, verify and report on a goal
   one-piece dashboard [--port 4747]    Open the telemetry dashboard for this project
   one-piece runs                       List this project's runs
+  one-piece eval [--suite smoke|full]  Run the eval suite (hidden graders, health checks, report)
+                 [--task id] [--provider id] [--budget-scale 0.5]
   one-piece models <provider>          List a provider's models
   one-piece login <provider>           Sign in (openai = Sign in with ChatGPT, openrouter, ...)
   one-piece secrets set <name>         Store a secret in the macOS Keychain
@@ -59,6 +61,9 @@ async function main(): Promise<void> {
 			dashboard: { type: "boolean" },
 			port: { type: "string" },
 			project: { type: "string" },
+			suite: { type: "string" },
+			task: { type: "string", multiple: true },
+			"budget-scale": { type: "string" },
 			help: { type: "boolean", short: "h" },
 		},
 	});
@@ -142,6 +147,29 @@ async function main(): Promise<void> {
 			for (const module of modules) await module.dispose?.();
 			if (dashboard) console.log(`The dashboard keeps serving at ${dashboard.url} (Ctrl+C to quit).`);
 			else store.close();
+			return;
+		}
+		case "eval": {
+			const { runEval } = await import("@one-piece/evals");
+			const providers = values.provider?.length ? config.providers : loadConfig(projectDir, ["openai", "openrouter"]).providers;
+			const router = new Router({ providers, credentialsPath: join(homeDir(), "auth.json"), providerFactories: PROVIDER_FACTORIES, simPolicy });
+			await router.prepare();
+			console.log(`Providers usable: ${[...new Set(router.menu().map((m) => m.provider))].join(", ")}; menu: ${router.menu().map((m) => m.key).join(", ")}`);
+			const { results, reportPath } = await runEval({
+				suite: values.suite ?? "smoke",
+				taskIds: values.task,
+				dataDir: config.dataDir,
+				router,
+				modules: () => [questionsModule({ deadlineMs: 3 * 60_000 }), boardModule(), workspaceModule(), schedulerModule(config.pools)],
+				profile: { questions: "active", board: "active", workspace: "active", scheduler: "active" },
+				maxConcurrentAgents: Number(values.concurrency ?? config.maxConcurrentAgents),
+				budgetScale: values["budget-scale"] ? Number(values["budget-scale"]) : undefined,
+				log: (line) => console.log(line),
+			});
+			const broken = results.filter((r) => r.health.status === "fail").length;
+			console.log(`\nMean score ${(results.reduce((a, r) => a + r.score, 0) / results.length).toFixed(3)}; ${results.length - broken}/${results.length} tasks ran without breaking.`);
+			console.log(`Report: ${reportPath}`);
+			process.exitCode = broken ? 1 : 0;
 			return;
 		}
 		case "dashboard": {

@@ -60,13 +60,26 @@ function real(path: string): string {
 	}
 }
 
+/** Paths no sandboxed command may read (eval graders, hidden answers). Process-wide. */
+const deniedReads = new Set<string>();
+
+export function denySandboxReads(paths: string[]): void {
+	for (const p of paths) deniedReads.add(real(p));
+}
+
+export function allowSandboxReads(paths: string[]): void {
+	for (const p of paths) deniedReads.delete(real(p));
+}
+
 function seatbeltProfile(profile: SandboxProfile, roots: string[]): string {
-	const writes = roots.map((r) => `(subpath "${r.replace(/"/g, '\\"')}")`).join(" ");
+	const quote = (r: string) => `(subpath "${r.replace(/"/g, '\\"')}")`;
+	const writes = roots.map(quote).join(" ");
 	return [
 		"(version 1)",
 		"(allow default)",
 		"(deny file-write*)",
 		`(allow file-write* ${writes} (literal "/dev/null") (literal "/dev/tty") (literal "/dev/stdout") (literal "/dev/stderr") (regex #"^/dev/fd/"))`,
+		deniedReads.size ? `(deny file-read* ${[...deniedReads].map(quote).join(" ")})` : "",
 		profile === "job" ? '(deny network*) (allow network* (local unix))' : "",
 	].join("");
 }

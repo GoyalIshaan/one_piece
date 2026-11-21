@@ -1,0 +1,12 @@
+{
+	"id": "perf-algos",
+	"title": "Make three slow functions fast",
+	"category": "optimization",
+	"inspiredBy": "GSO (software performance optimization)",
+	"suites": ["smoke", "full"],
+	"goal": "Make the three functions in algos.py (lis_length, count_inversions, top_k_frequent) as fast as possible on large inputs while keeping their exact behavior, including edge cases and tie-breaking. The final algos.py is scored by hidden correctness tests and a hidden benchmark; any correctness failure scores zero. Use python3; bench.py and test_algos.py are there to help. Each worker should leave its best version in algos.py in its own workspace.",
+	"rubric": "Correctness first, then speed. Prefer asymptotic improvements over micro-tuning. Verify against the original implementation on many random inputs, including negatives, duplicates and floats, before claiming a speedup.",
+	"budget": { "tokens": 350000, "usd": 1.5, "cpu_seconds": 900 },
+	"caps": { "maxChildren": 3, "maxDepth": 2 },
+	"timeLimitMinutes": 20
+}

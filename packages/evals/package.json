@@ -1,0 +1,16 @@
+{
+	"name": "@one-piece/evals",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"license": "MIT",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@one-piece/core": "0.1.0",
+		"@one-piece/store": "0.1.0",
+		"@one-piece/engine": "0.1.0",
+		"@one-piece/dashboard": "0.1.0"
+	}
+}
