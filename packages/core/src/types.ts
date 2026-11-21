@@ -126,7 +126,8 @@ export interface SwarmNode {
 	updatedAt: number;
 }
 
-export type FindingStatus = "pending_review" | "accepted" | "rejected" | "needs_work";
+/** "unreviewed": the run ended while the finding was still waiting for its claims review. */
+export type FindingStatus = "pending_review" | "accepted" | "rejected" | "needs_work" | "unreviewed";
 
 export interface ReviewRound {
 	round: number;

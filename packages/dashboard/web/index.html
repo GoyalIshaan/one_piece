@@ -72,7 +72,7 @@ a { color: var(--run); }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; background: var(--still); }
 .s-running { --c: var(--run); } .s-parked { --c: var(--park); } .s-done { --c: var(--done); } .s-cut, .s-failed { --c: var(--cut); }
 .s-merged, .s-archived { --c: var(--still); } .s-pending { --c: var(--line-2); }
-.s-accepted { --c: var(--done); } .s-rejected { --c: var(--cut); } .s-needs_work, .s-pending_review { --c: var(--wait); }
+.s-accepted { --c: var(--done); } .s-rejected { --c: var(--cut); } .s-needs_work, .s-pending_review { --c: var(--wait); } .s-unreviewed { --c: var(--still); }
 .chip.st { background: color-mix(in oklch, var(--c, var(--still)) 13%, transparent); color: color-mix(in oklch, var(--c, var(--ink-2)) 80%, var(--ink)); }
 .chip.st .dot, .dot.st { background: var(--c, var(--still)); }
 
@@ -276,6 +276,7 @@ td.r, th.r { text-align: right; }
 .ecard .big { font-size: 34px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
 .issues { margin: 8px 0 0; padding-left: 18px; font-size: 13px; }
 .issues li.fail { color: var(--cut); }
+.issues li.info { color: var(--ink-3); }
 .issues li.warn { color: color-mix(in oklch, var(--wait) 70%, var(--ink)); }
 .wbars { display: grid; gap: 4px; margin-top: 10px; }
 .wbar { display: grid; grid-template-columns: minmax(120px, 220px) 1fr 50px; gap: 10px; align-items: center; font-size: 12.5px; color: var(--ink-2); }
@@ -766,11 +767,11 @@ function viewFamilies() {
 		}).join("")}`;
 }
 function viewFindings() {
-	const order = { accepted: 0, needs_work: 1, pending_review: 2, rejected: 3 };
+	const order = { accepted: 0, needs_work: 1, pending_review: 2, unreviewed: 3, rejected: 4 };
 	const fs = [...S.state.findings].sort((a, b) => order[a.status] - order[b.status] || b.updatedAt - a.updatedAt);
 	const count = (s) => fs.filter((f) => f.status === s).length;
 	if (!fs.length) return `<h1 class="view">Findings</h1><p class="empty">No findings yet. When a worker reports a result, a claims reviewer on another model checks it; only accepted findings travel up the tree.</p>`;
-	return `<h1 class="view">Findings</h1><p class="lede">${count("accepted")} accepted, ${count("needs_work")} sent back for more work, ${count("pending_review")} under review, ${count("rejected")} rejected. Bars show each review round.</p>
+	return `<h1 class="view">Findings</h1><p class="lede">${count("accepted")} accepted, ${count("needs_work")} sent back for more work, ${count("pending_review")} under review, ${count("rejected")} rejected${count("unreviewed") ? `, ${count("unreviewed")} closed unreviewed when the run ended` : ""}. Bars show each review round.</p>
 		${fs.map((f) => `<div class="find" data-finding="${esc(f.id)}"><div>${statusChip(f.status)}<div class="steps">${f.rounds.map((r) => `<i class="s-${r.verdict}" title="round ${r.round}: ${esc(r.verdict)}"></i>`).join("")}</div></div><div><div class="lvl">${esc(f.level.replace(/_/g, " "))}${f.confidence !== undefined ? ` · confidence ${f.confidence.toFixed(2)}` : ""}</div><div class="claim">${esc(f.claim)}</div></div><div class="dim" style="font-size:12.5px;text-align:right">${esc(titleOf(f.nodeId))}<br>${ago(f.updatedAt)}</div></div>`).join("")}`;
 }
 function boardFeed(posts, limit) {

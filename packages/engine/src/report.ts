@@ -34,7 +34,7 @@ export function reportAppendix(harness: Harness): string {
 		usd += node.spent.usd ?? 0;
 		for (const [k, v] of Object.entries(node.spent)) if (k.startsWith("tokens:")) byProvider[k.slice(7)] = (byProvider[k.slice(7)] ?? 0) + v;
 	}
-	const order = { accepted: 0, needs_work: 1, pending_review: 2, rejected: 3 } as const;
+	const order = { accepted: 0, needs_work: 1, pending_review: 2, unreviewed: 3, rejected: 4 } as const;
 	const sections = [
 		"## Appendix: evidence trail (generated)",
 		"### Findings",
@@ -84,6 +84,12 @@ export function installReporting(harness: Harness): void {
 		if (finalized) return;
 		finalized = true;
 		const run = harness.run();
+		// A finding still waiting for review when the run ends is closed explicitly, not left in limbo.
+		for (const f of harness.store.list<Finding>("findings", { runId: run.id })) {
+			if (f.status !== "pending_review") continue;
+			harness.bus.save("findings", { ...f, status: "unreviewed", updatedAt: Date.now() }, f.nodeId);
+			harness.bus.emit(run.id, "finding.closed", { findingId: f.id, status: "unreviewed", reason }, f.nodeId);
+		}
 		const reports = harness.store.list<Report>("reports", { runId: run.id }).filter((r) => r.kind === "final");
 		const body = reports.at(-1)?.markdown ?? `# ${run.goal.title}\n\nThe root did not write a report (${reason}). The evidence trail below is complete.`;
 		const markdown = `${body}\n\n${reportAppendix(harness)}\n`;

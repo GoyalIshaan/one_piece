@@ -48,7 +48,8 @@ export interface GradeResult {
 }
 
 export interface HealthIssue {
-	level: "fail" | "warn";
+	/** "info" is shown but does not change the health status. */
+	level: "fail" | "warn" | "info";
 	check: string;
 	message: string;
 }
@@ -146,8 +147,12 @@ export async function checkHealth(store: SqliteStore, dbPath: string, run: Run, 
 	if (callTokens !== ownTokens) fail("spend counted once", `model calls total ${callTokens} tokens but agents' own spend totals ${ownTokens}`);
 	if (budget.tokens && ownTokens > budget.tokens * 1.1) fail("budget respected", `spent ${ownTokens} tokens against a budget of ${budget.tokens}`);
 	if (findings.some((f) => f.status === "accepted" && !f.rounds.length)) fail("findings reviewed", "an accepted finding has no review round");
-	const unresolved = findings.filter((f) => f.status === "pending_review" || f.status === "needs_work");
-	if (unresolved.length) warn("findings resolved", `${unresolved.length} findings ended unresolved (${unresolved.map((f) => f.status).join(", ")})`);
+	const limbo = findings.filter((f) => f.status === "pending_review");
+	if (limbo.length) fail("findings resolved", `${limbo.length} findings were left pending review after the run ended`);
+	const sentBack = findings.filter((f) => f.status === "needs_work");
+	if (sentBack.length) warn("findings resolved", `${sentBack.length} findings were sent back for more work and never resubmitted`);
+	const unreviewed = findings.filter((f) => f.status === "unreviewed");
+	if (unreviewed.length) issues.push({ level: "info", check: "findings resolved", message: `${unreviewed.length} findings reported as the budget ran out were closed unreviewed` });
 	if (!findings.some((f) => f.status === "accepted")) warn("progress", "no finding was accepted");
 	if (!nodes.some((n) => n.role === "leaf")) fail("work happened", "no worker was ever spawned");
 
@@ -165,7 +170,7 @@ export async function checkHealth(store: SqliteStore, dbPath: string, run: Run, 
 	} finally {
 		dash.close();
 	}
-	const status = issues.some((i) => i.level === "fail") ? "fail" : issues.length ? "warn" : "ok";
+	const status = issues.some((i) => i.level === "fail") ? "fail" : issues.some((i) => i.level === "warn") ? "warn" : "ok";
 	return { status, issues };
 }
 
@@ -278,7 +283,7 @@ export async function runTask(task: TaskSpec, options: EvalOptions, evalDir: str
 	const finalRun = store.get<Run>("runs", run.id)!;
 	const health = await checkHealth(store, dbPath, finalRun, runDir, budget);
 	if (stoppedByTimeLimit) health.issues.push({ level: "warn", check: "finished in time", message: `stopped at the ${task.timeLimitMinutes}-minute limit` });
-	if (health.status === "ok" && health.issues.length) health.status = "warn";
+	if (health.status === "ok" && health.issues.some((i) => i.level === "warn")) health.status = "warn";
 
 	const events = store.events(run.id);
 	const count = <T>(items: T[], key: (t: T) => string) => items.reduce<Record<string, number>>((acc, i) => ((acc[key(i)] = (acc[key(i)] ?? 0) + 1), acc), {});
@@ -316,7 +321,7 @@ export async function runTask(task: TaskSpec, options: EvalOptions, evalDir: str
 	result.stats.tokensPerPoint = result.score > 0 ? Math.round(result.stats.tokens / result.score) : Number.POSITIVE_INFINITY;
 	const reviewerTokens = nodes.filter((n) => n.role.endsWith("reviewer")).reduce((a, n) => a + (n.spent.tokens ?? 0), 0);
 	result.stats.oversightShare = result.stats.tokens ? reviewerTokens / result.stats.tokens : 0;
-	log(`  ${task.id}: score ${result.score.toFixed(3)}, health ${health.status}${health.issues.length ? ` (${health.issues.map((i) => i.check).join(", ")})` : ""}`);
+	log(`  ${task.id}: score ${result.score.toFixed(3)}, health ${health.status}${health.issues.length ? ` (${health.issues.map((i) => (i.level === "info" ? `note: ${i.check}` : i.check)).join(", ")})` : ""}`);
 	return result;
 }
 

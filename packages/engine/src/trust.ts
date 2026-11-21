@@ -89,7 +89,7 @@ export function trustTools(harness: Harness, node: SwarmNode) {
 				if (params.revises) {
 					const previous = harness.store.get<Finding>("findings", params.revises);
 					if (!previous || previous.nodeId !== node.id) throw new Error(`Unknown finding ${params.revises}`);
-					if (previous.status === "accepted" || previous.status === "rejected") throw new Error(`Finding ${previous.id} is already ${previous.status}`);
+					if (previous.status === "accepted" || previous.status === "rejected" || previous.status === "unreviewed") throw new Error(`Finding ${previous.id} is already ${previous.status}`);
 					if (previous.rounds.length >= harness.config.claimsMaxRounds) {
 						throw new Error(`Finding ${previous.id} used all ${harness.config.claimsMaxRounds} review rounds; report a narrower claim instead.`);
 					}
