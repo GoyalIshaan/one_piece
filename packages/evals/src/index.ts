@@ -182,6 +182,11 @@ export interface EvalOptions {
 	extraConfig?: Partial<HarnessConfig>;
 	/** Scale every task's token budget (e.g. 0.5 for a cheaper pass). */
 	budgetScale?: number;
+	/**
+	 * "swarm" (default) or "solo": the single-agent baseline. Same task, budget and models, but the
+	 * root may spawn exactly one worker and there are no hidden reviews (claims review stays on).
+	 */
+	mode?: "swarm" | "solo";
 	log?: (line: string) => void;
 }
 
@@ -204,11 +209,23 @@ export async function runTask(task: TaskSpec, options: EvalOptions, evalDir: str
 		store,
 		router: options.router,
 		modules,
-		config: { runDir, seedWorkspace: seed, maxConcurrentAgents: options.maxConcurrentAgents, profile: options.profile, caps: task.caps, ...options.extraConfig },
+		config: {
+			runDir,
+			seedWorkspace: seed,
+			maxConcurrentAgents: options.maxConcurrentAgents,
+			profile: options.profile,
+			caps: options.mode === "solo" ? { maxChildren: 1, maxDepth: 1 } : task.caps,
+			...(options.mode === "solo" ? { reviewFractions: [], epochCheckpoints: [], saturationWindow: 1e9, stallTurns: 1e9 } : {}),
+			...options.extraConfig,
+		},
 	});
 	const began = Date.now();
 	const run = await harness.start(
-		{ title: `[eval] ${task.title}`, text: `${task.goal}\n\nThe task files are in your workspace (each worker gets its own copy).`, rubric: task.rubric },
+		{
+			title: `[eval${options.mode === "solo" ? " solo" : ""}] ${task.title}`,
+			text: `${task.goal}\n\nThe task files are in your workspace (each worker gets its own copy).${options.mode === "solo" ? "\n\nThis is a single-agent baseline: spawn exactly one worker to do the whole task." : ""}`,
+			rubric: task.rubric,
+		},
 		budget,
 		{ workspace: seed, config: { eval: task.id } },
 	);
@@ -273,7 +290,7 @@ export async function runTask(task: TaskSpec, options: EvalOptions, evalDir: str
 export async function runEval(options: EvalOptions): Promise<{ results: TaskResult[]; dir: string; reportPath: string }> {
 	const tasks = loadTasks(options.suite, options.taskIds);
 	const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-	const dir = join(options.dataDir, "evals", stamp);
+	const dir = join(options.dataDir, "evals", `${stamp}${options.mode === "solo" ? "-solo" : ""}`);
 	mkdirSync(dir, { recursive: true });
 	const dbPath = join(options.dataDir, "one_piece.db");
 	const store = new SqliteStore(dbPath);
@@ -283,7 +300,7 @@ export async function runEval(options: EvalOptions): Promise<{ results: TaskResu
 	store.close();
 	const reportPath = join(dir, "report.md");
 	writeFileSync(join(dir, "results.json"), JSON.stringify(results, null, 2));
-	writeFileSync(reportPath, renderReport(options.suite, results));
+	writeFileSync(reportPath, renderReport(`${options.suite}${options.mode === "solo" ? " (solo baseline)" : ""}`, results));
 	return { results, dir, reportPath };
 }
 

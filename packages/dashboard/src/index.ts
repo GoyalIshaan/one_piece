@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -95,6 +95,34 @@ export function startDashboard(options: DashboardOptions): { server: Server; url
 				return;
 			}
 			if (parts[0] !== "api") return json(res, 404, { error: "not found" });
+			if (req.method === "GET" && parts[1] === "evals") {
+				// Eval rounds live next to the store: <dataDir>/evals/<stamp>/results.json
+				const root = join(dirname(options.dbPath), "evals");
+				const rounds = existsSync(root)
+					? readdirSync(root)
+							.filter((d) => existsSync(join(root, d, "results.json")))
+							.sort()
+							.reverse()
+							.slice(0, 50)
+							.map((d) => {
+								const results = JSON.parse(readFileSync(join(root, d, "results.json"), "utf8")) as Array<Record<string, any>>;
+								return {
+									id: d,
+									results: results.map((r) => ({
+										task: { id: r.task.id, title: r.task.title, category: r.task.category, inspiredBy: r.task.inspiredBy },
+										runId: r.runId,
+										status: r.status,
+										score: r.score,
+										best: r.best ? { title: r.best.title, details: r.best.grade.details } : null,
+										graded: r.graded.map((g: any) => ({ title: g.title, score: g.grade.score })),
+										health: r.health,
+										stats: r.stats,
+									})),
+								};
+							})
+					: [];
+				return json(res, 200, rounds);
+			}
 			if (req.method === "GET" && parts[1] === "runs" && parts.length === 2) {
 				return json(res, 200, store.list<Run>("runs").sort((a, b) => b.createdAt - a.createdAt));
 			}

@@ -269,6 +269,18 @@ td.r, th.r { text-align: right; }
 .md code { font-family: var(--code); font-size: 12.5px; background: var(--wash); padding: 1px 4px; border-radius: 4px; }
 .md pre { background: var(--wash); padding: 10px 12px; border-radius: 8px; overflow: auto; font-size: 12.5px; }
 
+/* evals */
+.matrix td.cell { text-align: center; font-variant-numeric: tabular-nums; font-weight: 600; border-left: 1px solid var(--panel); }
+.matrix th.col { text-align: center; font-size: 11px; }
+.ecard { display: grid; grid-template-columns: 1fr 140px; gap: 18px; padding: 18px 0; border-bottom: 1px solid var(--line); }
+.ecard .big { font-size: 34px; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
+.issues { margin: 8px 0 0; padding-left: 18px; font-size: 13px; }
+.issues li.fail { color: var(--cut); }
+.issues li.warn { color: color-mix(in oklch, var(--wait) 70%, var(--ink)); }
+.wbars { display: grid; gap: 4px; margin-top: 10px; }
+.wbar { display: grid; grid-template-columns: minmax(120px, 220px) 1fr 50px; gap: 10px; align-items: center; font-size: 12.5px; color: var(--ink-2); }
+.wbar .track { height: 8px; background: var(--wash); border-radius: 4px; overflow: hidden; }
+.wbar .track i { display: block; height: 100%; background: var(--done); }
 /* feed */
 .filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; align-items: center; }
 .filters button { border: 1px solid var(--line-2); background: var(--panel); border-radius: 999px; padding: 3px 11px; cursor: pointer; font-size: 12.5px; color: var(--ink-2); }
@@ -398,7 +410,7 @@ function renderStrip() {
 		<div class="metric"><b class="num">${r.epoch}</b><span>epoch</span></div>
 		${waiting ? `<button class="ask-btn" onclick="go('inbox')">${waiting} question${waiting > 1 ? "s" : ""} for you</button>` : ""}`;
 }
-const VIEWS = [["swarm", "Swarm"], ["families", "Families"], ["findings", "Findings"], ["boards", "Boards"], ["tokens", "Tokens"], ["epochs", "Epochs"], ["inbox", "Inbox"], ["feed", "Live feed"]];
+const VIEWS = [["swarm", "Swarm"], ["families", "Families"], ["findings", "Findings"], ["boards", "Boards"], ["tokens", "Tokens"], ["epochs", "Epochs"], ["inbox", "Inbox"], ["feed", "Live feed"], ["evals", "Evals"]];
 function renderRail() {
 	const st = S.state;
 	const count = { families: st ? families().length : 0, findings: st?.findings.length ?? 0, boards: st?.posts.length ?? 0, epochs: st?.epochs.length ?? 0 };
@@ -425,9 +437,11 @@ function renderAll() { renderStrip(); renderRail(); renderView(); renderDrawer()
 // ---------- views ----------
 function renderView() {
 	const stage = $("#stage");
+	if (S.view === "evals") return renderEvals();
 	if (!S.state?.run) { stage.innerHTML = `<div class="page"><h1 class="view">No runs yet</h1><p class="lede">Start one from a project folder: <span class="code">one-piece run "your goal" --dashboard</span>. This page fills in as the swarm works.</p></div>`; return; }
 	if (S.reader) return renderReader();
 	if (S.view === "swarm") return renderSwarm();
+	if (S.view === "evals") return renderEvals();
 	const page = { families: viewFamilies, findings: viewFindings, boards: viewBoards, tokens: viewTokens, epochs: viewEpochs, inbox: viewInbox, feed: viewFeed }[S.view]();
 	const keepScroll = stage.scrollTop;
 	stage.innerHTML = `<div class="page">${page}</div>`;
@@ -921,6 +935,56 @@ async function renderReader() {
 	$("#stage").innerHTML = `<div class="page"><button class="btn" onclick="S.reader=null;renderView()">← Back to inbox</button><div style="margin-top:26px">${md(r.markdown)}</div></div>`;
 }
 const FEED_GROUPS = { all: null, agents: ["agent.message", "agent.error", "agent.retry", "node.spawned", "node.status", "node.checkpoint", "node.contract"], tools: ["tool.call", "tool.result", "workspace.command"], findings: ["finding.reported", "finding.verdict"], reviews: ["review.started", "recommendations.updated", "epoch.consulted", "epoch.decision", "epoch.started"], questions: ["question.asked", "question.answered", "question.escalated_to_user", "node.delivered"], jobs: ["job.submitted", "job.started", "job.finished", "job.cached"], money: ["model.call", "budget.transferred", "budget.reclaimed"] };
+const scoreColor = (v) => `color-mix(in oklch, var(--done) ${Math.round(12 + v * 60)}%, var(--panel))`;
+const healthWord = { ok: "healthy", warn: "warnings", fail: "broke" };
+const healthClass = { ok: "done", warn: "needs_work", fail: "failed" };
+async function renderEvals() {
+	const stage = $("#stage");
+	let rounds = [];
+	try { rounds = await api("/api/evals"); } catch {}
+	if (!rounds.length) {
+		stage.innerHTML = `<div class="page"><h1 class="view">Evals</h1><p class="lede">Run <span class="code">one-piece eval --suite smoke</span> to grade the harness on Mac-only tasks: optimization with continuous scores, engineering with hidden tests, and wide coordination. Each round lands here with scores, health checks and a link to its swarm.</p></div>`;
+		return;
+	}
+	if (!S.evalRound || !rounds.some((r) => r.id === S.evalRound)) S.evalRound = rounds[0].id;
+	const round = rounds.find((r) => r.id === S.evalRound);
+	const when = (id) => {
+		const solo = id.endsWith("-solo");
+		const iso = id.replace(/-solo$/, "").replace(/T(\d\d)-(\d\d)-(\d\d)-(\d+)Z/, "T$1:$2:$3.$4Z");
+		const d = new Date(iso);
+		return `${isNaN(d) ? id : d.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}${solo ? " · solo" : ""}`;
+	};
+	const mean = (r) => r.results.reduce((a, x) => a + x.score, 0) / Math.max(1, r.results.length);
+	const ok = (r) => r.results.filter((x) => x.health.status !== "fail").length;
+	const taskIds = [...new Set(rounds.flatMap((r) => r.results.map((x) => x.task.id)))].sort();
+	const cols = rounds.slice(0, 10).reverse();
+	const cell = (x) => x
+		? `<td class="cell" style="background:${scoreColor(x.score)}" title="${esc(healthWord[x.health.status])}">${x.score.toFixed(2)}${x.health.status === "fail" ? ' <span style="color:var(--cut)">✕</span>' : x.health.status === "warn" ? ' <span style="color:var(--wait)">!</span>' : ""}</td>`
+		: `<td class="cell dim">—</td>`;
+	const matrix = `<table class="matrix"><tr><th>Task</th>${cols.map((r) => `<th class="col"><button class="linkbtn" data-round="${esc(r.id)}" style="${r.id === S.evalRound ? "font-weight:700;color:var(--ink)" : ""}">${esc(when(r.id))}</button></th>`).join("")}</tr>
+		${taskIds.map((t) => `<tr><td>${esc(t)}</td>${cols.map((r) => cell(r.results.find((y) => y.task.id === t))).join("")}</tr>`).join("")}
+		<tr><td><b>Mean</b></td>${cols.map((r) => `<td class="cell"><b>${mean(r).toFixed(2)}</b></td>`).join("")}</tr>
+		<tr><td class="dim">Ran without breaking</td>${cols.map((r) => `<td class="cell dim">${ok(r)}/${r.results.length}</td>`).join("")}</tr></table>`;
+	const cards = round.results.map((x) => {
+		const st = x.stats;
+		return `<div class="ecard"><div>
+			<div class="row"><b style="font-size:16px">${esc(x.task.title)}</b><span class="chip">${esc(x.task.category)}</span><span class="chip st s-${healthClass[x.health.status]}"><span class="dot"></span>${healthWord[x.health.status]}</span></div>
+			<div class="dim" style="font-size:12.5px;margin-top:2px">${esc(x.task.id)} · inspired by ${esc(x.task.inspiredBy)} · ${esc(x.status)}${st ? ` · ${dur(st.durationMs)} · ${kfmt(st.tokens)} tokens · $${st.usd.toFixed(2)}` : ""}</div>
+			${x.best ? `<p class="prose" style="margin:10px 0 0">Best worker <b>${esc(x.best.title)}</b>: ${esc(x.best.details)}</p>` : `<p class="dim">No worker workspace was graded.</p>`}
+			${x.health.issues.length ? `<ul class="issues">${x.health.issues.map((i) => `<li class="${i.level}"><b>${esc(i.check)}</b>: ${esc(i.message)}</li>`).join("")}</ul>` : `<p class="dim" style="margin:6px 0 0">All health checks passed.</p>`}
+			${x.graded.length > 1 ? `<div class="wbars">${x.graded.map((g) => `<div class="wbar"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(g.title)}</span><span class="track"><i style="width:${(g.score * 100).toFixed(1)}%"></i></span><span class="num">${g.score.toFixed(2)}</span></div>`).join("")}</div>` : ""}
+			${st ? `<div class="dim" style="font-size:12.5px;margin-top:10px">${Object.entries(st.agents).map(([k, v]) => `${v} ${esc(ROLE_NAME[k] ?? k)}`).join(" · ")} · findings ${Object.entries(st.findings).map(([k, v]) => `${v} ${k.replace(/_/g, " ")}`).join(", ") || "none"} · ${st.modelErrors} model errors, ${st.retries} retries · ${st.toolErrors}/${st.toolCalls} tool errors${st.childModelChoices?.length ? ` · managers chose ${st.childModelChoices.map(esc).join(", ")}` : ""}</div>` : ""}
+		</div><div style="text-align:right"><div class="big" style="color:${x.score >= 0.8 ? "var(--done)" : x.score >= 0.4 ? "var(--ink)" : "var(--cut)"}">${x.score.toFixed(2)}</div><div class="dim" style="font-size:12px">score</div><button class="btn" style="margin-top:12px" data-openrun="${esc(x.runId)}">Open swarm</button></div></div>`;
+	}).join("");
+	stage.innerHTML = `<div class="page"><h1 class="view">Evals</h1><p class="lede">Each round runs the suite with hidden graders outside the swarm. Scores run from 0 to 1; ! marks a warning and ✕ a run that broke.</p>
+		${matrix}<h3>Round of ${esc(when(round.id))} · mean ${mean(round).toFixed(3)} · ${ok(round)}/${round.results.length} ran without breaking</h3>${cards}</div>`;
+	stage.querySelectorAll("[data-round]").forEach((el) => (el.onclick = () => { S.evalRound = el.dataset.round; renderEvals(); }));
+	stage.querySelectorAll("[data-openrun]").forEach((el) => (el.onclick = async () => {
+		S.runId = el.dataset.openrun; S.sel = null; S.family = null; S.epoch = null; S.fitted = false; S.feed = [];
+		$("#run").value = S.runId; connect(); S.view = "swarm"; await refresh(true);
+	}));
+}
+
 function viewFeed() {
 	const allow = FEED_GROUPS[S.feedFilter], q = S.feedQuery.toLowerCase();
 	const rows = S.feed.filter((e) => (!allow || allow.includes(e.type)) && !e.type.endsWith(".updated") || (allow && allow.includes(e.type))).filter((e) => !q || `${e.type} ${titleOf(e.nodeId)} ${JSON.stringify(e.data)}`.toLowerCase().includes(q)).slice(-500).reverse();

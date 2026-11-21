@@ -24,7 +24,7 @@ Usage:
   one-piece dashboard [--port 4747]    Open the telemetry dashboard for this project
   one-piece runs                       List this project's runs
   one-piece eval [--suite smoke|full]  Run the eval suite (hidden graders, health checks, report)
-                 [--task id] [--provider id] [--budget-scale 0.5]
+                 [--task id] [--provider id] [--budget-scale 0.5] [--mode solo]
   one-piece models <provider>          List a provider's models
   one-piece login <provider>           Sign in (openai = Sign in with ChatGPT, openrouter, ...)
   one-piece secrets set <name>         Store a secret in the macOS Keychain
@@ -64,6 +64,7 @@ async function main(): Promise<void> {
 			suite: { type: "string" },
 			task: { type: "string", multiple: true },
 			"budget-scale": { type: "string" },
+			mode: { type: "string" },
 			help: { type: "boolean", short: "h" },
 		},
 	});
@@ -164,6 +165,7 @@ async function main(): Promise<void> {
 				profile: { questions: "active", board: "active", workspace: "active", scheduler: "active" },
 				maxConcurrentAgents: Number(values.concurrency ?? config.maxConcurrentAgents),
 				budgetScale: values["budget-scale"] ? Number(values["budget-scale"]) : undefined,
+				mode: values.mode === "solo" ? "solo" : "swarm",
 				log: (line) => console.log(line),
 			});
 			const broken = results.filter((r) => r.health.status === "fail").length;
