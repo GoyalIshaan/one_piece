@@ -2,17 +2,25 @@
 import json, math, os, random, subprocess, sys, textwrap
 
 ws, hidden = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
-REF = os.path.join(hidden, "reference.py")
+LOAD_CANDIDATE = """from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+spec = spec_from_file_location("algos", Path.cwd() / "algos.py")
+candidate = module_from_spec(spec)
+sys.modules["algos"] = candidate
+spec.loader.exec_module(candidate)
+"""
 
 def run(code, timeout):
-    r = subprocess.run([sys.executable, "-c", code], cwd=ws, capture_output=True, text=True, timeout=timeout)
+    r = subprocess.run([sys.executable, "-B", "-c", code], cwd=ws, capture_output=True, text=True, timeout=timeout)
+    r.check_returncode()
     return r
 
 check = textwrap.dedent(f"""
 import itertools, random, sys, json
 sys.path.insert(0, {hidden!r})
 import reference_slow as R
-import algos as A
+{LOAD_CANDIDATE}
+A = candidate
 rng = random.Random(1234)
 fails = []
 cases = [[], [1], [2, 2, 2], [5, 4, 3, 2, 1], [1, 2, 3, 4], [-3, -1, -2, 0, -5], [0.5, 0.25, 0.75]]
@@ -40,7 +48,7 @@ if res["fails"]:
 bench = textwrap.dedent("""
 import random, time, sys, json
 sys.path.insert(0, HIDDEN)
-MOD = __import__(MODNAME)
+MOD = candidate if MODNAME == "algos" else __import__(MODNAME)
 rng = random.Random(99)
 xs = [rng.randrange(10**6) for _ in range(N)]
 words = [rng.choice([f"w{i}" for i in range(500)]) for _ in range(4 * N)]
@@ -51,7 +59,8 @@ for name, args in [("lis_length", (xs,)), ("count_inversions", (xs,)), ("top_k_f
 print(json.dumps(out))
 """)
 def timing(modname, n):
-    code = bench.replace("HIDDEN", repr(hidden)).replace("MODNAME", repr(modname)).replace("N)", f"{n})").replace("4 * N", f"4 * {n}")
+    code = f"import sys\n{LOAD_CANDIDATE}" if modname == "algos" else ""
+    code += bench.replace("HIDDEN", repr(hidden)).replace("MODNAME", repr(modname)).replace("N)", f"{n})").replace("4 * N", f"4 * {n}")
     r = run(code, 300)
     return json.loads(r.stdout.strip().splitlines()[-1])
 

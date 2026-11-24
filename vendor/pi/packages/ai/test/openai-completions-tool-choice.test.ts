@@ -1700,6 +1700,7 @@ describe("openai-completions tool_choice", () => {
 		expect(response.usage.cacheRead).toBe(50);
 		expect(response.usage.cacheWrite).toBe(30);
 		expect(response.usage.totalTokens).toBe(105);
+		expect(response.usage.reasoning).toBe(0);
 	});
 
 	it("preserves prompt_tokens_details cache read/write fields from choice usage fallback", async () => {
@@ -1718,7 +1719,6 @@ describe("openai-completions tool_choice", () => {
 							prompt_tokens: 100,
 							completion_tokens: 5,
 							prompt_tokens_details: { cached_tokens: 50, cache_write_tokens: 30 },
-							completion_tokens_details: { reasoning_tokens: 0 },
 						},
 					},
 				],
@@ -1746,6 +1746,7 @@ describe("openai-completions tool_choice", () => {
 		expect(response.usage.cacheRead).toBe(50);
 		expect(response.usage.cacheWrite).toBe(30);
 		expect(response.usage.totalTokens).toBe(105);
+		expect(response.usage.reasoning).toBeUndefined();
 	});
 
 	// #12019

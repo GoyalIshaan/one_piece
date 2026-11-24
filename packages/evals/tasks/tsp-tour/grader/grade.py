@@ -2,8 +2,7 @@
 import json, math, os, sys
 ws, hidden = os.path.abspath(sys.argv[1]), os.path.abspath(sys.argv[2])
 ref = json.load(open(os.path.join(hidden, "ref.json")))
-lines = open(os.path.join(ws, "cities.txt")).read().split("\n")
-n = int(lines[0]); pts = [tuple(map(int, l.split())) for l in lines[1:n + 1]]
+n, pts = ref["n"], ref["points"]
 p = os.path.join(ws, "tour.txt")
 if not os.path.exists(p):
     print(json.dumps({"score": 0, "passed": False, "details": "no tour.txt"})); sys.exit(0)

@@ -967,9 +967,11 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					// This ensures we have input token counts even if the stream is aborted early
 					output.usage.input = event.message.usage.input_tokens || 0;
 					output.usage.output = event.message.usage.output_tokens || 0;
+					output.usage.cacheReadReported = event.message.usage.cache_read_input_tokens != null;
+					output.usage.cacheWriteReported = event.message.usage.cache_creation_input_tokens != null;
 					output.usage.cacheRead = event.message.usage.cache_read_input_tokens || 0;
 					output.usage.cacheWrite = event.message.usage.cache_creation_input_tokens || 0;
-					output.usage.cacheWrite1h = event.message.usage.cache_creation?.ephemeral_1h_input_tokens || 0;
+					output.usage.cacheWrite1h = event.message.usage.cache_creation?.ephemeral_1h_input_tokens ?? undefined;
 					// Anthropic doesn't provide total_tokens, compute from components
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
@@ -1105,9 +1107,11 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 							output.usage.output = event.usage.output_tokens;
 						}
 						if (event.usage.cache_read_input_tokens != null) {
+							output.usage.cacheReadReported = true;
 							output.usage.cacheRead = event.usage.cache_read_input_tokens;
 						}
 						if (event.usage.cache_creation_input_tokens != null) {
+							output.usage.cacheWriteReported = true;
 							output.usage.cacheWrite = event.usage.cache_creation_input_tokens;
 						}
 						// Vercel AI Gateway includes the TTL breakdown in deltas, though the SDK only types it on message_start.

@@ -467,6 +467,9 @@ export interface ToolCall {
 }
 
 export interface Usage {
+	/** False when an adapter filled an omitted cache counter with zero for cost calculations. */
+	cacheReadReported?: boolean;
+	cacheWriteReported?: boolean;
 	input: number;
 	output: number;
 	cacheRead: number;

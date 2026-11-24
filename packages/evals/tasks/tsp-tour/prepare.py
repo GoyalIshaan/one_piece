@@ -1,5 +1,5 @@
 """Generate a TSP instance and its reference tours. Usage: prepare.py <seed_dir> <hidden_dir> <rng_seed>"""
-import json, math, os, random, sys, time
+import json, math, os, random, sys
 seed_dir, hidden, rng_seed = sys.argv[1], sys.argv[2], int(sys.argv[3])
 rng = random.Random(rng_seed)
 os.makedirs(seed_dir, exist_ok=True); os.makedirs(hidden, exist_ok=True)
@@ -15,15 +15,15 @@ while left:
     nxt = min(left, key=lambda c: d(tour[-1], c)); tour.append(nxt); left.remove(nxt)
 nn = length(tour)
 # 2-opt reference
-improved, start = True, time.time()
-while improved and time.time() - start < 60:
+improved = True
+while improved:
     improved = False
     for i in range(1, n - 1):
         for j in range(i + 1, n):
             a, b, c, e = tour[i - 1], tour[i], tour[j], tour[(j + 1) % n]
             if d(a, c) + d(b, e) < d(a, b) + d(c, e) - 1e-9:
                 tour[i:j + 1] = reversed(tour[i:j + 1]); improved = True
-json.dump({"n": n, "nn": nn, "two_opt": length(tour)}, open(os.path.join(hidden, "ref.json"), "w"))
+json.dump({"n": n, "points": pts, "nn": nn, "two_opt": length(tour)}, open(os.path.join(hidden, "ref.json"), "w"))
 with open(os.path.join(seed_dir, "TASK.md"), "w") as f:
     f.write(f"""# Shortest tour
 
