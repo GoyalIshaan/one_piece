@@ -35,7 +35,10 @@ export interface QuotaRouterOptions {
  * - Zero retries on Class 3 (`401`/`403`) hard auth/cap errors
  */
 export class DriverQuotaRouter implements QuotaPoolRouter {
-	private readonly driverMap = new Map<string, { driver: WorkerDriver; config: DriverConfig; permit: PermitActor }>();
+	private readonly driverMap = new Map<
+		string,
+		{ driver: WorkerDriver; config: DriverConfig; permit: PermitActor; maxConcurrent: number; reserved: number }
+	>();
 	private readonly states = new Map<string, ProviderQuotaRecord>();
 	private readonly roles: Record<string, string[]>;
 	private bus?: EventBus;
@@ -54,6 +57,8 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 				driver: entry.driver,
 				config: entry.config,
 				permit: new PermitActor(maxConcurrent),
+				maxConcurrent,
+				reserved: 0,
 			});
 			this.states.set(entry.driver.id, {
 				id: `quota-${entry.driver.id}`,
@@ -149,24 +154,55 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 		} else {
 			const avoided = new Set(opts.avoidDrivers ?? []);
 			const preferred = eligible.filter((id) => !avoided.has(id));
-			const pool = preferred.length ? preferred : eligible;
-			const weights = pool.map((id) => Math.max(0.01, this.driverMap.get(id)!.config.weight ?? 1));
-			const total = weights.reduce((a, b) => a + b, 0);
-			this.rotation = (this.rotation + 0.618_033_988_75) % 1;
-			let point = this.rotation * total;
-			chosenId = pool[0]!;
-			for (let i = 0; i < pool.length; i++) {
-				point -= weights[i]!;
-				if (point <= 0) {
-					chosenId = pool[i]!;
-					break;
+			const basePool = preferred.length ? preferred : eligible;
+			// Availability-aware selection: ALWAYS prefer drivers with free immediate permit capacity
+			// using synchronous `reserved` counts so same-tick Promise.all spawns NEVER hold-and-wait deadlock!
+			const withFreeSlots = basePool.filter((id) => {
+				const d = this.driverMap.get(id)!;
+				return d.reserved < d.maxConcurrent;
+			});
+			const pool = withFreeSlots.length
+				? withFreeSlots
+				: [...basePool].sort((a, b) => {
+					const da = this.driverMap.get(a)!;
+					const db = this.driverMap.get(b)!;
+					return da.reserved / da.maxConcurrent - db.reserved / db.maxConcurrent;
+				});
+			if (!withFreeSlots.length) {
+				chosenId = pool[0]!;
+			} else {
+				const weights = pool.map((id) => Math.max(0.01, this.driverMap.get(id)!.config.weight ?? 1));
+				const total = weights.reduce((a, b) => a + b, 0);
+				this.rotation = (this.rotation + 0.618_033_988_75) % 1;
+				let point = this.rotation * total;
+				chosenId = pool[0]!;
+				for (let i = 0; i < pool.length; i++) {
+					point -= weights[i]!;
+					if (point <= 0) {
+						chosenId = pool[i]!;
+						break;
+					}
 				}
 			}
 		}
 
 		const entry = this.driverMap.get(chosenId)!;
+		entry.reserved += 1;
 		const waitStart = this.now();
-		const release = await entry.permit.acquire(opts.signal);
+		let rawRelease: () => void;
+		try {
+			rawRelease = await entry.permit.acquire(opts.signal);
+		} catch (error) {
+			entry.reserved = Math.max(0, entry.reserved - 1);
+			throw error;
+		}
+		let released = false;
+		const release = () => {
+			if (released) return;
+			released = true;
+			entry.reserved = Math.max(0, entry.reserved - 1);
+			rawRelease();
+		};
 		const waitedMs = Math.max(0, this.now() - waitStart);
 		return { driver: entry.driver, release, waitedMs };
 	}

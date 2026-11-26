@@ -417,4 +417,42 @@ describe("drivers & 3-class quota classification", () => {
 		expect(fallback.driver.id).toBe("only");
 		fallback.release();
 	});
+
+	it("never hold-and-wait deadlocks when spawning N concurrent workers equal to aggregate multi-driver capacity", async () => {
+		const mkFake = (id: string) => ({
+			id,
+			kind: "codex-exec" as const,
+			capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema: false, supportsMcpHttp: false },
+			healthCheck: async () => ({ ok: true, driverId: id, kind: "codex-exec" as const }),
+			spawn: async () => ({ driverId: id, runTurn: async () => ({ status: "completed" as const, finalText: "" }), close: async () => {} }),
+		});
+
+		const router = new DriverQuotaRouter({
+			drivers: [
+				{ driver: mkFake("codex"), config: { id: "codex", kind: "codex-exec", maxConcurrent: 2 } },
+				{ driver: mkFake("gemini"), config: { id: "gemini", kind: "codex-exec", maxConcurrent: 2 } },
+			],
+			roles: { default: ["codex", "gemini"] },
+		});
+
+		// Repeatedly acquire 4 simultaneous permits across 2x2 capacity (would previously deadlock whenever rotation picked 3+ on one driver!)
+		for (let round = 0; round < 50; round++) {
+			const ac = new AbortController();
+			const timer = setTimeout(() => ac.abort(new Error("deadlock")), 500);
+			try {
+				const sels = await Promise.all(
+					Array.from({ length: 4 }, () => router.acquireForRole("worker", { signal: ac.signal })),
+				);
+				const counts = sels.reduce<Record<string, number>>((acc, s) => {
+					acc[s.driver.id] = (acc[s.driver.id] ?? 0) + 1;
+					return acc;
+				}, {});
+				expect(counts.codex).toBe(2);
+				expect(counts.gemini).toBe(2);
+				for (const s of sels) s.release();
+			} finally {
+				clearTimeout(timer);
+			}
+		}
+	});
 });
