@@ -11,11 +11,13 @@ export interface PullRefineryOptions {
 
 const BACKLOG_SCHEMA: JsonSchema = {
 	type: "object",
+	additionalProperties: false,
 	properties: {
 		tasks: {
 			type: "array",
 			items: {
 				type: "object",
+				additionalProperties: false,
 				properties: {
 					key: { type: "string" },
 					title: { type: "string" },
@@ -24,7 +26,7 @@ const BACKLOG_SCHEMA: JsonSchema = {
 					owned_paths: { type: "array", items: { type: "string" } },
 					acceptance_criteria: { type: "array", items: { type: "string" } },
 				},
-				required: ["key", "title", "description"],
+				required: ["key", "title", "description", "depends_on", "owned_paths", "acceptance_criteria"],
 			},
 		},
 	},
@@ -138,15 +140,15 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 					skills: false,
 				},
 				systemPrompt: [
-					"You are a backlog sharder. Split the goal into atomic, cleanly mergeable tickets with disjoint owned_paths and concrete acceptance_criteria so parallel workers do not collide.",
+					"You are a fast backlog sharder. Read ONLY the spec doc (SPEC.md / FEATURES.md / TASK.md — layout is already in the Field Guide) and split the goal into atomic, cleanly mergeable tickets with disjoint owned_paths and concrete acceptance_criteria so parallel workers do not collide.",
 					'Respond ONLY with JSON: {"tasks":[{"key":"t1","title":"...","description":"...","depends_on":[],"owned_paths":["src/a.ts"],"acceptance_criteria":["..."]}]}',
 				].join("\n"),
 			});
 			let items: BacklogItem[];
 			try {
 				const res = await planner.runTurn(
-					`Goal: ${goal}\n${rubric ? `Rubric: ${rubric}\n` : ""}Produce 2 to 6 atomic tasks with clean module boundaries.`,
-					{ signal, outputSchema: BACKLOG_SCHEMA },
+					`Goal: ${goal}\n${rubric ? `Rubric: ${rubric}\n` : ""}Be fast (at most 2 file reads). Produce 2 to ${Math.max(2, Math.min(6, concurrency))} parallel atomic tasks with clean module boundaries.`,
+					{ signal, outputSchema: BACKLOG_SCHEMA, timeoutMs: 55_000 },
 				);
 				items = parseBacklog(res.finalText, goal);
 			} finally {
@@ -526,7 +528,9 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 							result: res.finalText.slice(0, 800),
 						});
 						os.bus.emit(os.runId, "task.status", { taskId: target.id, status, result: res.finalText.slice(0, 400) }, worker.agent.id);
-						if (status === "done" && hasChanges && worker.branch) {
+						// Salvage committed WIP even if wall cutoff interrupted right after edits/tests;
+						// the Refinery's monotonic verifier ratchet ensures broken WIP is safely rolled back.
+						if ((status === "done" || res.status === "interrupted") && hasChanges && worker.branch) {
 							await enqueueRefinery(target, worker.branch, worker.agent.id, worker.agent.driverId);
 						}
 					} finally {

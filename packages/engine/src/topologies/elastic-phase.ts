@@ -16,18 +16,20 @@ export interface ElasticPhaseOptions {
 
 const PARTITION_SCHEMA: JsonSchema = {
 	type: "object",
+	additionalProperties: false,
 	properties: {
 		lanes: {
 			type: "array",
 			items: {
 				type: "object",
+				additionalProperties: false,
 				properties: {
 					title: { type: "string" },
 					description: { type: "string" },
 					owned_paths: { type: "array", items: { type: "string" } },
 					cross_contracts: { type: "array", items: { type: "string" } },
 				},
-				required: ["title", "description"],
+				required: ["title", "description", "owned_paths", "cross_contracts"],
 			},
 		},
 	},
@@ -139,7 +141,8 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 					},
 					systemPrompt: [
 						"You are a fast Scout & Architect for an elastic-phase swarm.",
-						"Inspect the repo concisely, identify cross-module invariants/contracts that parallel workers must preserve so merged code won't break, and partition the goal into clean parallel lanes.",
+						"Be FAST (read ONLY the spec doc like SPEC.md / FEATURES.md / TASK.md — the Field Guide already lists the repo layout).",
+						"Identify cross-module invariants/contracts that parallel workers must preserve so merged code won't break, and partition the goal into clean parallel lanes immediately.",
 						'Respond ONLY with JSON: {"lanes":[{"title":"...","description":"...","owned_paths":["..."],"cross_contracts":["..."]}]}',
 					].join("\n"),
 				});
@@ -147,9 +150,9 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 					const scoutPrompt = [
 						`Goal: ${goal}`,
 						rubric ? `Rubric: ${rubric}` : "",
-						`Partition into 2 to ${targetPeers} disjoint parallel lanes with explicit cross_contracts (invariants every lane must preserve).`,
+						`Read the spec quickly (at most 2 file reads) and partition into 2 to ${targetPeers} disjoint parallel lanes with explicit cross_contracts (invariants every lane must preserve).`,
 					].filter(Boolean).join("\n\n");
-					const res = await scout.runTurn(scoutPrompt, { signal, outputSchema: PARTITION_SCHEMA });
+					const res = await scout.runTurn(scoutPrompt, { signal, outputSchema: PARTITION_SCHEMA, timeoutMs: 55_000 });
 					lanes = parseExploreLanes(res.finalText, goal, targetPeers);
 					const contracts = [...new Set(lanes.flatMap((l) => l.cross_contracts ?? []))];
 					if (contracts.length) {

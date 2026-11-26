@@ -7,11 +7,13 @@ export interface HierarchyTopologyOptions {
 
 const PLAN_SCHEMA: JsonSchema = {
 	type: "object",
+	additionalProperties: false,
 	properties: {
 		subtasks: {
 			type: "array",
 			items: {
 				type: "object",
+				additionalProperties: false,
 				properties: {
 					title: { type: "string" },
 					description: { type: "string" },

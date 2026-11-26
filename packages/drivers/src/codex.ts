@@ -23,6 +23,34 @@ function tomlString(value: string): string {
 	return JSON.stringify(value);
 }
 
+/**
+ * OpenAI strict structured-output schemas require every object node to declare
+ * `additionalProperties: false` and list all `properties` keys in `required`.
+ */
+function normalizeOpenAiStrictSchema(node: unknown): unknown {
+	if (!node || typeof node !== "object" || Array.isArray(node)) return node;
+	const obj = node as Record<string, unknown>;
+	const out: Record<string, unknown> = {};
+	for (const [k, v] of Object.entries(obj)) {
+		if (k === "properties" && v && typeof v === "object" && !Array.isArray(v)) {
+			const props: Record<string, unknown> = {};
+			for (const [pk, pv] of Object.entries(v as Record<string, unknown>)) {
+				props[pk] = normalizeOpenAiStrictSchema(pv);
+			}
+			out.properties = props;
+		} else if (k === "items") {
+			out.items = normalizeOpenAiStrictSchema(v);
+		} else {
+			out[k] = v;
+		}
+	}
+	if (out.type === "object" && out.properties && typeof out.properties === "object") {
+		if (out.additionalProperties === undefined) out.additionalProperties = false;
+		out.required = Object.keys(out.properties as Record<string, unknown>);
+	}
+	return out;
+}
+
 function mcpConfigArgs(spec: WorkerSpawnSpec): string[] {
 	if (!spec.mcp) return [];
 	const name = spec.mcp.serverName;
@@ -388,7 +416,7 @@ export class CodexAppServerDriver implements WorkerDriver {
 					const turnParams: Record<string, unknown> = {
 						threadId,
 						input: [{ type: "text", text: prompt }],
-						...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
+						...(opts.outputSchema ? { outputSchema: normalizeOpenAiStrictSchema(opts.outputSchema) } : {}),
 					};
 					void sendRpc("turn/start", turnParams).catch((error) => {
 						if (sessionState.kind === "running") {
@@ -497,7 +525,7 @@ export class CodexExecDriver implements WorkerDriver {
 				if (opts.outputSchema) {
 					schemaDir = mkdtempSync(join(tmpdir(), "op-codex-schema-"));
 					schemaPath = join(schemaDir, "schema.json");
-					writeFileSync(schemaPath, JSON.stringify(opts.outputSchema, null, 2), "utf8");
+					writeFileSync(schemaPath, JSON.stringify(normalizeOpenAiStrictSchema(opts.outputSchema), null, 2), "utf8");
 				}
 				const model = spec.model ?? config.model;
 				const outerSeatbeltActive = Boolean(spec.deniedReadPaths?.length && process.platform === "darwin" && !process.env.ONE_PIECE_NO_SANDBOX);
