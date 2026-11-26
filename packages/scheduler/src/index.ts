@@ -704,16 +704,28 @@ export class Scheduler implements ResourceScheduler {
 	}
 }
 
-function describeJob(job: Job): string {
+function describeJob(job: Job, opts?: { artifacts?: import("@one-piece/core").ArtifactStore; createdBy?: string; maxInlineBytes?: number }): string {
 	const head = `job ${job.id} [${job.spec.pool}] ${job.status}${job.exitCode !== undefined ? ` exit ${job.exitCode}` : ""}${job.unitsUsed ? `, ${job.unitsUsed.toFixed(2)} units` : ""}`;
 	const failure = jobFailure(job);
 	const outputs = job.receipt?.outputFiles ? `[outputs] ${JSON.stringify(job.receipt.outputFiles)}` : "";
 	const body = [failure && JSON.stringify(failure), outputs, job.stdout, job.stderr ? `[stderr]\n${job.stderr}` : ""].filter(Boolean).join("\n");
-	return body ? `${head}\n${body.slice(0, 6000)}` : head;
+	if (!body) return head;
+	const limit = opts?.maxInlineBytes ?? 4_096;
+	const bytes = Buffer.byteLength(body, "utf8");
+	if (bytes <= limit) return `${head}\n${body}`;
+	if (opts?.artifacts) {
+		const rec = opts.artifacts.put(`job-${job.id}`, body, { mimeType: "text/plain", createdBy: opts.createdBy });
+		const sliceLen = Math.floor(limit * 0.42);
+		return `${head}\n${body.slice(0, sliceLen)}\n\n... [truncated ${bytes} bytes — full log stored as artifact_id=${rec.id} (sha=${rec.sha256.slice(0, 12)}); call read_artifact to inspect] ...\n\n${body.slice(-sliceLen)}`;
+	}
+	return `${head}\n${body.slice(0, limit)}`;
 }
 
 /** Ultra-terse runtime-agnostic MCP/in-process tools for resource-pool jobs. */
-export function schedulerTools(scheduler: Scheduler): ToolDefinition[] {
+export function schedulerTools(
+	scheduler: Scheduler,
+	opts?: { artifacts?: import("@one-piece/core").ArtifactStore; maxInlineBytes?: number },
+): ToolDefinition[] {
 	return [
 		{
 			name: "list_pools",
@@ -776,7 +788,7 @@ export function schedulerTools(scheduler: Scheduler): ToolDefinition[] {
 				const job = scheduler.submit(ctx.agentId, spec);
 				if (args.wait) {
 					const finished = await scheduler.wait(job.id, ctx.signal);
-					return { text: describeJob(finished), isError: finished.status === "failed", data: { jobId: finished.id, status: finished.status } };
+					return { text: describeJob(finished, { artifacts: opts?.artifacts, createdBy: ctx.agentId, maxInlineBytes: opts?.maxInlineBytes }), isError: finished.status === "failed", data: { jobId: finished.id, status: finished.status } };
 				}
 				return { text: `Queued ${job.id} on pool "${spec.pool}" (status=${job.status})`, data: { jobId: job.id, status: job.status } };
 			},
@@ -789,10 +801,10 @@ export function schedulerTools(scheduler: Scheduler): ToolDefinition[] {
 				properties: { job_id: { type: "string" } },
 				required: ["job_id"],
 			},
-			execute(args) {
+			execute(args, ctx) {
 				const job = scheduler.get(String(args.job_id ?? ""));
 				if (!job) return { text: `Unknown job ${String(args.job_id ?? "")}`, isError: true };
-				return { text: describeJob(job), isError: job.status === "failed" };
+				return { text: describeJob(job, { artifacts: opts?.artifacts, createdBy: ctx.agentId, maxInlineBytes: opts?.maxInlineBytes }), isError: job.status === "failed" };
 			},
 		},
 		{

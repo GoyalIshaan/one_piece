@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -12,6 +12,9 @@ import {
 	GeminiCliDriver,
 	GrokAcpDriver,
 	GrokCliDriver,
+	maybeCompactSession,
+	prepareCleanCodexHome,
+	prepareCleanGrokHome,
 } from "../src/index.ts";
 
 function makeFakeBinary(dir: string, name: string, jsBody: string): string {
@@ -268,5 +271,103 @@ describe("drivers & 3-class quota classification", () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+
+	it("prepares isolated clean CODEX_HOME and GROK_HOME with auth symlinks and disabled ambient bloat", () => {
+		const dir = mkdtempSync(join(tmpdir(), "op-cli-homes-"));
+		try {
+			const fakeCodexSrc = join(dir, "src-codex");
+			const fakeGrokSrc = join(dir, "src-grok");
+			const cleanCodex = join(dir, "clean-codex");
+			const cleanGrok = join(dir, "clean-grok");
+			mkdirSync(fakeCodexSrc, { recursive: true });
+			mkdirSync(fakeGrokSrc, { recursive: true });
+			writeFileSync(join(fakeCodexSrc, "auth.json"), '{"token":"codex-ok"}', "utf8");
+			writeFileSync(join(fakeCodexSrc, "config.toml"), 'model = "gpt-6.2-sol"\n[mcp_servers.robinhood]\nurl = "https://bad"\n', "utf8");
+			writeFileSync(join(fakeGrokSrc, "auth.json"), '{"token":"grok-ok"}', "utf8");
+
+			const cDir = prepareCleanCodexHome({ baseDir: cleanCodex, sourceCodexDir: fakeCodexSrc });
+			const cCfg = readFileSync(join(cDir, "config.toml"), "utf8");
+			expect(cCfg).toContain('model = "gpt-6.2-sol"');
+			expect(cCfg).toContain("enabled = false");
+			expect(cCfg).not.toContain("robinhood");
+			expect(readFileSync(join(cDir, "auth.json"), "utf8")).toContain("codex-ok");
+
+			const gDir = prepareCleanGrokHome({ baseDir: cleanGrok, sourceGrokDir: fakeGrokSrc });
+			const gCfg = readFileSync(join(gDir, "config.toml"), "utf8");
+			expect(gCfg).toContain("[compat.claude]");
+			expect(gCfg).toContain("[compat.cursor]");
+			expect(gCfg).toContain("skills = false");
+			expect(readFileSync(join(gDir, "auth.json"), "utf8")).toContain("grok-ok");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("applies watermark micro-compaction with artifact spillover, structured anchor preserving failed approaches, and signals Tier 2 handoff", () => {
+		const spilled: Array<{ label: string; content: string }> = [];
+		const messages: any[] = [
+			{ role: "user", content: [{ type: "text", text: "Solve subtle parser bug" }] },
+			{ role: "toolResult", toolName: "bash", isError: true, content: [{ type: "text", text: "AssertionError: empty string token failed\n" + "x".repeat(4000) }] },
+			{ role: "assistant", content: [{ type: "text", text: "Tried regex split, failed on empty tokens" }] },
+			...Array.from({ length: 8 }, (_, i) => ({
+				role: i % 2 === 0 ? "toolResult" : "assistant",
+				toolName: "bash",
+				content: [{ type: "text", text: `turn ${i}: ` + "y".repeat(2500) }],
+			})),
+		];
+
+		// Below watermark -> zero mutation (preserves KV cache!)
+		const noop = maybeCompactSession({
+			messages,
+			systemPrompt: "static",
+			contextWindow: 100_000,
+			compactionCount: 0,
+		});
+		expect(noop.compacted).toBeUndefined();
+		expect(noop.needsHandoff).toBe(false);
+
+		// First watermark -> micro-compacts old large tool outputs into artifacts
+		const first = maybeCompactSession({
+			messages,
+			systemPrompt: "static",
+			contextWindow: 8_000,
+			compactionCount: 0,
+			policy: {
+				watermarkFraction: 0.7,
+				keepRecentTurns: 4,
+				minPruneBytes: 512,
+				maxCompactionsBeforeHandoff: 2,
+				spillArtifact: (label, content) => {
+					spilled.push({ label, content });
+					return { id: `art-${spilled.length}`, sha256: "abcdef1234567890" };
+				},
+			},
+		});
+		expect(first.compacted?.strategy).toBe("micro");
+		expect(first.compactionCount).toBe(1);
+		expect(first.needsHandoff).toBe(false);
+		expect(spilled.length).toBeGreaterThan(0);
+
+		// Second watermark -> escalates to structured anchor preserving failed approaches and signals Tier 2 handoff
+		const second = maybeCompactSession({
+			messages: first.messages,
+			systemPrompt: "static",
+			contextWindow: 3_000,
+			compactionCount: first.compactionCount,
+			policy: {
+				watermarkFraction: 0.7,
+				keepRecentTurns: 4,
+				maxCompactionsBeforeHandoff: 2,
+			},
+		});
+		expect(second.compacted?.strategy).toBe("anchor");
+		expect(second.compactionCount).toBe(2);
+		expect(second.needsHandoff).toBe(true);
+		const anchorText = (second.messages[0] as any).content[0].text;
+		expect(anchorText).toContain("Failed Approaches");
+		expect(anchorText).toContain("AssertionError");
+		// Never split leaving an orphaned toolResult at recent[0] (would cause HTTP 400 on LLM APIs)
+		expect((second.messages[1] as any).role).not.toBe("toolResult");
 	});
 });

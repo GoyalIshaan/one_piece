@@ -27,6 +27,7 @@ export interface WorktreeManager {
 	readonly trunkPath: string;
 	create(agentId: string, baseRef?: string): WorktreeHandle;
 	commitWip(worktreePath: string, message: string): string | undefined;
+	headSha(worktreePath: string): string | undefined;
 	diffStat(worktreePath: string, baseRef?: string): string;
 	diffSha(worktreePath: string): string;
 	writeGitExclude(worktreePath: string, patterns: readonly string[]): void;
@@ -111,6 +112,35 @@ export interface BoardService {
 	recent(runId: string, limit?: number): BoardPost[];
 }
 
+export interface ToolScope {
+	/** Shared ScaleMAS board tool exposure (default "read-write"). */
+	board?: "none" | "read" | "read-write";
+	/** Expose `read_artifact` (default true). */
+	artifacts?: boolean;
+	/** Expose `report_finding` for write workers (default !readOnly). */
+	findings?: boolean;
+	/** Expose `nominate` for write workers (default !readOnly when no scope specified). */
+	nominate?: boolean;
+	/** Expose `claim_task` / `complete_task` (default !readOnly when no scope specified). */
+	tasks?: boolean;
+	/** Resource-pool scheduler tools: "auto" exposes only when non-default compute pools exist. */
+	scheduler?: "auto" | "always" | "never";
+	/** Explicitly opt into async recursive spawning (`spawn_task`). */
+	canSpawn?: boolean;
+	/** Read-only worker flag. */
+	readOnly?: boolean;
+	/** Expose `load_skill` when on-demand skills exist (default true). */
+	skills?: boolean;
+	/** Skill names already pre-bound into the static prompt (excluded from on-demand catalog). */
+	excludeSkills?: readonly string[];
+	/** Expose sandboxed coordinator Code Mode (`run_swarm_script`, default false). */
+	codeMode?: boolean;
+	/** Optional extended/overflow tools exposed via `.swarm/tools/` + frozen `call_tool` dispatcher. */
+	extendedTools?: ToolDefinition[];
+	/** Include local workspace tools (automatically true for `pi-in-process`). */
+	includeWorkspaceTools?: boolean;
+}
+
 export interface SpawnWorkerRequest {
 	role: Role;
 	taskId?: string;
@@ -127,6 +157,12 @@ export interface SpawnWorkerRequest {
 	maxTurns?: number;
 	/** Explicit tool menu exposed to this worker via MCP / in-process bridge. */
 	tools?: ToolDefinition[];
+	/** Declarative topology/role tool scoping (preferred over full 12-tool default menu). */
+	toolScope?: ToolScope;
+	/** Explicit curated skill names to pre-bind into this worker's static prompt. */
+	skills?: string[];
+	/** Stable KV prompt cache key shared across sibling workers of the same role. */
+	cacheKeyPrefix?: string;
 	/** Explicitly opt into async recursive spawning (default false to prevent Double-Harness Collision). */
 	canSpawn?: boolean;
 }
@@ -171,8 +207,8 @@ export interface SwarmOsApi {
 	createTask(input: { title: string; description: string; role?: Role; dependsOn?: string[]; priority?: number; createdBy: string }): TaskRecord;
 	/** Return open tasks whose dependencies are all `done`. */
 	readyTasks(): TaskRecord[];
-	/** Default role-scoped OS tools (board, artifacts, tasks, findings, jobs, optional spawn). */
-	defaultToolsFor(role: Role, opts?: { canSpawn?: boolean; readOnly?: boolean }): ToolDefinition[];
+	/** Default role-scoped OS tools (board, artifacts, tasks, findings, jobs, optional spawn/skills/codeMode). */
+	defaultToolsFor(role: Role, opts?: ToolScope): ToolDefinition[];
 	/** Spawn a bounded worker on the best healthy driver for its role. */
 	spawnWorker(req: SpawnWorkerRequest): Promise<WorkerHandle>;
 	/** Record an explicit nomination for final run delivery. */

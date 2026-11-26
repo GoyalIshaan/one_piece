@@ -14,6 +14,7 @@ import type {
 	WorkerTurnResult,
 } from "@one-piece/core";
 import { buildCliEnv, classifyQuotaError, probeCliBinary } from "./classify.ts";
+import { prepareCleanCodexHome } from "./cli-home.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -91,9 +92,13 @@ export class CodexAppServerDriver implements WorkerDriver {
 
 	async spawn(spec: WorkerSpawnSpec): Promise<WorkerSession> {
 		const binary = this.config.binary ?? "codex";
+		const extraEnv: Record<string, string> = {};
+		if (this.config.cleanWorkerEnv !== false && !process.env.CODEX_HOME) {
+			extraEnv.CODEX_HOME = prepareCleanCodexHome();
+		}
 		const env = this.config.subscriptionMode === false
-			? buildCliEnv([])
-			: buildCliEnv(["OPENAI_API_KEY"]);
+			? buildCliEnv([], extraEnv)
+			: buildCliEnv(["OPENAI_API_KEY"], extraEnv);
 		const args = [
 			"app-server",
 			"--stdio",
@@ -114,14 +119,20 @@ export class CodexAppServerDriver implements WorkerDriver {
 		let threadId: string | undefined = spec.resumeSessionId;
 		let resolvedModel: string | undefined = spec.model ?? this.config.model;
 		let threadTokenTotals = { input: 0, cached: 0, cacheWrite: 0, output: 0, reasoning: 0, total: 0 };
-		let activeTurn: {
+		type ActiveTurn = {
 			turnId?: string;
 			chunks: string[];
 			startTotals: { input: number; cached: number; cacheWrite: number; output: number; reasoning: number; total: number };
 			usage?: WorkerTurnResult["usage"];
 			resolve: (res: WorkerTurnResult) => void;
 			startedAt: number;
-		} | undefined;
+		};
+		type CodexSessionState =
+			| { readonly kind: "idle" }
+			| { readonly kind: "running"; readonly turn: ActiveTurn }
+			| { readonly kind: "closed" };
+		let sessionState: CodexSessionState = { kind: "idle" };
+		const currentTurn = (): ActiveTurn | undefined => (sessionState.kind === "running" ? sessionState.turn : undefined);
 
 		const sendRpc = (method: string, params: Record<string, unknown>): Promise<any> => {
 			return new Promise((resolve, reject) => {
@@ -178,19 +189,20 @@ export class CodexAppServerDriver implements WorkerDriver {
 			// Streaming notification
 			const method = String(msg.method ?? "");
 			const params = (msg.params ?? {}) as Record<string, any>;
+			const active = currentTurn();
 
-			if (method === "turn/started" && activeTurn) {
-				activeTurn.turnId = String(params.turn?.id ?? params.turnId ?? "");
-			} else if ((method === "item/agentMessage/delta" || method === "item/delta") && activeTurn) {
+			if (method === "turn/started" && active) {
+				active.turnId = String(params.turn?.id ?? params.turnId ?? "");
+			} else if ((method === "item/agentMessage/delta" || method === "item/delta") && active) {
 				const delta = String(params.delta ?? params.text ?? "");
 				if (delta) {
-					activeTurn.chunks.push(delta);
+					active.chunks.push(delta);
 					spec.onActivity?.({ type: "text", delta });
 				}
 			} else if (method === "item/completed") {
 				const item = params.item ?? params;
-				if (item?.type === "agentMessage" && typeof item.text === "string" && activeTurn) {
-					if (!activeTurn.chunks.length) activeTurn.chunks.push(item.text);
+				if (item?.type === "agentMessage" && typeof item.text === "string" && active) {
+					if (!active.chunks.length) active.chunks.push(item.text);
 				} else if (item?.type === "commandExecution" || item?.type === "mcpToolCall") {
 					const isMcp = item.type === "mcpToolCall";
 					const toolName = String(item.tool ?? (item.type === "commandExecution" ? "bash" : item.type));
@@ -222,28 +234,28 @@ export class CodexAppServerDriver implements WorkerDriver {
 						total: Number(tot.totalTokens ?? tot.total_tokens ?? 0) || 0,
 					};
 					threadTokenTotals = next;
-					if (activeTurn) {
-						const base = activeTurn.startTotals;
+					if (active) {
+						const base = active.startTotals;
 						const dIn = Math.max(0, next.input - base.input);
 						const dCached = Math.max(0, next.cached - base.cached);
 						const dCacheWrite = Math.max(0, next.cacheWrite - base.cacheWrite);
 						const dOut = Math.max(0, next.output - base.output);
 						const dReason = Math.max(0, next.reasoning - base.reasoning);
 						const dTotal = Math.max(0, next.total - base.total);
-						activeTurn.usage = {
+						active.usage = {
 							inputTokens: dIn || undefined,
 							cachedTokens: dCached || undefined,
 							cacheWriteTokens: dCacheWrite || undefined,
 							outputTokens: dOut || undefined,
 							reasoningTokens: dReason || undefined,
 							totalTokens: dTotal || (dIn + dOut) || undefined,
-							durationMs: Date.now() - activeTurn.startedAt,
+							durationMs: Date.now() - active.startedAt,
 						};
 					}
 				}
-			} else if ((method === "turn/completed" || method === "turn/failed" || method === "error") && activeTurn) {
-				const turn = activeTurn;
-				activeTurn = undefined;
+			} else if ((method === "turn/completed" || method === "turn/failed" || method === "error") && active) {
+				const turn = active;
+				if (sessionState.kind === "running") sessionState = { kind: "idle" };
 				const durationMs = Date.now() - turn.startedAt;
 				const errText = String(params.error?.message ?? params.turn?.error?.message ?? params.message ?? stderrBuf).trim();
 				const quota = method !== "turn/completed" || params.turn?.status === "failed"
@@ -290,18 +302,16 @@ export class CodexAppServerDriver implements WorkerDriver {
 			const errMsg = stderrBuf.trim() || `codex app-server exited with code ${code ?? "null"}`;
 			for (const waiter of pending.values()) waiter.reject(new Error(errMsg));
 			pending.clear();
-			if (activeTurn) {
-				const turn = activeTurn;
-				activeTurn = undefined;
+			const running = currentTurn();
+			sessionState = { kind: "closed" };
+			if (running) {
 				const quota = classifyQuotaError(errMsg);
-				turn.resolve({
-					status: quota ? "rate_limited" : "failed",
-					finalText: turn.chunks.join(""),
-					sessionId: threadId,
-					usage: { durationMs: Date.now() - turn.startedAt },
-					quotaError: quota,
-					error: errMsg,
-				});
+				const usage = { durationMs: Date.now() - running.startedAt };
+				if (quota) {
+					running.resolve({ status: "rate_limited", finalText: running.chunks.join(""), sessionId: threadId, model: resolvedModel, usage, quotaError: quota, error: errMsg });
+				} else {
+					running.resolve({ status: "failed", finalText: running.chunks.join(""), sessionId: threadId, model: resolvedModel, usage, error: errMsg });
+				}
 			}
 		});
 
@@ -337,6 +347,8 @@ export class CodexAppServerDriver implements WorkerDriver {
 			},
 			async runTurn(prompt: string, opts = {}): Promise<WorkerTurnResult> {
 				if (!threadId) throw new Error("codex app-server thread not initialized");
+				if (sessionState.kind === "closed") throw new Error("codex app-server session is closed");
+				if (sessionState.kind === "running") throw new Error("codex app-server already has an active turn");
 				const startedAt = Date.now();
 				return new Promise<WorkerTurnResult>((resolve, reject) => {
 					let timer: ReturnType<typeof setTimeout> | undefined;
@@ -349,42 +361,43 @@ export class CodexAppServerDriver implements WorkerDriver {
 						resolve(res);
 					};
 					const onAbort = () => {
-						if (activeTurn?.turnId && threadId) {
-							void sendRpc("turn/interrupt", { threadId, turnId: activeTurn.turnId }).catch(() => {});
+						const running = currentTurn();
+						if (running?.turnId && threadId) {
+							void sendRpc("turn/interrupt", { threadId, turnId: running.turnId }).catch(() => {});
 						}
-						if (activeTurn) {
-							const turn = activeTurn;
-							activeTurn = undefined;
-							finish({ status: "interrupted", finalText: turn.chunks.join(""), sessionId: threadId, usage: { durationMs: Date.now() - startedAt } });
+						if (running) {
+							if (sessionState.kind === "running") sessionState = { kind: "idle" };
+							finish({ status: "interrupted", finalText: running.chunks.join(""), sessionId: threadId, model: resolvedModel, usage: { durationMs: Date.now() - startedAt } });
 						}
 					};
 					if (opts.signal?.aborted) {
-						resolve({ status: "interrupted", finalText: "", sessionId: threadId, usage: { durationMs: 0 } });
+						resolve({ status: "interrupted", finalText: "", sessionId: threadId, model: resolvedModel, usage: { durationMs: 0 } });
 						return;
 					}
 					opts.signal?.addEventListener("abort", onAbort, { once: true });
 					if (opts.timeoutMs) {
 						timer = setTimeout(onAbort, opts.timeoutMs);
 					}
-					activeTurn = { chunks: [], startTotals: { ...threadTokenTotals }, resolve: finish, startedAt };
+					sessionState = {
+						kind: "running",
+						turn: { chunks: [], startTotals: { ...threadTokenTotals }, resolve: finish, startedAt },
+					};
 					const turnParams: Record<string, unknown> = {
 						threadId,
 						input: [{ type: "text", text: prompt }],
 						...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
 					};
 					void sendRpc("turn/start", turnParams).catch((error) => {
-						if (activeTurn) {
-							activeTurn = undefined;
+						if (sessionState.kind === "running") {
+							sessionState = { kind: "idle" };
 							const raw = error instanceof Error ? error.message : String(error);
 							const quota = classifyQuotaError(raw);
-							finish({
-								status: quota ? "rate_limited" : "failed",
-								finalText: "",
-								sessionId: threadId,
-								usage: { durationMs: Date.now() - startedAt },
-								quotaError: quota,
-								error: raw,
-							});
+							const usage = { durationMs: Date.now() - startedAt };
+							if (quota) {
+								finish({ status: "rate_limited", finalText: "", sessionId: threadId, model: resolvedModel, usage, quotaError: quota, error: raw });
+							} else {
+								finish({ status: "failed", finalText: "", sessionId: threadId, model: resolvedModel, usage, error: raw });
+							}
 						} else {
 							cleanup();
 							reject(error);
@@ -393,18 +406,21 @@ export class CodexAppServerDriver implements WorkerDriver {
 				});
 			},
 			async steer(message: string): Promise<void> {
-				if (!threadId || !activeTurn?.turnId) return;
+				const running = currentTurn();
+				if (!threadId || !running?.turnId) return;
 				await sendRpc("turn/steer", {
 					threadId,
-					turnId: activeTurn.turnId,
+					turnId: running.turnId,
 					input: [{ type: "text", text: message }],
 				});
 			},
 			async interrupt(): Promise<void> {
-				if (!threadId || !activeTurn?.turnId) return;
-				await sendRpc("turn/interrupt", { threadId, turnId: activeTurn.turnId });
+				const running = currentTurn();
+				if (!threadId || !running?.turnId) return;
+				await sendRpc("turn/interrupt", { threadId, turnId: running.turnId });
 			},
 			async close(): Promise<void> {
+				sessionState = { kind: "closed" };
 				rl.close();
 				killTree(child);
 			},
@@ -438,9 +454,13 @@ export class CodexExecDriver implements WorkerDriver {
 
 	async spawn(spec: WorkerSpawnSpec): Promise<WorkerSession> {
 		const binary = this.config.binary ?? "codex";
+		const extraEnv: Record<string, string> = {};
+		if (this.config.cleanWorkerEnv !== false && !process.env.CODEX_HOME) {
+			extraEnv.CODEX_HOME = prepareCleanCodexHome();
+		}
 		const env = this.config.subscriptionMode === false
-			? buildCliEnv([])
-			: buildCliEnv(["OPENAI_API_KEY"]);
+			? buildCliEnv([], extraEnv)
+			: buildCliEnv(["OPENAI_API_KEY"], extraEnv);
 		let currentSessionId = spec.resumeSessionId;
 		let activeChild: ChildProcess | undefined;
 		const driverId = this.id;

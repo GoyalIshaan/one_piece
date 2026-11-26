@@ -168,6 +168,8 @@ async function cmdRun(projectDir: string, args: string[], flags: Record<string, 
 		verifier,
 		enableBlindReview: cfg.enableBlindReview,
 		networkOffWorkers: cfg.networkOffWorkers,
+		skillsDirs: cfg.skillsDirs,
+		autoHandoffOnSecondCompaction: cfg.autoHandoffOnSecondCompaction,
 		store,
 		router,
 	});
@@ -179,7 +181,7 @@ async function cmdRun(projectDir: string, args: string[], flags: Record<string, 
 	}
 
 	os.bus.on((ev) => {
-		if (["run.started", "phase.changed", "agent.spawned", "agent.handoff", "agent.stalled", "finding.verdict", "run.nominated", "quota.cooldown", "quota.drained"].includes(ev.type)) {
+		if (["run.started", "phase.changed", "agent.spawned", "agent.compacted", "agent.handoff", "agent.stalled", "finding.verdict", "run.nominated", "quota.cooldown", "quota.drained"].includes(ev.type)) {
 			console.log(`[${ev.type}] ${JSON.stringify(ev.data)}`);
 		}
 	});

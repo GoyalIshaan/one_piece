@@ -13,6 +13,7 @@ import type {
 	WorkerTurnResult,
 } from "@one-piece/core";
 import { buildCliEnv, classifyQuotaError, probeCliBinary } from "./classify.ts";
+import { prepareCleanGrokHome } from "./cli-home.ts";
 
 function writeGrokMcpConfig(spec: WorkerSpawnSpec): void {
 	if (!spec.mcp) return;
@@ -82,9 +83,13 @@ export class GrokCliDriver implements WorkerDriver {
 	async spawn(spec: WorkerSpawnSpec): Promise<WorkerSession> {
 		writeGrokMcpConfig(spec);
 		const binary = this.config.binary ?? "grok";
+		const extraEnv: Record<string, string> = {};
+		if (this.config.cleanWorkerEnv !== false && !process.env.GROK_HOME) {
+			extraEnv.GROK_HOME = prepareCleanGrokHome();
+		}
 		const env = this.config.subscriptionMode === false
-			? buildCliEnv([])
-			: buildCliEnv(["XAI_API_KEY", "GROK_CODE_XAI_API_KEY"]);
+			? buildCliEnv([], extraEnv)
+			: buildCliEnv(["XAI_API_KEY", "GROK_CODE_XAI_API_KEY"], extraEnv);
 		let currentSessionId = spec.resumeSessionId;
 		let activeChild: ChildProcess | undefined;
 		const driverId = this.id;
@@ -299,10 +304,13 @@ export class GrokAcpDriver implements WorkerDriver {
 
 	async spawn(spec: WorkerSpawnSpec): Promise<WorkerSession> {
 		const binary = this.config.binary ?? "grok";
-		const baseEnv = this.config.subscriptionMode === false
-			? buildCliEnv([])
-			: buildCliEnv(["XAI_API_KEY", "GROK_CODE_XAI_API_KEY"]);
-		const env = { ...baseEnv, GROK_SUBAGENTS: "0", GROK_MEMORY: "0" };
+		const extraEnv: Record<string, string> = { GROK_SUBAGENTS: "0", GROK_MEMORY: "0" };
+		if (this.config.cleanWorkerEnv !== false && !process.env.GROK_HOME) {
+			extraEnv.GROK_HOME = prepareCleanGrokHome();
+		}
+		const env = this.config.subscriptionMode === false
+			? buildCliEnv([], extraEnv)
+			: buildCliEnv(["XAI_API_KEY", "GROK_CODE_XAI_API_KEY"], extraEnv);
 		const model = spec.model ?? this.config.model;
 		const args = [
 			"agent",
@@ -325,8 +333,14 @@ export class GrokAcpDriver implements WorkerDriver {
 		let stderr = "";
 		let acpSessionId: string | undefined = spec.resumeSessionId;
 		let resolvedModel: string | undefined = model;
-		let turnChunks: string[] = [];
-		let turnUsage: WorkerTurnResult["usage"] = undefined;
+		type GrokAcpSessionState =
+			| { readonly kind: "idle" }
+			| { readonly kind: "running"; readonly chunks: string[]; usage?: WorkerTurnResult["usage"] }
+			| { readonly kind: "closed" };
+		let sessionState: GrokAcpSessionState = { kind: "idle" };
+		const resetToIdle = (): void => {
+			if (sessionState.kind !== "closed") sessionState = { kind: "idle" };
+		};
 		const mcpPrefix = `${spec.mcp?.serverName ?? "swarm"}__`;
 		const isMcpToolName = (name: string) =>
 			Boolean(spec.mcp?.toolNames?.includes(name)) ||
@@ -376,22 +390,24 @@ export class GrokAcpDriver implements WorkerDriver {
 					resolvedModel = u.model_id;
 				} else if (u?.sessionUpdate === "turn_completed" && u.usage) {
 					const raw = u.usage;
-					turnUsage = {
-						inputTokens: Number(raw.inputTokens ?? raw.input_tokens ?? 0) || undefined,
-						cachedTokens: Number(raw.cachedReadTokens ?? raw.cache_read_input_tokens ?? 0) || undefined,
-						cacheWriteTokens: Number(raw.cacheCreationTokens ?? raw.cache_creation_input_tokens ?? 0) || undefined,
-						outputTokens: Number(raw.outputTokens ?? raw.output_tokens ?? 0) || undefined,
-						reasoningTokens: Number(raw.reasoningTokens ?? raw.reasoning_tokens ?? 0) || undefined,
-						totalTokens: Number(raw.totalTokens ?? raw.total_tokens ?? 0) || undefined,
-						durationMs: 0,
-					};
+					if (sessionState.kind === "running") {
+						sessionState.usage = {
+							inputTokens: Number(raw.inputTokens ?? raw.input_tokens ?? 0) || undefined,
+							cachedTokens: Number(raw.cachedReadTokens ?? raw.cache_read_input_tokens ?? 0) || undefined,
+							cacheWriteTokens: Number(raw.cacheCreationTokens ?? raw.cache_creation_input_tokens ?? 0) || undefined,
+							outputTokens: Number(raw.outputTokens ?? raw.output_tokens ?? 0) || undefined,
+							reasoningTokens: Number(raw.reasoningTokens ?? raw.reasoning_tokens ?? 0) || undefined,
+							totalTokens: Number(raw.totalTokens ?? raw.total_tokens ?? 0) || undefined,
+							durationMs: 0,
+						};
+					}
 				}
 				return;
 			}
 			if (msg.method === "session/update") {
 				const update = msg.params?.update ?? msg.params;
 				if (update?.sessionUpdate === "agent_message_chunk" && typeof update.content?.text === "string") {
-					turnChunks.push(update.content.text);
+					if (sessionState.kind === "running") sessionState.chunks.push(update.content.text);
 					spec.onActivity?.({ type: "text", delta: update.content.text });
 				} else if (update?.sessionUpdate === "tool_call") {
 					const rawName = update.rawInput?.tool_name ?? update.title ?? update.toolCallId ?? "tool";
@@ -466,9 +482,15 @@ export class GrokAcpDriver implements WorkerDriver {
 				return acpSessionId;
 			},
 			async runTurn(prompt: string, opts = {}): Promise<WorkerTurnResult> {
+				if (sessionState.kind === "closed") {
+					throw new Error("GrokAcpDriver session is closed");
+				}
+				if (sessionState.kind === "running") {
+					throw new Error("GrokAcpDriver session already has an active turn in flight");
+				}
 				const startedAt = Date.now();
-				turnChunks = [];
-				turnUsage = undefined;
+				const turn: Extract<GrokAcpSessionState, { kind: "running" }> = { kind: "running", chunks: [] };
+				sessionState = turn;
 				const text = spec.systemPrompt && !sentSystemPrompt ? `${spec.systemPrompt}\n\n${prompt}` : prompt;
 				sentSystemPrompt = true;
 				let timer: ReturnType<typeof setTimeout> | undefined;
@@ -482,9 +504,8 @@ export class GrokAcpDriver implements WorkerDriver {
 					const meta = res?._meta;
 					if (typeof meta?.modelId === "string" && meta.modelId) resolvedModel = meta.modelId;
 					const durationMs = Date.now() - startedAt;
-					const capturedUsage = turnUsage as WorkerTurnResult["usage"] | undefined;
-					const usage: WorkerTurnResult["usage"] = capturedUsage
-						? { ...capturedUsage, durationMs }
+					const usage: WorkerTurnResult["usage"] = turn.usage
+						? { ...turn.usage, durationMs }
 						: {
 							inputTokens: Number(meta?.inputTokens ?? 0) || undefined,
 							cachedTokens: Number(meta?.cachedReadTokens ?? 0) || undefined,
@@ -495,7 +516,7 @@ export class GrokAcpDriver implements WorkerDriver {
 						};
 					return {
 						status: opts.signal?.aborted ? "interrupted" : "completed",
-						finalText: turnChunks.join("").trim(),
+						finalText: turn.chunks.join("").trim(),
 						sessionId: acpSessionId,
 						model: resolvedModel,
 						usage,
@@ -503,25 +524,27 @@ export class GrokAcpDriver implements WorkerDriver {
 				} catch (error) {
 					const raw = `${error instanceof Error ? error.message : String(error)}\n${stderr}`.trim();
 					const quota = classifyQuotaError(raw);
-					const capturedUsage = turnUsage as WorkerTurnResult["usage"] | undefined;
-					return {
-						status: quota ? "rate_limited" : opts.signal?.aborted ? "interrupted" : "failed",
-						finalText: turnChunks.join("").trim(),
-						sessionId: acpSessionId,
-						model: resolvedModel,
-						usage: { ...(capturedUsage ?? {}), durationMs: Date.now() - startedAt },
-						quotaError: quota,
-						error: raw,
-					};
+					const usage = { ...(turn.usage ?? {}), durationMs: Date.now() - startedAt };
+					if (quota) {
+						return { status: "rate_limited", finalText: turn.chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, quotaError: quota, error: raw };
+					}
+					if (opts.signal?.aborted) {
+						return { status: "interrupted", finalText: turn.chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage };
+					}
+					return { status: "failed", finalText: turn.chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, error: raw };
 				} finally {
 					if (timer) clearTimeout(timer);
 					opts.signal?.removeEventListener("abort", onAbort);
+					resetToIdle();
 				}
 			},
 			async interrupt(): Promise<void> {
-				if (acpSessionId) await sendRpc("session/cancel", { sessionId: acpSessionId }).catch(() => {});
+				if (sessionState.kind === "running" && acpSessionId) {
+					await sendRpc("session/cancel", { sessionId: acpSessionId }).catch(() => {});
+				}
 			},
 			async close(): Promise<void> {
+				sessionState = { kind: "closed" };
 				rl.close();
 				killTree(child);
 			},

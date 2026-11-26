@@ -77,12 +77,27 @@ export async function runExecutableCheck(opts: {
 			challenge,
 			signal,
 		});
-		receipt = { ...stamp, ...out };
+		if (typeof out.score === "number" && Number.isFinite(out.score)) {
+			submission.score = out.score;
+			finding.score = out.score;
+		}
+		const cleanMsg = bus.redactor.redactText(out.message);
+		const durationMs = Math.round(performance.now() - start);
+		if (out.status === "failed") {
+			receipt = { ...stamp, status: "failed", message: cleanMsg, score: out.score, counterexample: out.counterexample, durationMs };
+		} else if (out.status === "passed") {
+			receipt = { ...stamp, status: "passed", message: cleanMsg, score: out.score, durationMs };
+		} else {
+			receipt = { ...stamp, status: out.status, message: cleanMsg, score: out.score, durationMs };
+		}
 	} catch (error) {
-		receipt = { ...stamp, status: "error", message: error instanceof Error ? error.message : String(error) };
+		receipt = {
+			...stamp,
+			status: "error",
+			message: bus.redactor.redactText(error instanceof Error ? error.message : String(error)),
+			durationMs: Math.round(performance.now() - start),
+		};
 	}
-	receipt.durationMs = Math.round(performance.now() - start);
-	receipt.message = bus.redactor.redactText(receipt.message);
 	submission.checks.push(receipt);
 	bus.emit(
 		finding.runId,
@@ -93,6 +108,7 @@ export async function runExecutableCheck(opts: {
 			scope: submission.scope ?? verifier.defaultScope,
 			status: receipt.status,
 			message: receipt.message,
+			score: submission.score,
 		},
 		actorId,
 	);

@@ -44,6 +44,7 @@ const COORDINATION_TOOLS = new Set([
 	"claim_task",
 	"complete_task",
 	"release_task",
+	"run_swarm_script",
 ]);
 
 const VERIFICATION_TOOLS = new Set([
@@ -65,6 +66,9 @@ const WORK_TOOLS = new Set([
 	"read_file",
 	"write_file",
 	"edit_file",
+	"grep_files",
+	"load_skill",
+	"call_tool",
 	"apply_workspace_change",
 	"list_files",
 	"submit_job",
@@ -329,7 +333,8 @@ export async function extractScorecard(options: ExtractScorecardOptions): Promis
 				cacheRead += crTok;
 				cacheWrite += cwTok;
 				reasoning += rTok;
-				peakInputPerCall = Math.max(peakInputPerCall, inTok + crTok + cwTok);
+				const effectiveInput = tok > 0 ? Math.max(inTok, tok - outTok) : Math.max(inTok, crTok + cwTok);
+				peakInputPerCall = Math.max(peakInputPerCall, effectiveInput);
 				estimatedUsd += Number(e.data.usd ?? 0);
 				byRole[role] += tok;
 				// Attribute to tools called by this agent right before this turn charge
@@ -354,12 +359,25 @@ export async function extractScorecard(options: ExtractScorecardOptions): Promis
 		}
 	}
 
+	const turnCacheHitRates: number[] = [];
+	for (const e of events) {
+		if (e.type === "agent.turn" && typeof e.data.cacheHitRate === "number" && Number.isFinite(e.data.cacheHitRate)) {
+			turnCacheHitRates.push(e.data.cacheHitRate);
+		}
+	}
+	const cacheHitRate = turnCacheHitRates.length
+		? Math.round((turnCacheHitRates.reduce((s, r) => s + r, 0) / turnCacheHitRates.length) * 10000) / 10000
+		: input + cacheRead > 0 && cacheRead > 0
+			? Math.round((Math.min(cacheRead, input || cacheRead) / Math.max(input, cacheRead)) * 10000) / 10000
+			: 0;
+
 	const tokens: TokenBreakdown = {
 		total: totalTokens,
 		input,
 		output,
 		cacheRead,
 		cacheWrite,
+		cacheHitRate,
 		reasoning,
 		peakInputPerCall,
 		estimatedUsd: Math.round(estimatedUsd * 1e6) / 1e6,
@@ -426,6 +444,8 @@ export async function extractScorecard(options: ExtractScorecardOptions): Promis
 	let artifactReads = 0;
 	let stallDetections = 0;
 	let failoverCount = 0;
+	let skillsLoaded = 0;
+	let codemodeExecutions = 0;
 
 	for (const e of events) {
 		if (e.agentId) agentIds.add(e.agentId);
@@ -442,7 +462,7 @@ export async function extractScorecard(options: ExtractScorecardOptions): Promis
 		} else if (e.type === "message.sent") {
 			messageCount++;
 			messageBytes += Buffer.byteLength(String(e.data.body ?? e.data.text ?? ""));
-		} else if (e.type === "context.compacted") {
+		} else if (e.type === "context.compacted" || e.type === "agent.compacted") {
 			compactions++;
 		} else if (e.type === "context.read" || e.type === "context.artifact_read") {
 			artifactReads++;
@@ -450,6 +470,10 @@ export async function extractScorecard(options: ExtractScorecardOptions): Promis
 			stallDetections++;
 		} else if (e.type === "provider.failover" || e.type === "agent.handoff") {
 			failoverCount++;
+		} else if (e.type === "skill.loaded") {
+			skillsLoaded++;
+		} else if (e.type === "codemode.executed") {
+			codemodeExecutions++;
 		}
 	}
 
@@ -471,6 +495,8 @@ export async function extractScorecard(options: ExtractScorecardOptions): Promis
 		artifactReads,
 		stallDetections,
 		failoverCount,
+		skillsLoaded,
+		codemodeExecutions,
 	};
 
 	// 6. Causal Loss Decomposition

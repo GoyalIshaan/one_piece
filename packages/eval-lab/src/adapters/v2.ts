@@ -88,6 +88,7 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 
 			let cumulativeTokens = 0;
 			const snapshotMeta = new Map<string, { atTokens: number; atWallMs: number }>();
+			const pendingChargeKeys: string[] = [];
 
 			let os: SwarmOS | undefined;
 			try {
@@ -130,9 +131,18 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 				const unsub = os.bus.on((ev) => {
 					if (ev.type === "budget.charged") {
 						cumulativeTokens += Number(ev.data.tokens ?? 0);
+						// Backfill snapshots submitted via MCP *during* a turn before that turn's budget.charged arrived.
+						while (pendingChargeKeys.length > 0) {
+							const k = pendingChargeKeys.pop()!;
+							const existing = snapshotMeta.get(k);
+							if (existing && existing.atTokens < cumulativeTokens) {
+								existing.atTokens = cumulativeTokens;
+							}
+						}
 					} else if (ev.type === "finding.reported") {
 						const key = `${String(ev.data.findingId ?? "")}:${String(ev.data.revision ?? 1)}`;
 						snapshotMeta.set(key, { atTokens: cumulativeTokens, atWallMs: Date.now() - began });
+						if (cumulativeTokens === 0 || ev.nodeId) pendingChargeKeys.push(key);
 					}
 				});
 

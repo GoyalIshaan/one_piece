@@ -22,16 +22,24 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 			os.bus.emit(os.runId, "phase.changed", { to: "peer-explore", reason: `Launching ${peerCount} peers over bounded substrate` });
 
 			const handles = await Promise.all(
-				Array.from({ length: peerCount }, (_, idx) =>
+				Array.from({ length: peerCount }, () =>
 					os.spawnWorker({
 						role: "worker",
 						canSpawn: false,
+						cacheKeyPrefix: `${os.runId}:substrate-peer`,
+						toolScope: {
+							board: "read-write",
+							artifacts: true,
+							findings: true,
+							tasks: false,
+							nominate: false,
+							scheduler: "auto",
+						},
 						systemPrompt: [
-							`You are Peer #${idx + 1} of ${peerCount} in a flat ScaleMAS substrate swarm.`,
+							"You are a peer engineer in a flat ScaleMAS substrate swarm working in an isolated git worktree.",
 							"Use `board_search` (top-k bounded reads) before duplicating work, cite useful peer post IDs via `parent_ids` in `board_publish`,",
 							"and call `report_finding` when you have a verified improvement or solution in your isolated worktree.",
-							rubric ? `Rubric: ${rubric}` : "",
-						].filter(Boolean).join("\n"),
+						].join("\n"),
 					}),
 				),
 			);
@@ -41,9 +49,10 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 					if (signal.aborted || os.isInCloseoutReserve()) break;
 					await Promise.all(
 						handles.map(async (worker, idx) => {
+							const rubricLine = rubric ? `\nRubric: ${rubric}` : "";
 							const prompt = round === 1
-								? `Goal: ${goal}\n\nYou are Peer #${idx + 1}. First call \`board_search\` to check existing notes, explore a distinct angle in your worktree, publish concise findings to the board, and submit verified work via \`report_finding\`.`
-								: `Round ${round}/${rounds}: Call \`board_search\` to read top-cited discoveries from peers, incorporate the best verified insights into your worktree, and submit your strongest revised finding via \`report_finding\`.`;
+								? `Goal: ${goal}${rubricLine}\n\nYou are Peer #${idx + 1} of ${peerCount}. First call \`board_search\` to check existing notes, explore a distinct angle in your worktree, publish concise findings to the board, and submit verified work via \`report_finding\`.`
+								: `Round ${round}/${rounds} (Peer #${idx + 1} of ${peerCount}): Call \`board_search\` to read top-cited discoveries from peers, incorporate the best verified insights into your worktree, and submit your strongest revised finding via \`report_finding\`.`;
 							const res = await worker.runTurn(prompt, { signal });
 							os.worktrees.commitWip(worker.workspace, `peer-${idx + 1} round ${round}`);
 							const hasFinding = os.store.list("findings", { runId: os.runId }).some((f) => f.authorAgentId === worker.agent.id);

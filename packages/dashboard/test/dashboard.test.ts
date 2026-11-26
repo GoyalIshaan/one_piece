@@ -12,6 +12,7 @@ describe("dashboard v2", () => {
 			budget: { tokens: 1000 },
 			spent: {},
 			status: "done",
+			statusReason: "completed",
 			config: {},
 			createdAt: 1000,
 			updatedAt: 2000,

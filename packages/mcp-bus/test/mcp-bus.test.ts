@@ -1,7 +1,10 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { EventBus, MemoryStore, Redactor } from "@one-piece/core";
+import { EventBus, MemoryStore, Redactor, type ToolDefinition } from "@one-piece/core";
 import { boardTools, SwarmBoardService } from "@one-piece/module-board";
-import { McpBusServer } from "../src/index.ts";
+import { createFrozenDispatcherTool, materializeToolSchemas, McpBusServer } from "../src/index.ts";
 
 async function rpc(url: string, token: string | undefined, body: unknown) {
 	return fetch(url, {
@@ -78,6 +81,75 @@ describe("McpBusServer", () => {
 			expect(searchBody.result.content[0].text).toContain("Shared memory tiling doubled throughput");
 		} finally {
 			await mcp.close();
+		}
+	});
+
+	it("sorts tools/list deterministically and supports cache-safe .swarm/tools/ progressive discovery via frozen call_tool", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "op-mcp-prog-"));
+		const store = new MemoryStore();
+		const bus = new EventBus(store, new Redactor());
+		const mcp = await McpBusServer.start(bus);
+		try {
+			const extended: ToolDefinition[] = [
+				{
+					name: "zebra_tool",
+					description: "Echoes z",
+					inputSchema: { type: "object", properties: { z: { type: "string" }, a: { type: "number" } }, required: ["z"] },
+					execute: (args) => ({ text: `z=${String(args.z)}` }),
+				},
+				{
+					name: "alpha_tool",
+					description: "Doubles a number",
+					inputSchema: { type: "object", properties: { n: { type: "number" } }, required: ["n"] },
+					execute: (args) => ({ text: String(Number(args.n) * 2) }),
+				},
+			];
+			const mat = materializeToolSchemas(dir, extended);
+			expect(readFileSync(mat.indexPath, "utf8")).toContain("alpha_tool");
+			expect(readFileSync(join(mat.dir, "zebra_tool.json"), "utf8")).toContain('"a"');
+
+			const dispatcher = createFrozenDispatcherTool(extended);
+			const reg = mcp.registerWorker({
+				runId: "r2",
+				agentId: "agt-prog",
+				role: "worker",
+				workspace: dir,
+				tools: [
+					{ name: "z_hot", description: "hot", inputSchema: { type: "object", properties: {} }, execute: () => ({ text: "ok" }) },
+					dispatcher,
+					{ name: "a_hot", description: "hot", inputSchema: { type: "object", properties: {} }, execute: () => ({ text: "ok" }) },
+				],
+			});
+
+			const listRes = await rpc(mcp.url, reg.token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+			const listBody = (await listRes.json()) as any;
+			// Strictly alphabetical ordering for KV cache stability
+			expect(listBody.result.tools.map((t: any) => t.name)).toEqual(["a_hot", "call_tool", "z_hot"]);
+
+			// Invoke extended tool via frozen dispatcher without mutating tools/list
+			const okRes = await rpc(mcp.url, reg.token, {
+				jsonrpc: "2.0",
+				id: 2,
+				method: "tools/call",
+				params: { name: "call_tool", arguments: { name: "alpha_tool", arguments: { n: 21 } } },
+			});
+			const okBody = (await okRes.json()) as any;
+			expect(okBody.result.isError).toBe(false);
+			expect(okBody.result.content[0].text).toBe("42");
+
+			// Unknown extended tool returns actionable error pointing to INDEX.md
+			const badRes = await rpc(mcp.url, reg.token, {
+				jsonrpc: "2.0",
+				id: 3,
+				method: "tools/call",
+				params: { name: "call_tool", arguments: { name: "missing_tool" } },
+			});
+			const badBody = (await badRes.json()) as any;
+			expect(badBody.result.isError).toBe(true);
+			expect(badBody.result.content[0].text).toContain(".swarm/tools/INDEX.md");
+		} finally {
+			await mcp.close();
+			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 });

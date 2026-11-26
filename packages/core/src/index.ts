@@ -9,6 +9,8 @@ export * from "./permit-actor.ts";
 export * from "./redact.ts";
 export * from "./sandbox.ts";
 export * from "./services.ts";
+export * from "./skills.ts";
+export * from "./state-machines.ts";
 export * from "./store.ts";
 export * from "./topology.ts";
 export * from "./types.ts";

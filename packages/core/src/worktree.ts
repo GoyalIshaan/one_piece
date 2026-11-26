@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import type { WorktreeHandle, WorktreeManager } from "./topology.ts";
 
 function git(cwd: string, args: string[]): string {
@@ -12,9 +12,15 @@ function git(cwd: string, args: string[]): string {
 	}).trim();
 }
 
-function isGitRepo(dir: string): boolean {
+/**
+ * Return true ONLY when `dir` itself is a git repository root with a valid HEAD commit.
+ * Never walks up to a parent repository (preventing non-git task workspaces nested inside
+ * `.one_piece/` from polluting the parent repo with stray worktrees and branches).
+ */
+function isGitRepoRoot(dir: string): boolean {
+	if (!existsSync(join(dir, ".git"))) return false;
 	try {
-		return git(dir, ["rev-parse", "--is-inside-work-tree"]) === "true";
+		return git(dir, ["rev-parse", "--is-inside-work-tree"]) === "true" && Boolean(git(dir, ["rev-parse", "--verify", "HEAD"]));
 	} catch {
 		return false;
 	}
@@ -37,8 +43,8 @@ export class GitWorktreeManager implements WorktreeManager {
 		mkdirSync(this.worktreeRoot, { recursive: true });
 
 		const resolvedSource = resolve(sourceWorkspace);
-		if (isGitRepo(resolvedSource)) {
-			this.repoRoot = git(resolvedSource, ["rev-parse", "--show-toplevel"]);
+		if (isGitRepoRoot(resolvedSource)) {
+			this.repoRoot = resolvedSource;
 			this.baseSha = git(this.repoRoot, ["rev-parse", "HEAD"]);
 		} else {
 			// Seed a local origin repo inside runDir so non-git workspaces still get full worktree isolation.
@@ -47,7 +53,12 @@ export class GitWorktreeManager implements WorktreeManager {
 			if (existsSync(resolvedSource)) {
 				cpSync(resolvedSource, seedRepo, {
 					recursive: true,
-					filter: (src) => !src.includes("/.one_piece") && !src.includes("/node_modules") && !src.endsWith("/.git"),
+					filter: (src) => {
+						const rel = relative(resolvedSource, src);
+						if (!rel) return true;
+						const parts = rel.split(/[\\/]/);
+						return !parts.includes(".one_piece") && !parts.includes("node_modules") && !parts.includes(".git");
+					},
 				});
 			}
 			git(seedRepo, ["init", "-b", "main"]);
@@ -114,6 +125,14 @@ export class GitWorktreeManager implements WorktreeManager {
 				"-c", "user.email=one-piece@local",
 				"commit", "-m", message, "--no-verify",
 			]);
+			return git(worktreePath, ["rev-parse", "HEAD"]);
+		} catch {
+			return undefined;
+		}
+	}
+
+	headSha(worktreePath: string): string | undefined {
+		try {
 			return git(worktreePath, ["rev-parse", "HEAD"]);
 		} catch {
 			return undefined;

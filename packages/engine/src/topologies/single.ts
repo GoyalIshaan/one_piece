@@ -17,11 +17,19 @@ export function singleTopology(opts: SingleTopologyOptions = {}): TopologyPlugin
 				role: "worker",
 				canSpawn: false,
 				maxTurns: opts.maxTurns,
+				cacheKeyPrefix: `${os.runId}:single-worker`,
+				toolScope: {
+					board: "none",
+					artifacts: true,
+					findings: true,
+					tasks: false,
+					nominate: false,
+					scheduler: "auto",
+				},
 				systemPrompt: [
 					"You are a focused solo engineer working in an isolated git worktree.",
 					"Implement, verify with tests, and call report_finding when your solution is ready.",
-					rubric ? `Rubric: ${rubric}` : "",
-				].filter(Boolean).join("\n"),
+				].join("\n"),
 			});
 
 			try {

@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { EventBus, McpToolRegistry, McpWorkerRegistration, Role, ToolDefinition } from "@one-piece/core";
+import { canonicalizeSchema } from "./progressive.ts";
 
 const PROTOCOL_VERSION = "2025-03-26";
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
@@ -43,7 +44,17 @@ function readJsonBody(req: IncomingMessage): Promise<string> {
 	});
 }
 
-const READ_ONLY_TOOLS = new Set(["board_search", "board_visit", "read_artifact", "list_pools", "job_status", "read_file", "list_files"]);
+const READ_ONLY_TOOLS = new Set([
+	"board_search",
+	"board_visit",
+	"read_artifact",
+	"list_pools",
+	"job_status",
+	"read_file",
+	"list_files",
+	"grep_files",
+	"load_skill",
+]);
 
 function sendJson(res: ServerResponse, status: number, body: unknown, extraHeaders: Record<string, string> = {}): void {
 	const payload = JSON.stringify(body);
@@ -272,16 +283,18 @@ export class McpBusServer implements McpToolRegistry {
 				return rpcResult(id, {});
 
 			case "tools/list": {
-				const tools = [...worker.tools.values()].map((t) => ({
-					name: t.name,
-					description: t.description,
-					inputSchema: t.inputSchema,
-					annotations: {
-						readOnlyHint: READ_ONLY_TOOLS.has(t.name),
-						destructiveHint: false,
-						openWorldHint: false,
-					},
-				}));
+				const tools = [...worker.tools.values()]
+					.sort((a, b) => a.name.localeCompare(b.name))
+					.map((t) => ({
+						name: t.name,
+						description: t.description,
+						inputSchema: canonicalizeSchema(t.inputSchema),
+						annotations: {
+							readOnlyHint: READ_ONLY_TOOLS.has(t.name),
+							destructiveHint: false,
+							openWorldHint: false,
+						},
+					}));
 				return rpcResult(id, { tools });
 			}
 

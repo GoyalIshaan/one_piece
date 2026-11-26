@@ -19,6 +19,12 @@ export interface OnePieceV2Config {
 	verification?: VerificationModuleSpec;
 	enableBlindReview?: boolean;
 	networkOffWorkers?: boolean;
+	/** Isolate CLI workers from personal MCPs, plugins, hooks, and ambient skills (default true). */
+	cleanWorkerEnv?: boolean;
+	/** Optional extra directories containing curated SKILL.md folders. */
+	skillsDirs?: string[];
+	/** Automatically roll over in-process sessions via .swarm/HANDOFF.md on 2nd compaction (default true). */
+	autoHandoffOnSecondCompaction?: boolean;
 	dataDir: string;
 }
 
@@ -74,6 +80,7 @@ export function loadConfig(
 					? Object.entries(file.drivers as Record<string, Omit<DriverConfig, "id">>).map(([id, cfg]) => ({ id, ...cfg }))
 					: ["codex", "grok", "gemini"];
 
+	const cleanWorkerEnv = file.cleanWorkerEnv ?? true;
 	const drivers: DriverConfig[] = requestedDrivers.map((entry) => {
 		const base = typeof entry === "string"
 			? (() => {
@@ -84,6 +91,9 @@ export function loadConfig(
 				return structuredClone(preset);
 			})()
 			: structuredClone(entry);
+		if (base.kind !== "pi-in-process" && base.cleanWorkerEnv === undefined) {
+			base.cleanWorkerEnv = cleanWorkerEnv;
+		}
 		if (overrides.model) base.model = overrides.model;
 		return base;
 	});
@@ -119,6 +129,9 @@ export function loadConfig(
 		verification: file.verification,
 		enableBlindReview: file.enableBlindReview ?? false,
 		networkOffWorkers: file.networkOffWorkers ?? false,
+		cleanWorkerEnv,
+		skillsDirs: file.skillsDirs,
+		autoHandoffOnSecondCompaction: file.autoHandoffOnSecondCompaction ?? true,
 		dataDir: resolve(projectDir, file.dataDir ?? ".one_piece"),
 	};
 }

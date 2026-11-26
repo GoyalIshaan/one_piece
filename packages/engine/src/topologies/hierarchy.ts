@@ -66,8 +66,18 @@ export function hierarchyTopology(opts: HierarchyTopologyOptions = {}): Topology
 				role: "planner",
 				readOnly: true,
 				canSpawn: false,
+				cacheKeyPrefix: `${os.runId}:hierarchy-planner`,
+				toolScope: {
+					board: "read",
+					artifacts: true,
+					findings: false,
+					tasks: false,
+					nominate: false,
+					scheduler: "never",
+					skills: false,
+				},
 				systemPrompt: [
-					"You are a concise engineering lead. Decompose the goal into 1 to " + maxWorkers + " disjoint, testable subtasks.",
+					"You are a concise engineering lead. Decompose the goal into disjoint, testable subtasks.",
 					'Respond ONLY with JSON: {"subtasks":[{"title":"...","description":"..."}]}',
 				].join("\n"),
 			});
@@ -99,6 +109,15 @@ export function hierarchyTopology(opts: HierarchyTopologyOptions = {}): Topology
 						taskId: task.id,
 						canSpawn: false,
 						maxTurns: opts.maxWorkerTurns,
+						cacheKeyPrefix: `${os.runId}:hierarchy-worker`,
+						toolScope: {
+							board: "read-write",
+							artifacts: true,
+							findings: true,
+							tasks: false,
+							nominate: false,
+							scheduler: "auto",
+						},
 						systemPrompt: [
 							"You are a focused leaf engineer in an isolated git worktree.",
 							"Stay strictly within your assigned subtask. Run tests, then call report_finding or summarize your work.",
@@ -148,6 +167,16 @@ export function hierarchyTopology(opts: HierarchyTopologyOptions = {}): Topology
 				const integrator = await os.spawnWorker({
 					role: "integrator",
 					canSpawn: false,
+					cacheKeyPrefix: `${os.runId}:hierarchy-integrator`,
+					toolScope: {
+						board: "read-write",
+						artifacts: true,
+						findings: true,
+						tasks: false,
+						nominate: true,
+						scheduler: "auto",
+						codeMode: true,
+					},
 					systemPrompt: [
 						"You are the single-writer Integrator. Combine the completed subtask branches cleanly, resolve any conflicts,",
 						"run end-to-end checks, and call report_finding + nominate with the final integrated solution.",

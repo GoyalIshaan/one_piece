@@ -1,4 +1,4 @@
-import type { JsonSchema, SwarmOsApi, TaskRecord, TopologyOutcome, TopologyPlugin } from "@one-piece/core";
+import { type JsonSchema, newId, type SwarmOsApi, type TaskRecord, type TopologyOutcome, type TopologyPlugin } from "@one-piece/core";
 
 export interface PullRefineryOptions {
 	concurrency?: number;
@@ -32,23 +32,61 @@ interface BacklogItem {
 	depends_on?: string[];
 }
 
+function tryExtractBacklog(candidate: string): BacklogItem[] | undefined {
+	try {
+		const parsed = JSON.parse(candidate) as { tasks?: BacklogItem[] };
+		if (Array.isArray(parsed?.tasks) && parsed.tasks.length) {
+			const items = parsed.tasks
+				.filter((t) => typeof t?.title === "string" && typeof t?.description === "string")
+				.map((t, i) => ({
+					key: typeof t.key === "string" && t.key ? t.key : `t${i + 1}`,
+					title: t.title,
+					description: t.description,
+					depends_on: Array.isArray(t.depends_on) ? t.depends_on.filter((d): d is string => typeof d === "string") : [],
+				}));
+			if (items.length) return items;
+		}
+	} catch {
+		// Invalid JSON candidate.
+	}
+	return undefined;
+}
+
 function parseBacklog(text: string, fallbackGoal: string): BacklogItem[] {
-	const match = /\{[\s\S]*\}/.exec(text);
-	if (match) {
-		try {
-			const parsed = JSON.parse(match[0]) as { tasks?: BacklogItem[] };
-			if (Array.isArray(parsed.tasks) && parsed.tasks.length) {
-				return parsed.tasks
-					.filter((t) => typeof t?.title === "string" && typeof t?.description === "string")
-					.map((t, i) => ({
-						key: typeof t.key === "string" && t.key ? t.key : `t${i + 1}`,
-						title: t.title,
-						description: t.description,
-						depends_on: Array.isArray(t.depends_on) ? t.depends_on.filter((d): d is string => typeof d === "string") : [],
-					}));
+	// 1. Direct JSON response
+	const direct = tryExtractBacklog(text.trim());
+	if (direct) return direct;
+
+	// 2. Markdown fenced JSON blocks (e.g. ```json ... ```)
+	for (const m of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)) {
+		const found = tryExtractBacklog(m[1]!.trim());
+		if (found) return found;
+	}
+
+	// 3. Balanced-brace scan (safe when prose contains other braces)
+	for (let i = 0; i < text.length; i++) {
+		if (text[i] !== "{") continue;
+		let depth = 0;
+		let inStr = false;
+		let esc = false;
+		for (let j = i; j < text.length; j++) {
+			const ch = text[j]!;
+			if (inStr) {
+				if (esc) esc = false;
+				else if (ch === "\\") esc = true;
+				else if (ch === '"') inStr = false;
+				continue;
 			}
-		} catch {
-			// Fall back below.
+			if (ch === '"') inStr = true;
+			else if (ch === "{") depth++;
+			else if (ch === "}") {
+				depth--;
+				if (depth === 0) {
+					const found = tryExtractBacklog(text.slice(i, j + 1));
+					if (found) return found;
+					break;
+				}
+			}
 		}
 	}
 	return [{ key: "t1", title: "Implement goal", description: fallbackGoal, depends_on: [] }];
@@ -76,6 +114,16 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 				role: "planner",
 				readOnly: true,
 				canSpawn: false,
+				cacheKeyPrefix: `${os.runId}:refinery-planner`,
+				toolScope: {
+					board: "read",
+					artifacts: true,
+					findings: false,
+					tasks: false,
+					nominate: false,
+					scheduler: "never",
+					skills: false,
+				},
 				systemPrompt: [
 					"You are a backlog sharder. Split the goal into atomic, cleanly mergeable tickets with optional depends_on keys.",
 					'Respond ONLY with JSON: {"tasks":[{"key":"t1","title":"...","description":"...","depends_on":[]}]}',
@@ -155,43 +203,87 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 						await waitForTaskEvent(os, signal, 5_000);
 						continue;
 					}
-					const target = ready[0]!;
-					const worker = await os.spawnWorker({
-						role: "worker",
-						taskId: target.id,
-						baseRef: lastTrunkSha,
-						canSpawn: false,
-						systemPrompt: [
-							`You are pull-queue worker #${slotIdx + 1} in an isolated git worktree branched from trunk.`,
-							"Implement ONLY your leased ticket, run local tests, and exit cleanly so the Refinery can merge your branch.",
-						].join("\n"),
-					});
-					const claim = os.store.claimTaskLease(os.runId, target.id, worker.agent.id, leaseTtlMs);
-					if (!claim.claimed || !claim.task) {
-						await worker.close();
+					// Claim the atomic SQLite lease BEFORE spawning a worker so losing slots never spawn idle CLIs/worktrees.
+					let claimedTarget: TaskRecord | undefined;
+					let claimedLeaseOwner: string | undefined;
+					let claimedFencingToken = 0;
+					let claimedExpiresAt = 0;
+					for (const candidate of ready) {
+						const holderId = `slot-${slotIdx}-${newId("lse")}`;
+						const attempt = os.store.claimTaskLease(os.runId, candidate.id, holderId, leaseTtlMs);
+						if (attempt.claimed && attempt.task) {
+							claimedTarget = attempt.task;
+							claimedLeaseOwner = holderId;
+							claimedFencingToken = attempt.task.fencingToken;
+							claimedExpiresAt = attempt.task.leaseExpiresAt!;
+							break;
+						}
+					}
+					if (!claimedTarget || !claimedLeaseOwner) {
+						await waitForTaskEvent(os, signal, 2_000);
 						continue;
 					}
+
+					const target = claimedTarget;
+					const branchBaseRef = lastTrunkSha;
+					let worker;
+					try {
+						worker = await os.spawnWorker({
+							role: "worker",
+							taskId: target.id,
+							baseRef: branchBaseRef,
+							canSpawn: false,
+							cacheKeyPrefix: `${os.runId}:refinery-worker`,
+							toolScope: {
+								board: "read-write",
+								artifacts: true,
+								findings: true,
+								tasks: false,
+								nominate: false,
+								scheduler: "auto",
+							},
+							systemPrompt: [
+								"You are a pull-queue worker in an isolated git worktree branched from trunk.",
+								"Implement ONLY your leased ticket, run local tests, and exit cleanly so the Refinery can merge your branch.",
+							].join("\n"),
+						});
+					} catch (error) {
+						os.store.releaseTaskLease(target.id, claimedLeaseOwner, claimedFencingToken, "open");
+						throw error;
+					}
+
 					os.bus.emit(
 						os.runId,
 						"task.claimed",
-						{ taskId: claim.task.id, agentId: worker.agent.id, fencingToken: claim.task.fencingToken, leaseExpiresAt: claim.task.leaseExpiresAt! },
+						{ taskId: target.id, agentId: worker.agent.id, fencingToken: claimedFencingToken, leaseExpiresAt: claimedExpiresAt },
 						worker.agent.id,
 					);
+
+					// Heartbeat-renew the lease while the worker turn is actively running so long turns aren't stolen mid-flight.
+					const renewEveryMs = Math.max(15_000, Math.floor(leaseTtlMs / 3));
+					const renewTimer = setInterval(() => {
+						os.store.renewTaskLease(target.id, claimedLeaseOwner, claimedFencingToken, leaseTtlMs);
+					}, renewEveryMs);
+					renewTimer.unref?.();
+
 					try {
 						const res = await worker.runTurn(
-							`Ticket ${target.id}: ${target.title}\n\n${target.description}\n\nGlobal goal: ${goal}`,
+							`Worker slot #${slotIdx + 1} — Ticket ${target.id}: ${target.title}\n\n${target.description}\n\nGlobal goal: ${goal}`,
 							{ signal },
 						);
 						const wip = os.worktrees.commitWip(worker.workspace, `ticket(${target.id}): ${target.title}`);
+						const headAfter = os.worktrees.headSha(worker.workspace);
+						const hasChanges = Boolean(wip) || (Boolean(headAfter) && headAfter !== branchBaseRef);
 						const status = res.status === "completed" ? "done" : "blocked";
-						os.store.releaseTaskLease(target.id, worker.agent.id, claim.task.fencingToken, status, {
+						os.store.releaseTaskLease(target.id, claimedLeaseOwner, claimedFencingToken, status, {
 							result: res.finalText.slice(0, 800),
 						});
 						os.bus.emit(os.runId, "task.status", { taskId: target.id, status, result: res.finalText.slice(0, 400) }, worker.agent.id);
-						if (status === "done" && wip && worker.branch) {
+						if (status === "done" && hasChanges && worker.branch) {
 							await enqueueRefinery(target, worker.branch, worker.agent.id, worker.agent.driverId);
 						}
 					} finally {
+						clearInterval(renewTimer);
 						await worker.close();
 					}
 				}

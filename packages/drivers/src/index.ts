@@ -8,6 +8,8 @@ import { PiInProcessDriver } from "./pi.ts";
 
 export { AgyAcpDriver } from "./agy.ts";
 export { buildCliEnv, classifyQuotaError, probeCliBinary } from "./classify.ts";
+export { prepareCleanCodexHome, prepareCleanGrokHome } from "./cli-home.ts";
+export { buildStructuredAnchorMessages, estimateMessageTokens, extractFailedApproaches, maybeCompactSession, microCompactMessages } from "./compaction.ts";
 export { CodexAppServerDriver, CodexExecDriver } from "./codex.ts";
 export { GeminiCliDriver } from "./gemini.ts";
 export { GrokAcpDriver, GrokCliDriver } from "./grok.ts";

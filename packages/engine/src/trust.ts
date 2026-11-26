@@ -59,12 +59,12 @@ export class TrustLayer implements TrustService {
 		const snapshotDir = join(this.runDir, "submissions", findingId, String(revision));
 		if (existsSync(snapshotDir)) rmSync(snapshotDir, { recursive: true, force: true });
 
-		let artifactSha256: string | undefined;
-		let snapshotNote: string | undefined;
+		let snapshotState: { artifactSha256: string; snapshotDir: string } | { snapshotNote: string };
 		try {
-			artifactSha256 = captureFrozenSnapshot(input.workspace, snapshotDir);
+			const sha = captureFrozenSnapshot(input.workspace, snapshotDir);
+			snapshotState = { artifactSha256: sha, snapshotDir };
 		} catch (error) {
-			snapshotNote = error instanceof Error ? error.message : String(error);
+			snapshotState = { snapshotNote: error instanceof Error ? error.message : String(error) };
 		}
 
 		const scope = input.scope ?? this.verifier?.defaultScope;
@@ -75,9 +75,7 @@ export class TrustLayer implements TrustService {
 			evidence: input.evidence ?? [],
 			level: input.level,
 			scope,
-			artifactSha256,
-			snapshotDir: artifactSha256 ? snapshotDir : undefined,
-			snapshotNote,
+			...snapshotState,
 			verifier: this.verifier ? { name: this.verifier.name, version: this.verifier.version } : undefined,
 			score: input.score,
 			checks: [],
@@ -119,7 +117,7 @@ export class TrustLayer implements TrustService {
 		this.bus.emit(
 			this.runId,
 			"finding.reported",
-			{ findingId: finding.id, revision, claim: finding.claim, level: finding.level, artifactSha256 },
+			{ findingId: finding.id, revision, claim: finding.claim, level: finding.level, artifactSha256: submission.artifactSha256 },
 			input.agentId,
 		);
 

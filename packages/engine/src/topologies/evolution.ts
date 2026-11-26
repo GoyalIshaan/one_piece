@@ -61,11 +61,20 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 							role: "worker",
 							baseRef: parent?.branch ?? os.worktrees.baseSha,
 							canSpawn: false,
+							cacheKeyPrefix: `${os.runId}:evolution-mutator`,
+							skills: ["evolution-hygiene"],
+							toolScope: {
+								board: "none",
+								artifacts: true,
+								findings: true,
+								tasks: false,
+								nominate: false,
+								scheduler: "auto",
+							},
 							systemPrompt: [
-								`You are an evolutionary mutator (Gen ${gen}, Slot ${slot + 1}) starting from a fresh context in an isolated git worktree.`,
+								"You are an evolutionary mutator starting from a fresh context in an isolated git worktree.",
 								"Propose ONE concrete, testable improvement over the current code, verify it, and call `report_finding` with a numeric `score` if measurable.",
-								rubric ? `Rubric: ${rubric}` : "",
-							].filter(Boolean).join("\n"),
+							].join("\n"),
 						});
 
 						try {
@@ -77,7 +86,9 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 								: "";
 
 							const prompt = [
+								`Generation ${gen}/${maxGenerations}, Slot ${slot + 1}/${popSize}`,
 								`Goal: ${goal}`,
+								rubric ? `Rubric: ${rubric}` : "",
 								parent ? `Parent incumbent (score=${parent.score.toFixed(4)}): ${parent.summary.slice(0, 300)}` : "Starting from base repository seed.",
 								eliteSummary ? `Top verified archive elites:\n${eliteSummary}` : "",
 								negSummary,

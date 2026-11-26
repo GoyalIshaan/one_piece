@@ -349,15 +349,14 @@ export class GeminiCliDriver implements WorkerDriver {
 				} catch (error) {
 					const raw = `${error instanceof Error ? error.message : String(error)}\n${stderr}`.trim();
 					const quota = classifyQuotaError(raw);
-					return {
-						status: quota ? "rate_limited" : opts.signal?.aborted ? "interrupted" : "failed",
-						finalText: turnChunks.join("").trim(),
-						sessionId: acpSessionId,
-						model: resolvedModel,
-						usage: { durationMs: Date.now() - startedAt },
-						quotaError: quota,
-						error: raw,
-					};
+					const usage = { durationMs: Date.now() - startedAt };
+					if (quota) {
+						return { status: "rate_limited", finalText: turnChunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, quotaError: quota, error: raw };
+					}
+					if (opts.signal?.aborted) {
+						return { status: "interrupted", finalText: turnChunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage };
+					}
+					return { status: "failed", finalText: turnChunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, error: raw };
 				}
 			},
 			async interrupt(): Promise<void> {

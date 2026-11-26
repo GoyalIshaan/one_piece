@@ -1,5 +1,5 @@
 import type { EventBus } from "./events.ts";
-import type { JsonSchema, Role, ToolDefinition, UsageRecord } from "./types.ts";
+import type { Exclusive, JsonSchema, Role, ToolDefinition, UsageRecord } from "./types.ts";
 
 export type DriverKind =
 	| "codex-app-server"
@@ -31,6 +31,29 @@ export interface DriverCapabilities {
 	supportsMcpHttp: boolean;
 }
 
+export interface CompactionEvent {
+	strategy: "micro" | "anchor";
+	beforeTokens: number;
+	afterTokens: number;
+	prunedCount: number;
+	compactionCount: number;
+}
+
+export interface WorkerCompactionPolicy {
+	/** Context-window fraction at which Tier 1 compaction fires (default 0.70). */
+	watermarkFraction?: number;
+	/** Keep the most recent N turns verbatim during micro-compaction (default 6). */
+	keepRecentTurns?: number;
+	/** Minimum tool-result bytes eligible for micro-compaction spillover (default 1024). */
+	minPruneBytes?: number;
+	/** After this many compactions in one session, signal Tier 2 Clean-Slate Handoff (default 2). */
+	maxCompactionsBeforeHandoff?: number;
+	/** Artifact store hook used to spill pruned tool outputs losslessly. */
+	spillArtifact?: (label: string, content: string) => { id: string; sha256: string };
+	/** Callback invoked whenever Tier 1 compaction runs. */
+	onCompacted?: (event: CompactionEvent) => void;
+}
+
 export interface WorkerSpawnSpec {
 	runId: string;
 	agentId: string;
@@ -40,6 +63,10 @@ export interface WorkerSpawnSpec {
 	model?: string;
 	maxTurns?: number;
 	readOnly?: boolean;
+	/** Stable prefix key for KV prompt caching (defaults to role/agent key). */
+	cacheKeyPrefix?: string;
+	/** Optional Tier 1/2 context compaction policy (used by in-process drivers). */
+	compaction?: WorkerCompactionPolicy;
 	/** Local MCP bus coordinates for external CLI workers. */
 	mcp?: McpConnectionInfo;
 	/** Direct tool definitions for in-process drivers (PiInProcessDriver). */
@@ -57,15 +84,34 @@ export type WorkerActivityEvent =
 	| { type: "tool_result"; name: string; isError?: boolean; outputPreview?: string; durationMs?: number; isMcp?: boolean }
 	| { type: "error"; message: string };
 
-export interface WorkerTurnResult {
-	status: "completed" | "yielded" | "interrupted" | "rate_limited" | "failed";
+interface WorkerTurnBase {
 	finalText: string;
 	sessionId?: string;
 	model?: string;
 	usage?: UsageRecord;
-	quotaError?: QuotaErrorClass;
-	error?: string;
 }
+
+export type WorkerTurnResult = WorkerTurnBase & Exclusive<
+	| {
+		readonly status: "completed" | "yielded" | "interrupted";
+		/** Set when Tier 1 compaction hit its rollover limit and Tier 2 Clean-Slate Handoff is advised. */
+		readonly needsHandoff?: boolean;
+		/** Structured negative results captured during the turn/compaction for clean-slate handoffs. */
+		readonly failedApproaches?: string[];
+	}
+	| {
+		readonly status: "rate_limited";
+		readonly quotaError: QuotaErrorClass;
+		readonly error: string;
+		readonly failedApproaches?: string[];
+	}
+	| {
+		readonly status: "failed";
+		readonly error: string;
+		readonly needsHandoff?: boolean;
+		readonly failedApproaches?: string[];
+	}
+>;
 
 export interface WorkerSession {
 	readonly driverId: string;
@@ -107,6 +153,8 @@ export interface DriverConfig {
 	maxConcurrent?: number;
 	/** Keep consumer subscription billing by unsetting API key env vars (default true for CLIs). */
 	subscriptionMode?: boolean;
+	/** Isolate CLI workers from personal MCPs, plugins, hooks, and ambient skills (default true for CLIs). */
+	cleanWorkerEnv?: boolean;
 	/** For `pi-in-process`: underlying pi-ai provider id (e.g. `openrouter`, `openai`, `sim`). */
 	provider?: string;
 	/** Relative preference weight when routing within a role pool. */

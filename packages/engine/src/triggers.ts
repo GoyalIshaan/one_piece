@@ -10,6 +10,18 @@ export interface TriggerOptions {
 	onReserveEntered?: (reason: string) => void;
 }
 
+type TriggerLifecycle =
+	| { readonly status: "stopped" }
+	| {
+		readonly status: "active";
+		readonly unsubscribe: () => void;
+		reserve: { readonly fired: false } | { readonly fired: true; readonly reason: string; readonly at: number };
+	};
+
+type StallEntry =
+	| { readonly state: "tracking"; readonly sig: string; readonly count: number }
+	| { readonly state: "stalled"; readonly sig: string; readonly count: number };
+
 /**
  * Pure event-driven reactive rules (zero 1 Hz polling).
  * 1. Dependency unblocking: task.status(done) -> emits task.ready for unblocked dependents
@@ -23,10 +35,9 @@ export class TriggerEngine {
 	private readonly isInReserve: () => boolean;
 	private readonly onStall?: (agentId: string, reason: string) => void;
 	private readonly onReserveEntered?: (reason: string) => void;
-	private readonly lastSig = new Map<string, { sig: string; count: number }>();
+	private readonly stallTrackers = new Map<string, StallEntry>();
 	private readonly readyNotified = new Set<string>();
-	private reserveFired = false;
-	private unsubscribe?: () => void;
+	private lifecycle: TriggerLifecycle = { status: "stopped" };
 
 	constructor(opts: TriggerOptions) {
 		this.runId = opts.runId;
@@ -38,17 +49,19 @@ export class TriggerEngine {
 	}
 
 	start(): void {
-		if (this.unsubscribe) return;
-		this.unsubscribe = this.bus.on((event) => this.handle(event));
+		if (this.lifecycle.status === "active") return;
+		const unsubscribe = this.bus.on((event) => this.handle(event));
+		this.lifecycle = { status: "active", unsubscribe, reserve: { fired: false } };
 	}
 
 	stop(): void {
-		this.unsubscribe?.();
-		this.unsubscribe = undefined;
+		if (this.lifecycle.status === "stopped") return;
+		this.lifecycle.unsubscribe();
+		this.lifecycle = { status: "stopped" };
 	}
 
 	private handle(event: HarnessEvent): void {
-		if (event.runId !== this.runId) return;
+		if (this.lifecycle.status !== "active" || event.runId !== this.runId) return;
 
 		if (event.type === "task.status" && event.data.status === "done") {
 			this.checkUnblockedTasks();
@@ -76,25 +89,27 @@ export class TriggerEngine {
 		const diffSha = typeof data.diffSha === "string" ? data.diffSha : "";
 		if (!toolSig && !diffSha) return;
 		const sig = `${toolSig}::${diffSha}`;
-		const prev = this.lastSig.get(agentId);
-		if (prev && prev.sig === sig) {
-			prev.count += 1;
-			if (prev.count >= this.maxRepeats) {
-				const reason = `Repeated identical no-progress state (${sig}) ${prev.count} times`;
-				this.lastSig.delete(agentId);
-				this.bus.emit(this.runId, "agent.stalled", { agentId, reason, repeatCount: prev.count }, agentId);
+		const prev = this.stallTrackers.get(agentId);
+		if (prev && prev.state === "tracking" && prev.sig === sig) {
+			const nextCount = prev.count + 1;
+			if (nextCount >= this.maxRepeats) {
+				const reason = `Repeated identical no-progress state (${sig}) ${nextCount} times`;
+				this.stallTrackers.set(agentId, { state: "stalled", sig, count: nextCount });
+				this.bus.emit(this.runId, "agent.stalled", { agentId, reason, repeatCount: nextCount }, agentId);
 				this.onStall?.(agentId, reason);
+			} else {
+				this.stallTrackers.set(agentId, { state: "tracking", sig, count: nextCount });
 			}
 		} else {
-			this.lastSig.set(agentId, { sig, count: 1 });
+			this.stallTrackers.set(agentId, { state: "tracking", sig, count: 1 });
 		}
 	}
 
 	private checkReserve(): void {
-		if (this.reserveFired) return;
+		if (this.lifecycle.status !== "active" || this.lifecycle.reserve.fired) return;
 		if (this.isInReserve()) {
-			this.reserveFired = true;
 			const reason = "Run entered closeout reserve; halting new exploration to verify and nominate best artifact.";
+			this.lifecycle.reserve = { fired: true, reason, at: Date.now() };
 			this.bus.emit(this.runId, "run.closing", { reason });
 			this.onReserveEntered?.(reason);
 		}

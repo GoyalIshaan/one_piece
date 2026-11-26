@@ -26,6 +26,7 @@ export interface LifecycleEvents {
 		outputTokens?: number;
 		cachedTokens?: number;
 		cacheWriteTokens?: number;
+		cacheHitRate?: number;
 		reasoningTokens?: number;
 		totalTokens?: number;
 		usd?: number;
@@ -36,7 +37,10 @@ export interface LifecycleEvents {
 		transcriptFile?: string;
 	};
 	"agent.stalled": { agentId: string; reason: string; repeatCount?: number };
-	"agent.handoff": { agentId: string; fromDriver: string; toDriver: string; workspace: string; handoffPath: string; waitedMs?: number };
+	"agent.compacted": { agentId: string; strategy: "micro" | "anchor"; beforeTokens: number; afterTokens: number; prunedCount: number; compactionCount: number };
+	"agent.handoff": { agentId: string; fromDriver: string; toDriver: string; workspace: string; handoffPath: string; reasonKind?: string; waitedMs?: number };
+	"skill.loaded": { skill: string; source: string; bytes: number };
+	"codemode.executed": { exitCode: number; durationMs: number; outputBytes: number; artifactId?: string };
 	"driver.tool_call": { tool: string; argsPreview?: string; isMcp?: boolean; driverId?: string };
 	"driver.tool_result": { tool: string; isError: boolean; outputPreview?: string; durationMs?: number; isMcp?: boolean; driverId?: string };
 	"driver.error": { message: string; driverId?: string };
@@ -52,7 +56,7 @@ export interface LifecycleEvents {
 	"job.finished": { jobId: string; status: FinishedJob["status"]; exitCode?: number; units?: number };
 	"job.interrupted": { jobId: string; previousStatus: Exclude<Job, FinishedJob>["status"] };
 	"finding.reported": { findingId: string; revision: number; claim: string; level: EvidenceLevel; artifactSha256?: string };
-	"finding.verification": { findingId: string; revision: number; scope: string; status: string; message: string };
+	"finding.verification": { findingId: string; revision: number; scope: string; status: string; message: string; score?: number };
 	"finding.verdict": { findingId: string; revision: number; verdict: ReviewRound["verdict"]; confidence?: number };
 	"quota.retry": { driverId: string; attempt: number; waitMs: number; reason: string };
 	"quota.cooldown": { driverId: string; until: number; reason: string };

@@ -7,20 +7,27 @@ export interface HandoffInput {
 	agentId: string;
 	fromDriver: string;
 	reason: string;
+	reasonKind?: "quota_failover" | "compaction_limit" | "phase_transition";
 	originalPrompt: string;
 	workspace: string;
 	worktrees: WorktreeManager;
 	store: Store;
+	failedApproaches?: string[];
+	verifiedFacts?: string[];
+	lastTestSummary?: string;
 }
 
 /**
- * Mechanically synthesizes `.swarm/HANDOFF.md` when a CLI subscription hits a Class 2/3 quota cap.
- * Never relies on the rate-limited worker to summarize its own state (it has zero tokens left!).
+ * Mechanically synthesizes `.swarm/HANDOFF.md` for Tier 2 Clean-Slate Handoffs:
+ * - Quota failover (Class 2/3 cap hit — never relies on the rate-limited worker to summarize)
+ * - Compaction rollover (2nd compaction threshold — resets muddled context cleanly from disk truth)
+ * - Phase transitions (exploration -> implementation -> verification)
  */
 export function synthesizeHandoffFile(input: HandoffInput): { handoffPath: string; wipCommit?: string; prompt: string } {
+	const kind = input.reasonKind ?? "quota_failover";
 	const wipCommit = input.worktrees.commitWip(
 		input.workspace,
-		`chore(one-piece): wip handoff from ${input.fromDriver} (${input.agentId})`,
+		`chore(one-piece): wip ${kind} from ${input.fromDriver} (${input.agentId})`,
 	);
 	const diffStat = input.worktrees.diffStat(input.workspace);
 	const recentEvents = input.store
@@ -32,9 +39,16 @@ export function synthesizeHandoffFile(input: HandoffInput): { handoffPath: strin
 	mkdirSync(swarmDir, { recursive: true });
 	const handoffPath = join(swarmDir, "HANDOFF.md");
 
+	const heading = kind === "compaction_limit"
+		? "# Clean-Slate Context Rollover Handoff"
+		: kind === "phase_transition"
+			? "# Phase Transition Handoff"
+			: "# Automatic Quota Failover Handoff";
+
 	const markdown = [
-		`# Automatic Quota Failover Handoff`,
+		heading,
 		``,
+		`- **Handoff type:** \`${kind}\``,
 		`- **Previous driver:** \`${input.fromDriver}\``,
 		`- **Reason:** ${input.reason.slice(0, 240)}`,
 		`- **WIP commit:** ${wipCommit ?? "(clean working tree)"}`,
@@ -46,16 +60,30 @@ export function synthesizeHandoffFile(input: HandoffInput): { handoffPath: strin
 		"```",
 		diffStat,
 		"```",
+		...(input.verifiedFacts?.length
+			? [``, `## Verified Facts`, ...input.verifiedFacts.map((f) => `- ${f}`)]
+			: []),
+		...(input.failedApproaches?.length
+			? [``, `## Failed Approaches (DO NOT REPEAT)`, ...input.failedApproaches.map((f) => `- ${f}`)]
+			: []),
+		...(input.lastTestSummary
+			? [``, `## Last Verification / Test Output`, "```", input.lastTestSummary.slice(0, 1200), "```"]
+			: []),
 		``,
 		`## Last Recorded Swarm Events`,
 		recentEvents.length ? recentEvents.join("\n") : "(none)",
 		``,
 		`## Instructions`,
-		`Continue directly from the current state of this worktree. Inspect \`git diff ${input.worktrees.baseSha}...HEAD\` and finish the remaining work cleanly.`,
+		`Continue directly from the current state of this worktree. Inspect \`git diff ${input.worktrees.baseSha}...HEAD\` and finish the remaining work cleanly without repeating failed approaches.`,
 		``,
 	].join("\n");
 
 	writeFileSync(handoffPath, markdown, "utf8");
-	const prompt = `Previous worker (${input.fromDriver}) hit a provider quota limit and handed off this exact worktree. Read .swarm/HANDOFF.md and run \`git diff ${input.worktrees.baseSha}...HEAD\`, then complete the remaining work without redoing finished edits.`;
+	const reasonPhrase = kind === "compaction_limit"
+		? `Previous session reached its context compaction limit and handed off this exact worktree cleanly.`
+		: kind === "phase_transition"
+			? `Previous phase completed and handed off this exact worktree.`
+			: `Previous worker (${input.fromDriver}) hit a provider quota limit and handed off this exact worktree.`;
+	const prompt = `${reasonPhrase} Read .swarm/HANDOFF.md and run \`git diff ${input.worktrees.baseSha}...HEAD\`, then complete the remaining work without redoing finished edits or repeating failed approaches.`;
 	return { handoffPath, wipCommit, prompt };
 }

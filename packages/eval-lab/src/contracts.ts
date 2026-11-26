@@ -214,6 +214,7 @@ export interface TokenBreakdown {
 	output: number;
 	cacheRead: number;
 	cacheWrite: number;
+	cacheHitRate?: number;
 	reasoning: number;
 	peakInputPerCall: number;
 	estimatedUsd: number;
@@ -256,6 +257,8 @@ export interface SwarmDynamics {
 	artifactReads: number;
 	stallDetections: number;
 	failoverCount: number;
+	skillsLoaded?: number;
+	codemodeExecutions?: number;
 }
 
 export interface ReproducibilityEnvelope {

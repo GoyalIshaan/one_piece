@@ -65,6 +65,7 @@ export class AgyAcpDriver implements WorkerDriver {
 		const args = [
 			"acp",
 			"--stdio",
+			...(this.config.cleanWorkerEnv !== false ? ["--include-default-customizations=false", "--disable-telemetry"] : []),
 			...(spec.readOnly ? [] : ["--dangerously-skip-permissions"]),
 			...(this.config.extraArgs ?? []),
 		];
@@ -81,12 +82,22 @@ export class AgyAcpDriver implements WorkerDriver {
 		let stderr = "";
 		let acpSessionId: string | undefined = spec.resumeSessionId;
 		let resolvedModel: string | undefined = spec.model ?? this.config.model;
-		let turnChunks: string[] = [];
-		const mcpPrefix = `${spec.mcp?.serverName ?? "swarm"}__`;
-		const isMcpToolName = (name: string) =>
-			Boolean(spec.mcp?.toolNames?.includes(name)) ||
-			name.startsWith(mcpPrefix) ||
-			(name.includes("__") && Boolean(spec.mcp?.toolNames?.includes(name.slice(name.indexOf("__") + 2))));
+		type AgySessionState =
+			| { readonly kind: "idle" }
+			| { readonly kind: "running"; readonly chunks: string[] }
+			| { readonly kind: "closed" };
+		let sessionState: AgySessionState = { kind: "idle" };
+		const resetToIdle = (): void => {
+			if (sessionState.kind !== "closed") sessionState = { kind: "idle" };
+		};
+		const mcpServer = (spec.mcp?.serverName ?? "swarm").toLowerCase();
+		const mcpPrefix = `${mcpServer}__`;
+		const isMcpToolName = (name: string) => {
+			const lower = name.toLowerCase();
+			if (lower.includes(`mcp_${mcpServer}_`) || lower.includes(mcpPrefix)) return true;
+			if (spec.mcp?.toolNames?.some((t) => name === t || name.endsWith(`_${t}`) || name.endsWith(`__${t}`))) return true;
+			return false;
+		};
 
 		const sendRpc = (method: string, params: Record<string, unknown>): Promise<any> =>
 			new Promise((resolve, reject) => {
@@ -98,6 +109,26 @@ export class AgyAcpDriver implements WorkerDriver {
 				pending.set(id, { resolve, reject });
 				child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
 			});
+
+		const normalizeTool = (update: any): { name: string; isMcp: boolean; fallbackArgs?: string } => {
+			const rawTitle = String(update?.title ?? update?.toolCallId ?? "tool").trim();
+			const isMcp = isMcpToolName(rawTitle);
+			if (isMcp) return { name: rawTitle, isMcp: true };
+			const kind = String(update?.kind ?? "").toLowerCase();
+			if (
+				kind === "execute" ||
+				rawTitle.includes("\n") ||
+				rawTitle.includes("&&") ||
+				rawTitle.includes("|") ||
+				/^(python3?|bash|sh|zsh|git|ls|find|mkdir|rm|cp|mv|cat|pwd|which|sysctl|clang\+\+|gcc|g\+\+|rustc|cargo|node|npm|npx|pytest|[A-Z_]+=)\b/.test(rawTitle)
+			) {
+				return { name: "bash", isMcp: false, fallbackArgs: rawTitle.slice(0, 240) };
+			}
+			if (rawTitle.startsWith("File ")) {
+				return { name: kind === "edit" ? "edit_file" : "read_file", isMcp: false, fallbackArgs: rawTitle.slice(0, 240) };
+			}
+			return { name: rawTitle.slice(0, 64), isMcp: false };
+		};
 
 		const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity });
 		rl.on("line", (line) => {
@@ -128,27 +159,27 @@ export class AgyAcpDriver implements WorkerDriver {
 			if (msg.method === "session/update") {
 				const update = msg.params?.update ?? msg.params;
 				if (update?.sessionUpdate === "agent_message_chunk" && typeof update.content?.text === "string") {
-					turnChunks.push(update.content.text);
+					if (sessionState.kind === "running") sessionState.chunks.push(update.content.text);
 					spec.onActivity?.({ type: "text", delta: update.content.text });
 				} else if (update?.sessionUpdate === "tool_call") {
-					const toolName = String(update.title ?? update.toolCallId ?? "tool");
+					const norm = normalizeTool(update);
 					const argsRaw = update.rawInput ?? update.arguments ?? update.input;
 					const argsPreview = argsRaw !== undefined
 						? (typeof argsRaw === "string" ? argsRaw : JSON.stringify(argsRaw)).slice(0, 240)
-						: undefined;
-					spec.onActivity?.({ type: "tool_call", name: toolName, argsPreview, isMcp: isMcpToolName(toolName) });
+						: norm.fallbackArgs;
+					spec.onActivity?.({ type: "tool_call", name: norm.name, argsPreview, isMcp: norm.isMcp });
 				} else if (update?.sessionUpdate === "tool_call_update" && (update.status === "completed" || update.status === "failed")) {
-					const toolName = String(update.title ?? update.toolCallId ?? "tool");
+					const norm = normalizeTool(update);
 					const outRaw = update.rawOutput ?? update.content;
 					const outputPreview = outRaw !== undefined
 						? (typeof outRaw === "string" ? outRaw : JSON.stringify(outRaw)).slice(0, 500)
 						: undefined;
 					spec.onActivity?.({
 						type: "tool_result",
-						name: toolName,
+						name: norm.name,
 						isError: update.status === "failed",
 						outputPreview,
-						isMcp: isMcpToolName(toolName),
+						isMcp: norm.isMcp,
 					});
 				}
 			}
@@ -207,8 +238,15 @@ export class AgyAcpDriver implements WorkerDriver {
 				return acpSessionId;
 			},
 			async runTurn(prompt: string, opts = {}): Promise<WorkerTurnResult> {
+				if (sessionState.kind === "closed") {
+					throw new Error("AgyAcpDriver session is closed");
+				}
+				if (sessionState.kind === "running") {
+					throw new Error("AgyAcpDriver session already has an active turn in flight");
+				}
 				const startedAt = Date.now();
-				turnChunks = [];
+				const chunks: string[] = [];
+				sessionState = { kind: "running", chunks };
 				const text = spec.systemPrompt && !sentSystemFallback ? `${spec.systemPrompt}\n\n${prompt}` : prompt;
 				sentSystemFallback = true;
 				let timer: ReturnType<typeof setTimeout> | undefined;
@@ -234,7 +272,7 @@ export class AgyAcpDriver implements WorkerDriver {
 						: { durationMs };
 					return {
 						status: opts.signal?.aborted ? "interrupted" : "completed",
-						finalText: turnChunks.join("").trim(),
+						finalText: chunks.join("").trim(),
 						sessionId: acpSessionId,
 						model: resolvedModel,
 						usage,
@@ -242,24 +280,27 @@ export class AgyAcpDriver implements WorkerDriver {
 				} catch (error) {
 					const raw = `${error instanceof Error ? error.message : String(error)}\n${stderr}`.trim();
 					const quota = classifyQuotaError(raw);
-					return {
-						status: quota ? "rate_limited" : opts.signal?.aborted ? "interrupted" : "failed",
-						finalText: turnChunks.join("").trim(),
-						sessionId: acpSessionId,
-						model: resolvedModel,
-						usage: { durationMs: Date.now() - startedAt },
-						quotaError: quota,
-						error: raw,
-					};
+					const usage = { durationMs: Date.now() - startedAt };
+					if (quota) {
+						return { status: "rate_limited", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, quotaError: quota, error: raw };
+					}
+					if (opts.signal?.aborted) {
+						return { status: "interrupted", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage };
+					}
+					return { status: "failed", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, error: raw };
 				} finally {
 					if (timer) clearTimeout(timer);
 					opts.signal?.removeEventListener("abort", onAbort);
+					resetToIdle();
 				}
 			},
 			async interrupt(): Promise<void> {
-				if (acpSessionId) await sendRpc("session/cancel", { sessionId: acpSessionId }).catch(() => {});
+				if (sessionState.kind === "running" && acpSessionId) {
+					await sendRpc("session/cancel", { sessionId: acpSessionId }).catch(() => {});
+				}
 			},
 			async close(): Promise<void> {
+				sessionState = { kind: "closed" };
 				rl.close();
 				killTree(child);
 			},

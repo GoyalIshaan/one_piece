@@ -1,3 +1,9 @@
+import {
+	type TaskLeaseClaimOutcome,
+	transitionClaimTask,
+	transitionReleaseTask,
+	transitionRenewTask,
+} from "./state-machines.ts";
 import type {
 	AgentRecord,
 	ArtifactRecord,
@@ -45,11 +51,7 @@ export interface EventQuery {
 	nodeId?: string;
 }
 
-export interface LeaseClaimResult {
-	claimed: boolean;
-	task?: TaskRecord;
-	reason?: string;
-}
+export type LeaseClaimResult = TaskLeaseClaimOutcome;
 
 export interface Store {
 	appendEvent(event: Omit<HarnessEvent, "seq">): number;
@@ -131,28 +133,15 @@ export class MemoryStore implements Store {
 	}
 
 	claimTaskLease(runId: string, taskId: string, agentId: string, ttlMs: number, now = Date.now()): LeaseClaimResult {
-		const task = this.get("tasks", taskId);
-		if (!task || task.runId !== runId) return { claimed: false, reason: `Task ${taskId} not found` };
-		const expired = task.status === "claimed" && (task.leaseExpiresAt ?? 0) <= now;
-		if (task.status !== "open" && !expired) {
-			return { claimed: false, reason: `Task ${taskId} is ${task.status}${task.leaseOwner ? ` (owned by ${task.leaseOwner})` : ""}` };
-		}
-		const updated: TaskRecord = {
-			...task,
-			status: "claimed",
-			leaseOwner: agentId,
-			leaseExpiresAt: now + ttlMs,
-			fencingToken: task.fencingToken + 1,
-			updatedAt: now,
-		};
-		this.put("tasks", updated);
-		return { claimed: true, task: updated };
+		const outcome = transitionClaimTask(this.get("tasks", taskId), runId, taskId, agentId, ttlMs, now);
+		if (outcome.claimed) this.put("tasks", outcome.task);
+		return outcome;
 	}
 
 	renewTaskLease(taskId: string, agentId: string, fencingToken: number, ttlMs: number, now = Date.now()): boolean {
-		const task = this.get("tasks", taskId);
-		if (!task || task.status !== "claimed" || task.leaseOwner !== agentId || task.fencingToken !== fencingToken) return false;
-		this.put("tasks", { ...task, leaseExpiresAt: now + ttlMs, updatedAt: now });
+		const next = transitionRenewTask(this.get("tasks", taskId), agentId, fencingToken, ttlMs, now);
+		if (!next) return false;
+		this.put("tasks", next);
 		return true;
 	}
 
@@ -164,18 +153,9 @@ export class MemoryStore implements Store {
 		update: { result?: string; artifactIds?: string[]; findingId?: string } = {},
 		now = Date.now(),
 	): boolean {
-		const task = this.get("tasks", taskId);
-		if (!task || task.status !== "claimed" || task.leaseOwner !== agentId || task.fencingToken !== fencingToken) return false;
-		this.put("tasks", {
-			...task,
-			status: nextStatus,
-			leaseOwner: nextStatus === "open" ? undefined : agentId,
-			leaseExpiresAt: undefined,
-			result: update.result ?? task.result,
-			artifactIds: update.artifactIds ?? task.artifactIds,
-			findingId: update.findingId ?? task.findingId,
-			updatedAt: now,
-		});
+		const next = transitionReleaseTask(this.get("tasks", taskId), agentId, fencingToken, nextStatus, update, now);
+		if (!next) return false;
+		this.put("tasks", next);
 		return true;
 	}
 

@@ -11,15 +11,31 @@ import type {
 } from "@one-piece/core";
 import type { CallRecord, ModelRouter } from "@one-piece/router";
 import { classifyQuotaError } from "./classify.ts";
+import { extractFailedApproaches, type GenericMessage, maybeCompactSession } from "./compaction.ts";
+
+/** Recursively sort object keys so tool JSON schemas hash byte-identically for KV cache stability. */
+export function canonicalizeValue(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(canonicalizeValue);
+	if (value && typeof value === "object") {
+		const out: Record<string, unknown> = {};
+		for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+			out[key] = canonicalizeValue((value as Record<string, unknown>)[key]);
+		}
+		return out;
+	}
+	return value;
+}
 
 function toPiTools(defs: readonly ToolDefinition[], spec: WorkerSpawnSpec): AgentTool<any>[] {
-	return defs.map((def) => ({
+	const sorted = [...defs].sort((a, b) => a.name.localeCompare(b.name));
+	return sorted.map((def) => ({
 		name: def.name,
 		label: def.name,
 		description: def.description,
-		parameters: def.inputSchema as any,
+		parameters: canonicalizeValue(def.inputSchema) as any,
 		async execute(_toolCallId, params, signal) {
-			spec.onActivity?.({ type: "tool_call", name: def.name });
+			const argsPreview = params !== undefined ? JSON.stringify(params).slice(0, 240) : undefined;
+			spec.onActivity?.({ type: "tool_call", name: def.name, argsPreview });
 			const out = await def.execute((params ?? {}) as Record<string, unknown>, {
 				runId: spec.runId,
 				agentId: spec.agentId,
@@ -27,7 +43,10 @@ function toPiTools(defs: readonly ToolDefinition[], spec: WorkerSpawnSpec): Agen
 				workspace: spec.workspace,
 				signal: signal ?? new AbortController().signal,
 			});
-			spec.onActivity?.({ type: "tool_result", name: def.name, isError: out.isError });
+			spec.onActivity?.({ type: "tool_result", name: def.name, isError: out.isError, outputPreview: out.text.slice(0, 500) });
+			if (out.isError) {
+				throw new Error(out.text);
+			}
 			return {
 				content: [{ type: "text" as const, text: out.text }],
 				details: out.data ?? {},
@@ -77,39 +96,72 @@ export class PiInProcessDriver implements WorkerDriver {
 	}
 
 	async spawn(spec: WorkerSpawnSpec): Promise<WorkerSession> {
-		const picked = this.config.model && this.config.provider
-			? { provider: this.config.provider, id: this.config.model }
+		const requestedModel = spec.model ?? this.config.model;
+		const picked = requestedModel && this.config.provider
+			? { provider: this.config.provider, id: requestedModel }
 			: this.router.pick(spec.role);
 		const model = this.router.resolve(picked);
-		let turnUsage = { inputTokens: 0, cachedTokens: 0, outputTokens: 0, totalTokens: 0, usd: 0 };
+		let turnUsage = { inputTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0, usd: 0 };
+		let lastInputTokens = 0;
+		let compactionCount = 0;
+		let needsHandoff = false;
+		let capturedFailures: string[] = [];
+		const systemPrompt = spec.systemPrompt ?? `You are a ${spec.role} agent in one_piece.`;
+		const contextWindow = Math.max(8_192, Number((model as any)?.contextWindow ?? 128_000));
 
 		const streamFn = this.router.streamFn((record) => {
 			turnUsage.inputTokens += record.input;
 			turnUsage.cachedTokens += record.cacheReadTokens ?? 0;
+			turnUsage.cacheWriteTokens += record.cacheWriteTokens ?? 0;
 			turnUsage.outputTokens += record.output;
+			turnUsage.reasoningTokens += record.reasoningTokens ?? 0;
 			turnUsage.totalTokens += record.totalTokens;
 			turnUsage.usd += record.usd;
+			lastInputTokens = record.input + (record.cacheReadTokens ?? 0);
 			this.onCall?.(spec.agentId, record);
 		});
 
 		const agent = new Agent({
 			initialState: {
-				systemPrompt: spec.systemPrompt ?? `You are a ${spec.role} agent in one_piece.`,
+				systemPrompt,
 				model,
 				tools: toPiTools(spec.tools ?? [], spec),
 				messages: [],
 			},
+			transformContext: async (messages) => {
+				const sysHead = messages[0]?.role === "system" ? [messages[0]] : [];
+				const body = sysHead.length ? messages.slice(1) : messages;
+				const res = maybeCompactSession({
+					messages: body as unknown as GenericMessage[],
+					systemPrompt,
+					contextWindow,
+					lastReportedInputTokens: lastInputTokens,
+					compactionCount,
+					policy: spec.compaction,
+				});
+				if (!res.compacted) return messages;
+				compactionCount = res.compactionCount;
+				if (res.needsHandoff) needsHandoff = true;
+				if (res.failedApproaches.length) capturedFailures = res.failedApproaches;
+				const next = [...sysHead, ...(res.messages as any[])];
+				// Persist compacted messages back to agent state so subsequent turns keep the new prefix stably cached.
+				agent.state.messages = next;
+				lastInputTokens = res.compacted.afterTokens;
+				return next;
+			},
 			streamFn,
-			sessionId: spec.agentId,
+			sessionId: spec.cacheKeyPrefix ?? spec.agentId,
 		});
 
 		const driverId = this.id;
+		const resolvedModel = `${model.provider}/${model.id}`;
 		return {
 			driverId,
 			sessionId: spec.agentId,
 			async runTurn(prompt: string, opts = {}): Promise<WorkerTurnResult> {
 				const startedAt = Date.now();
-				turnUsage = { inputTokens: 0, cachedTokens: 0, outputTokens: 0, totalTokens: 0, usd: 0 };
+				turnUsage = { inputTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0, usd: 0 };
+				needsHandoff = false;
 				const onAbort = () => agent.abort();
 				opts.signal?.addEventListener("abort", onAbort, { once: true });
 				let timer: ReturnType<typeof setTimeout> | undefined;
@@ -122,32 +174,49 @@ export class PiInProcessDriver implements WorkerDriver {
 						: "";
 					const errMsg = agent.state.errorMessage ?? last?.errorMessage;
 					const usage = { ...turnUsage, durationMs: Date.now() - startedAt };
+					const failedApproaches = capturedFailures.length
+						? capturedFailures
+						: extractFailedApproaches(agent.state.messages as unknown as GenericMessage[]);
 					if (opts.signal?.aborted) {
-						return { status: "interrupted", finalText: text, sessionId: spec.agentId, usage };
+						return { status: "interrupted", finalText: text, sessionId: spec.agentId, model: resolvedModel, usage, needsHandoff, failedApproaches };
 					}
 					if (errMsg) {
 						const quota = classifyQuotaError(String(errMsg));
+						if (quota) {
+							return {
+								status: "rate_limited",
+								finalText: text,
+								sessionId: spec.agentId,
+								model: resolvedModel,
+								usage,
+								quotaError: quota,
+								error: String(errMsg),
+								failedApproaches,
+							};
+						}
 						return {
-							status: quota ? "rate_limited" : "failed",
+							status: "failed",
 							finalText: text,
 							sessionId: spec.agentId,
+							model: resolvedModel,
 							usage,
-							quotaError: quota,
 							error: String(errMsg),
+							needsHandoff,
+							failedApproaches,
 						};
 					}
-					return { status: "completed", finalText: text, sessionId: spec.agentId, usage };
+					return { status: "completed", finalText: text, sessionId: spec.agentId, model: resolvedModel, usage, needsHandoff, failedApproaches };
 				} catch (error) {
 					const raw = error instanceof Error ? error.message : String(error);
 					const quota = classifyQuotaError(raw);
-					return {
-						status: quota ? "rate_limited" : opts.signal?.aborted ? "interrupted" : "failed",
-						finalText: "",
-						sessionId: spec.agentId,
-						usage: { ...turnUsage, durationMs: Date.now() - startedAt },
-						quotaError: quota,
-						error: raw,
-					};
+					const usage = { ...turnUsage, durationMs: Date.now() - startedAt };
+					if (quota) {
+						return { status: "rate_limited", finalText: "", sessionId: spec.agentId, model: resolvedModel, usage, quotaError: quota, error: raw };
+					}
+					if (opts.signal?.aborted) {
+						return { status: "interrupted", finalText: "", sessionId: spec.agentId, model: resolvedModel, usage, needsHandoff };
+					}
+					return { status: "failed", finalText: "", sessionId: spec.agentId, model: resolvedModel, usage, error: raw, needsHandoff };
 				} finally {
 					if (timer) clearTimeout(timer);
 					opts.signal?.removeEventListener("abort", onAbort);

@@ -1,10 +1,20 @@
 // Shared v2 vocabulary for one_piece. Zero LLM-SDK or Pi imports live in core.
 
+export type UnionKeys<U> = U extends unknown ? keyof U : never;
+export type Exclusive<U, Keys extends PropertyKey = UnionKeys<U>> =
+	U extends unknown ? U & { readonly [K in Exclude<Keys, keyof U>]?: never } : never;
+
+/** Exhaustiveness helper: fails at compile time if any discriminated union branch is unhandled. */
+export function assertNever(value: never, context = "Unexpected variant"): never {
+	throw new Error(`${context}: ${JSON.stringify(value)}`);
+}
+
 export type Role = "planner" | "worker" | "explorer" | "integrator" | "reviewer" | "leaf" | "root" | (string & {});
 
-export type AgentStatus = "pending" | "running" | "parked" | "done" | "stalled" | "failed" | "stopped";
+export type TerminalAgentStatus = "done" | "stalled" | "failed" | "stopped";
+export type AgentStatus = "pending" | "running" | "parked" | TerminalAgentStatus;
 
-export const TERMINAL_AGENT_STATUSES: readonly AgentStatus[] = ["done", "stalled", "failed", "stopped"];
+export const TERMINAL_AGENT_STATUSES: readonly TerminalAgentStatus[] = ["done", "stalled", "failed", "stopped"];
 
 export type BudgetVector = Record<string, number>;
 
@@ -45,7 +55,7 @@ export interface UsageRecord {
 	durationMs?: number;
 }
 
-export interface Run {
+interface RunFields {
 	id: string;
 	topology: string;
 	goal: Goal;
@@ -53,14 +63,22 @@ export interface Run {
 	spent: BudgetVector;
 	workspace?: string;
 	baseCommitSha?: string;
-	status: "running" | "closing" | "done" | "stopped" | "failed";
-	statusReason?: string;
-	nominatedFindingId?: string;
-	nominatedRevision?: number;
 	config: Record<string, unknown>;
 	createdAt: number;
 	updatedAt: number;
 }
+
+export type RunPhase = Exclusive<
+	| { readonly status: "running" }
+	| { readonly status: "closing"; readonly statusReason?: string }
+	| { readonly status: "done" | "stopped" | "failed"; readonly statusReason: string }
+>;
+
+export type RunNomination =
+	| { readonly nominatedFindingId: string; readonly nominatedRevision: number }
+	| { readonly nominatedFindingId?: never; readonly nominatedRevision?: never };
+
+export type Run = RunFields & RunPhase & RunNomination;
 
 export interface AgentRecord {
 	id: string;
@@ -85,17 +103,14 @@ export interface AgentRecord {
 
 export type TaskStatus = "open" | "claimed" | "done" | "blocked" | "failed" | "cancelled";
 
-export interface TaskRecord {
+interface TaskFields {
 	id: string;
 	runId: string;
 	title: string;
 	description: string;
 	role?: Role;
-	status: TaskStatus;
 	dependsOn: string[];
-	/** Atomic lease ownership with monotonic fencing token (prevents split-brain merges). */
-	leaseOwner?: string;
-	leaseExpiresAt?: number;
+	/** Monotonic fencing token (incremented on every lease acquisition; prevents split-brain merges). */
 	fencingToken: number;
 	result?: string;
 	artifactIds?: string[];
@@ -105,6 +120,15 @@ export interface TaskRecord {
 	createdAt: number;
 	updatedAt: number;
 }
+
+export type TaskPhase = Exclusive<
+	| { readonly status: "open" }
+	| { readonly status: "claimed"; readonly leaseOwner: string; readonly leaseExpiresAt: number }
+	| { readonly status: "done" | "blocked" | "failed" | "cancelled"; readonly completedBy?: string }
+>;
+
+export type TaskRecord = TaskFields & TaskPhase;
+export type ClaimedTaskRecord = Extract<TaskRecord, { status: "claimed" }>;
 
 export interface BoardReference {
 	postId: string;
@@ -137,31 +161,35 @@ export interface ArtifactRecord {
 	createdAt: number;
 }
 
-export interface VerificationReceipt {
+export type VerificationReceipt = {
 	checker: string;
 	version: string;
 	kind: "suite" | "counterexample";
 	durationMs?: number;
-	status: "passed" | "failed" | "error" | "invalid";
 	message: string;
-	counterexample?: string;
-}
+	score?: number;
+} & Exclusive<
+	| { readonly status: "passed" }
+	| { readonly status: "failed"; readonly counterexample?: string }
+	| { readonly status: "error" | "invalid" }
+>;
 
-export interface FindingSubmission {
+export type SnapshotState =
+	| { readonly artifactSha256: string; readonly snapshotDir: string; readonly snapshotNote?: never }
+	| { readonly artifactSha256?: never; readonly snapshotDir?: never; readonly snapshotNote: string };
+
+export type FindingSubmission = {
 	revision: number;
 	claim: string;
 	summary: string;
 	evidence: string[];
 	level: EvidenceLevel;
 	scope?: string;
-	artifactSha256?: string;
-	snapshotDir?: string;
-	snapshotNote?: string;
 	verifier?: { name: string; version: string };
 	score?: number;
 	checks: VerificationReceipt[];
 	at: number;
-}
+} & SnapshotState;
 
 export interface ReviewRound {
 	round: number;
@@ -199,27 +227,30 @@ export interface Finding {
 	updatedAt: number;
 }
 
-export interface Report {
+export type Report = {
 	id: string;
 	runId: string;
 	kind: "final" | "interim" | "handoff";
 	title: string;
 	markdown: string;
-	nominatedFindingId?: string;
-	nominatedRevision?: number;
 	createdAt: number;
-}
+} & RunNomination;
 
-export interface ProviderQuotaRecord {
+interface ProviderQuotaFields {
 	id: string;
 	runId?: string;
 	driverId: string;
-	state: "healthy" | "cooldown" | "drained";
-	cooldownUntil?: number;
-	reason?: string;
 	consecutiveErrors: number;
 	updatedAt: number;
 }
+
+export type ProviderQuotaPhase = Exclusive<
+	| { readonly state: "healthy" }
+	| { readonly state: "cooldown"; readonly cooldownUntil: number; readonly reason: string }
+	| { readonly state: "drained"; readonly reason: string }
+>;
+
+export type ProviderQuotaRecord = ProviderQuotaFields & ProviderQuotaPhase;
 
 // --- Scheduler Job Types (preserved for compatibility with packages/scheduler) ---
 
@@ -287,10 +318,6 @@ type FailureTiming =
 	| { readonly failureStage: "admission" | "gate"; readonly startedAt?: never }
 	| { readonly failureStage: "execution"; readonly startedAt: number }
 	| { readonly failureStage?: "interrupted"; readonly startedAt?: number };
-
-type UnionKeys<U> = U extends unknown ? keyof U : never;
-type Exclusive<U, Keys extends PropertyKey = UnionKeys<U>> =
-	U extends unknown ? U & { readonly [K in Exclude<Keys, keyof U>]?: never } : never;
 
 export type JobPhase = Exclusive<
 	| { readonly status: "queued" }

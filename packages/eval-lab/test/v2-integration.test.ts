@@ -190,12 +190,14 @@ describe("eval-lab <-> one_piece v2 SwarmOS end-to-end integration", () => {
 				expect(c.deliveredPass).toBe(true);
 				expect(c.deliveredScore).toBeGreaterThan(2.627);
 				expect(c.losses.nominationLoss).toBe(0);
+				expect(c.losses.stoppingWasteShare).toBeLessThan(1);
 				expect(c.tokens.total).toBeGreaterThan(0);
 				expect(c.tokens.input).toBeGreaterThan(0);
 				expect(c.tokens.output).toBeGreaterThan(0);
 				expect(c.tokens.cacheRead).toBeGreaterThan(0);
 				expect(c.tokens.reasoning).toBeGreaterThan(0);
 				expect(c.tokens.peakInputPerCall).toBeGreaterThan(0);
+				expect(c.tokens.peakInputPerCall).toBeLessThanOrEqual(c.tokens.total);
 				expect(c.dynamics.peakParallelism).toBeGreaterThanOrEqual(2);
 				expect(c.dynamics.toolCalls).toBeGreaterThan(0);
 				expect(c.dynamics.toolCallsByName.bash).toBeGreaterThan(0);

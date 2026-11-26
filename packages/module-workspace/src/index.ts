@@ -3,6 +3,7 @@ import { constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { cp, lstat, rm } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import {
+	type ArtifactStore,
 	type EventBus,
 	isOperatorArchivePath,
 	runCommand,
@@ -10,7 +11,73 @@ import {
 	type ToolDefinition,
 } from "@one-piece/core";
 
-const SKIP = new Set([".git", "node_modules", ".venv", "__pycache__", "dist", ".one_piece"]);
+const SKIP = new Set([".git", "node_modules", ".venv", "__pycache__", "dist", ".one_piece", ".swarm"]);
+const DEFAULT_MAX_INLINE_BYTES = 4_096;
+
+/**
+ * Tier 0 Boundary Spillover:
+ * Any tool output exceeding `maxBytes` is stored losslessly in `FileArtifactStore` (SHA-256)
+ * and replaced with a compact head+tail excerpt + `artifact_id` pointer for `read_artifact`.
+ */
+export function spillLargeOutput(
+	label: string,
+	text: string,
+	opts: { artifacts?: ArtifactStore; createdBy?: string; maxBytes?: number } = {},
+): { text: string; artifactId?: string } {
+	const limit = Math.max(512, opts.maxBytes ?? DEFAULT_MAX_INLINE_BYTES);
+	const bytes = Buffer.byteLength(text, "utf8");
+	if (bytes <= limit) return { text };
+
+	const headLen = Math.min(Math.floor(limit * 0.42), Math.floor(text.length * 0.42));
+	const tailLen = Math.min(Math.floor(limit * 0.42), Math.floor(text.length * 0.42));
+	const head = text.slice(0, headLen);
+	const tail = tailLen > 0 ? text.slice(-tailLen) : "";
+
+	if (opts.artifacts) {
+		const record = opts.artifacts.put(label, text, { mimeType: "text/plain", createdBy: opts.createdBy });
+		return {
+			artifactId: record.id,
+			text: `${head}\n\n... [truncated ${bytes} bytes total — full output stored as artifact_id=${record.id} (sha=${record.sha256.slice(0, 12)}); call read_artifact(artifact_id="${record.id}", offset=0, limit=4096) to inspect] ...\n\n${tail}`,
+		};
+	}
+	return {
+		text: `${head}\n\n... [truncated ${bytes - headLen - tailLen} of ${bytes} bytes] ...\n\n${tail}`,
+	};
+}
+
+function grepTree(root: string, dir: string, regex: RegExp, maxMatches: number, out: string[]): void {
+	if (out.length >= maxMatches) return;
+	for (const name of readdirSync(dir).sort()) {
+		if (SKIP.has(name)) continue;
+		const full = join(dir, name);
+		if (isOperatorArchivePath(full)) continue;
+		let st;
+		try {
+			st = statSync(full);
+		} catch {
+			continue;
+		}
+		if (st.isDirectory()) {
+			grepTree(root, full, regex, maxMatches, out);
+		} else if (st.isFile() && st.size <= 1024 * 1024) {
+			let raw: string;
+			try {
+				raw = readFileSync(full, "utf8");
+			} catch {
+				continue;
+			}
+			if (raw.includes("\u0000")) continue;
+			const rel = relative(root, full);
+			const lines = raw.split("\n");
+			for (let i = 0; i < lines.length; i++) {
+				if (regex.test(lines[i]!)) {
+					out.push(`${rel}:${i + 1}:${lines[i]!.slice(0, 240)}`);
+					if (out.length >= maxMatches) return;
+				}
+			}
+		}
+	}
+}
 
 function inside(root: string, target: string): string {
 	const full = resolve(root, target);
@@ -74,6 +141,8 @@ async function copyReviewInputs(workspace: string, scratch: string, files: strin
 export interface WorkspaceToolOptions {
 	bus: EventBus;
 	secrets?: SecretBroker;
+	artifacts?: ArtifactStore;
+	maxInlineOutputBytes?: number;
 	readOnly?: boolean;
 	networkOff?: boolean;
 	maxCommandSeconds?: number;
@@ -129,9 +198,58 @@ export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
 				if (!ctx.workspace) return { text: "No workspace attached", isError: true };
 				const base = ctx.workspace;
 				const target = inside(base, typeof args.path === "string" ? args.path : ".");
+				if (!existsSync(target)) return { text: `Path not found: ${typeof args.path === "string" ? args.path : "."}`, isError: true };
+				if (!statSync(target).isDirectory()) return { text: `Not a directory: ${typeof args.path === "string" ? args.path : "."}`, isError: true };
 				const out: string[] = [];
 				listTree(base, target, typeof args.depth === "number" ? Math.floor(args.depth) : 2, out);
 				return { text: out.join("\n") || "(empty)" };
+			},
+		},
+		{
+			name: "grep_files",
+			description: "Search text files in your workspace for a regex pattern (returns file:line:text, bounded).",
+			inputSchema: {
+				type: "object",
+				properties: {
+					pattern: { type: "string", description: "Regular expression or literal substring" },
+					path: { type: "string", description: "Optional subdirectory or file path" },
+					case_insensitive: { type: "boolean" },
+					max_matches: { type: "number", minimum: 1, maximum: 200 },
+				},
+				required: ["pattern"],
+			},
+			execute(args, ctx) {
+				if (!ctx.workspace) return { text: "No workspace attached", isError: true };
+				const pattern = String(args.pattern ?? "");
+				if (!pattern) return { text: "pattern is required", isError: true };
+				let regex: RegExp;
+				try {
+					regex = new RegExp(pattern, args.case_insensitive ? "i" : "");
+				} catch (error) {
+					return { text: `Invalid regex "${pattern}": ${error instanceof Error ? error.message : String(error)}`, isError: true };
+				}
+				const target = inside(ctx.workspace, typeof args.path === "string" ? args.path : ".");
+				if (!existsSync(target)) return { text: `Path not found: ${typeof args.path === "string" ? args.path : "."}`, isError: true };
+				const maxMatches = Math.min(200, Math.max(1, typeof args.max_matches === "number" ? Math.floor(args.max_matches) : 60));
+				const matches: string[] = [];
+				const st = statSync(target);
+				if (st.isFile()) {
+					const rel = relative(ctx.workspace, target);
+					const lines = readFileSync(target, "utf8").split("\n");
+					for (let i = 0; i < lines.length && matches.length < maxMatches; i++) {
+						if (regex.test(lines[i]!)) matches.push(`${rel}:${i + 1}:${lines[i]!.slice(0, 240)}`);
+					}
+				} else {
+					grepTree(ctx.workspace, target, regex, maxMatches, matches);
+				}
+				if (!matches.length) return { text: "(no matches)" };
+				const raw = matches.join("\n") + (matches.length >= maxMatches ? `\n[capped at ${maxMatches} matches]` : "");
+				const spilled = spillLargeOutput("grep_files", raw, {
+					artifacts: opts.artifacts,
+					createdBy: ctx.agentId,
+					maxBytes: opts.maxInlineOutputBytes,
+				});
+				return { text: spilled.text, data: spilled.artifactId ? { artifactId: spilled.artifactId } : undefined };
 			},
 		},
 	];
@@ -167,10 +285,15 @@ export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
 							timeoutMs,
 							signal: ctx.signal,
 						});
-						const text = opts.bus.redactor.redactText(
+						const cleanText = opts.bus.redactor.redactText(
 							`exit ${result.exitCode}${result.timedOut ? " (timed out)" : ""}\n${result.stdout}${result.stderr ? `\n[stderr]\n${result.stderr}` : ""}`.trim(),
 						);
-						return { text, isError: result.exitCode !== 0 || result.timedOut };
+						const spilled = spillLargeOutput("run_check", cleanText, {
+							artifacts: opts.artifacts,
+							createdBy: ctx.agentId,
+							maxBytes: opts.maxInlineOutputBytes,
+						});
+						return { text: spilled.text, isError: result.exitCode !== 0 || result.timedOut, data: spilled.artifactId ? { artifactId: spilled.artifactId } : undefined };
 					} finally {
 						await rm(scratch, { recursive: true, force: true });
 					}
@@ -272,10 +395,15 @@ export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
 					{ command: command.slice(0, 500), exitCode: result.exitCode, durationMs: result.durationMs, sandboxed: result.sandboxed },
 					ctx.agentId,
 				);
-				const text = opts.bus.redactor.redactText(
+				const cleanText = opts.bus.redactor.redactText(
 					`exit ${result.exitCode}${result.timedOut ? " (timed out)" : ""}\n${result.stdout}${result.stderr ? `\n[stderr]\n${result.stderr}` : ""}`.trim(),
 				);
-				return { text, isError: result.exitCode !== 0 || result.timedOut };
+				const spilled = spillLargeOutput("bash", cleanText, {
+					artifacts: opts.artifacts,
+					createdBy: ctx.agentId,
+					maxBytes: opts.maxInlineOutputBytes,
+				});
+				return { text: spilled.text, isError: result.exitCode !== 0 || result.timedOut, data: spilled.artifactId ? { artifactId: spilled.artifactId } : undefined };
 			},
 		},
 	];

@@ -360,7 +360,10 @@ export class Router implements ModelRouter {
 				toolMenu = { names: declarations.map(({ name }) => name),
 					declarationSha: createHash("sha256").update(JSON.stringify(declarations)).digest("hex") };
 				if (this.sim && model.provider === "sim" && this.simPolicy) this.sim.appendResponses([this.simPolicy]);
-				stream = this.models.streamSimple(model, context, options);
+				stream = this.models.streamSimple(model, context, {
+					...options,
+					cacheRetention: options?.cacheRetention ?? "long",
+				});
 			} catch (error) {
 				release();
 				throw error;

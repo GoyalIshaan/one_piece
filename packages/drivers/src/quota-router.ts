@@ -8,10 +8,9 @@ import {
 	type QuotaErrorClass,
 	type QuotaPoolRouter,
 	type Role,
+	transitionQuotaRecord,
 	type WorkerDriver,
 } from "@one-piece/core";
-
-const DEFAULT_COOLDOWN_MS = 15 * 60_000;
 
 export interface QuotaRouterOptions {
 	drivers: Array<{ driver: WorkerDriver; config: DriverConfig }>;
@@ -84,18 +83,12 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 	private isHealthy(driverId: string): boolean {
 		const record = this.states.get(driverId);
 		if (!record) return false;
-		if (record.state === "drained") return false;
-		if (record.state === "cooldown") {
-			if ((record.cooldownUntil ?? 0) <= this.now()) {
-				record.state = "healthy";
-				record.cooldownUntil = undefined;
-				record.updatedAt = this.now();
-				this.persistState(record);
-				return true;
-			}
-			return false;
+		const { next, changed } = transitionQuotaRecord(record, { type: "tick", now: this.now() });
+		if (changed) {
+			this.states.set(driverId, next);
+			this.persistState(next);
 		}
-		return true;
+		return next.state === "healthy";
 	}
 
 	async acquireForRole(
@@ -139,25 +132,15 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 	reportQuotaError(driverId: string, error: QuotaErrorClass): void {
 		const record = this.states.get(driverId);
 		if (!record) return;
-		const ts = this.now();
-		record.consecutiveErrors += 1;
-		record.updatedAt = ts;
-
-		if (error.kind === "hard_auth_or_cap") {
-			record.state = "drained";
-			record.reason = error.reason;
-			record.cooldownUntil = undefined;
-			this.persistState(record);
-			if (this.bus && this.runId) {
-				this.bus.emit(this.runId, "quota.drained", { driverId, reason: error.reason });
-			}
-		} else if (error.kind === "window_exhausted") {
-			record.state = "cooldown";
-			record.cooldownUntil = error.resetAtMs ?? ts + DEFAULT_COOLDOWN_MS;
-			record.reason = error.raw.slice(0, 240);
-			this.persistState(record);
-			if (this.bus && this.runId) {
-				this.bus.emit(this.runId, "quota.cooldown", { driverId, until: record.cooldownUntil, reason: record.reason });
+		const { next, changed, emitted } = transitionQuotaRecord(record, { type: "quota_error", error, now: this.now() });
+		if (!changed) return;
+		this.states.set(driverId, next);
+		this.persistState(next);
+		if (this.bus && this.runId) {
+			if (emitted === "drained" && next.state === "drained") {
+				this.bus.emit(this.runId, "quota.drained", { driverId, reason: next.reason });
+			} else if (emitted === "cooldown" && next.state === "cooldown") {
+				this.bus.emit(this.runId, "quota.cooldown", { driverId, until: next.cooldownUntil, reason: next.reason });
 			}
 		}
 	}
@@ -165,14 +148,10 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 	reportSuccess(driverId: string): void {
 		const record = this.states.get(driverId);
 		if (!record) return;
-		if (record.state !== "healthy" || record.consecutiveErrors > 0) {
-			record.state = "healthy";
-			record.cooldownUntil = undefined;
-			record.reason = undefined;
-			record.consecutiveErrors = 0;
-			record.updatedAt = this.now();
-			this.persistState(record);
-		}
+		const { next, changed } = transitionQuotaRecord(record, { type: "success", now: this.now() });
+		if (!changed) return;
+		this.states.set(driverId, next);
+		this.persistState(next);
 	}
 
 	status() {

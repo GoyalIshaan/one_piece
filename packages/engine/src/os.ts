@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import {
 	type AgentRecord,
+	assertNever,
 	type BoardService,
 	type BudgetVector,
 	EventBus,
@@ -21,9 +22,12 @@ import {
 	type Store,
 	type SwarmOsApi,
 	type TaskRecord,
+	type TerminalAgentStatus,
 	type ToolDefinition,
+	type ToolScope,
 	type TopologyOutcome,
 	type TopologyPlugin,
+	transitionRun,
 	type UsageRecord,
 	type WorkerActivityEvent,
 	type WorkerHandle,
@@ -31,12 +35,14 @@ import {
 	type WorkerTurnResult,
 } from "@one-piece/core";
 import { synthesizeHandoffFile } from "@one-piece/drivers";
-import { McpBusServer } from "@one-piece/mcp-bus";
+import { createFrozenDispatcherTool, materializeToolSchemas, McpBusServer } from "@one-piece/mcp-bus";
 import { boardTools, SwarmBoardService } from "@one-piece/module-board";
 import { LocalSecretBroker, type SecretSpec } from "@one-piece/module-secrets";
 import { workspaceTools } from "@one-piece/module-workspace";
 import { type PoolConfig, Scheduler, schedulerTools } from "@one-piece/scheduler";
 import { CloseoutController } from "./closeout.ts";
+import { createCodeModeTool } from "./codemode.ts";
+import { FileSkillRegistry, loadSkillTool } from "./skills.ts";
 import { TriggerEngine } from "./triggers.ts";
 import { TrustLayer } from "./trust.ts";
 
@@ -55,6 +61,10 @@ export interface SwarmOsConfig {
 	enableBlindReview?: boolean;
 	maxRepeatedTurns?: number;
 	networkOffWorkers?: boolean;
+	/** Additional directories to scan for curated SKILL.md folders. */
+	skillsDirs?: string[];
+	/** Automatically roll over bloated in-process sessions via .swarm/HANDOFF.md after 2 compactions (default true). */
+	autoHandoffOnSecondCompaction?: boolean;
 	rawConfig?: Record<string, unknown>;
 	store: Store;
 	router: QuotaPoolRouter;
@@ -81,12 +91,14 @@ export class SwarmOS implements SwarmOsApi {
 	readonly trust: TrustLayer;
 	readonly router: QuotaPoolRouter;
 	readonly mcp: McpBusServer;
+	readonly skills: FileSkillRegistry;
 
 	private currentRun: Run;
 	private readonly reservePct: number;
 	private readonly wallSeconds?: number;
 	private readonly startedAt: number;
 	private readonly networkOffWorkers: boolean;
+	private readonly autoHandoffOnSecondCompaction: boolean;
 	private readonly triggers: TriggerEngine;
 	private readonly closeout: CloseoutController;
 	private readonly activeHandles = new Map<string, { handle: WorkerHandle; abort: AbortController; workspace: string }>();
@@ -111,11 +123,13 @@ export class SwarmOS implements SwarmOsApi {
 		this.wallSeconds = cfg.wallSeconds;
 		this.startedAt = Date.now();
 		this.networkOffWorkers = cfg.networkOffWorkers ?? false;
+		this.autoHandoffOnSecondCompaction = cfg.autoHandoffOnSecondCompaction ?? true;
 
 		this.worktrees = new GitWorktreeManager(cfg.workspace, this.runDir, this.runId);
 		this.artifacts = new FileArtifactStore(this.runId, this.runDir, this.bus);
 		this.board = new SwarmBoardService(this.bus);
 		this.secrets = new LocalSecretBroker(this.runId, this.bus, { secrets: cfg.secrets ?? [] });
+		this.skills = new FileSkillRegistry({ projectDir: cfg.workspace, extraDirs: cfg.skillsDirs });
 
 		const now = Date.now();
 		this.currentRun = {
@@ -132,7 +146,6 @@ export class SwarmOS implements SwarmOsApi {
 			updatedAt: now,
 		};
 		this.bus.save("runs", this.currentRun);
-		this.router.attachBus?.(this.bus, this.runId);
 
 		this.scheduler = new Scheduler(
 			{
@@ -177,9 +190,10 @@ export class SwarmOS implements SwarmOsApi {
 					void active.handle.interrupt?.().catch(() => {});
 				}
 			},
-			onReserveEntered: () => {
-				if (this.currentRun.status === "running") {
-					this.currentRun = { ...this.currentRun, status: "closing", updatedAt: Date.now() };
+			onReserveEntered: (reason) => {
+				const { next, changed } = transitionRun(this.currentRun, { type: "enter_closing", reason, now: Date.now() });
+				if (changed) {
+					this.currentRun = next;
 					this.bus.save("runs", this.currentRun);
 				}
 			},
@@ -188,8 +202,9 @@ export class SwarmOS implements SwarmOsApi {
 		if (this.wallSeconds && this.wallSeconds > 0) {
 			const ms = Math.max(1_000, Math.floor(this.wallSeconds * (1 - this.reservePct) * 1000));
 			this.wallReserveTimer = setTimeout(() => {
-				if (this.currentRun.status === "running") {
-					this.currentRun = { ...this.currentRun, status: "closing", updatedAt: Date.now() };
+				const { next, changed } = transitionRun(this.currentRun, { type: "enter_closing", reason: "Wall-clock reserve reached", now: Date.now() });
+				if (changed) {
+					this.currentRun = next;
 					this.bus.save("runs", this.currentRun);
 					this.bus.emit(this.runId, "run.closing", { reason: "Wall-clock reserve reached", reservePct: this.reservePct });
 				}
@@ -266,7 +281,7 @@ export class SwarmOS implements SwarmOsApi {
 		const now = Date.now();
 		return tasks
 			.filter((t) => {
-				const openOrExpired = t.status === "open" || (t.status === "claimed" && (t.leaseExpiresAt ?? 0) <= now);
+				const openOrExpired = t.status === "open" || (t.status === "claimed" && t.leaseExpiresAt <= now);
 				return openOrExpired && t.dependsOn.every((dep) => doneIds.has(dep));
 			})
 			.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.createdAt - b.createdAt);
@@ -277,12 +292,8 @@ export class SwarmOS implements SwarmOsApi {
 		if (!finding || finding.runId !== this.runId) throw new Error(`Finding ${findingId} not found in run ${this.runId}`);
 		const rev = revision ?? finding.submissions.at(-1)?.revision ?? 1;
 		const sub = finding.submissions.find((s) => s.revision === rev);
-		this.currentRun = {
-			...this.currentRun,
-			nominatedFindingId: findingId,
-			nominatedRevision: rev,
-			updatedAt: Date.now(),
-		};
+		const { next } = transitionRun(this.currentRun, { type: "nominate", findingId, revision: rev, now: Date.now() });
+		this.currentRun = next;
 		this.bus.save("runs", this.currentRun);
 		this.bus.emit(this.runId, "run.nominated", {
 			findingId,
@@ -292,10 +303,22 @@ export class SwarmOS implements SwarmOsApi {
 		});
 	}
 
-	defaultToolsFor(role: Role, opts: { canSpawn?: boolean; readOnly?: boolean; includeWorkspaceTools?: boolean } = {}): ToolDefinition[] {
-		const tools: ToolDefinition[] = [
-			...boardTools(this.board),
-			{
+	private hasNonDefaultComputePools(): boolean {
+		const pools = this.scheduler.pools();
+		return pools.length > 1 || pools.some((p) => p.name !== "cpu" || p.unit !== "cpu_seconds");
+	}
+
+	defaultToolsFor(role: Role, opts: ToolScope = {}): ToolDefinition[] {
+		const tools: ToolDefinition[] = [];
+		const boardMode = opts.board ?? "read-write";
+		if (boardMode === "read-write") {
+			tools.push(...boardTools(this.board));
+		} else if (boardMode === "read") {
+			tools.push(...boardTools(this.board).filter((t) => t.name === "board_search" || t.name === "board_visit"));
+		}
+
+		if (opts.artifacts !== false) {
+			tools.push({
 				name: "read_artifact",
 				description: "Read a byte range from a stored artifact by ID or SHA-256.",
 				inputSchema: {
@@ -317,68 +340,77 @@ export class SwarmOS implements SwarmOsApi {
 						text: `[${page.artifactId} bytes ${page.offset}-${page.nextOffset}/${page.totalBytes}${page.eof ? " EOF" : ""}]\n${page.content}`,
 					};
 				},
-			},
-			...schedulerTools(this.scheduler),
-		];
+			});
+		}
+
+		const schedulerMode = opts.scheduler ?? "auto";
+		if (schedulerMode === "always" || (schedulerMode === "auto" && this.hasNonDefaultComputePools())) {
+			tools.push(...schedulerTools(this.scheduler, { artifacts: this.artifacts }));
+		}
 
 		if (!opts.readOnly) {
-			tools.push(
-				{
-					name: "claim_task",
-					description: "Atomically lease the next ready task from the shared task queue.",
-					inputSchema: {
-						type: "object",
-						properties: { task_id: { type: "string", description: "Optional specific task ID" } },
-					},
-					execute: (args, ctx) => {
-						const ready = this.readyTasks();
-						const target = typeof args.task_id === "string"
-							? ready.find((t) => t.id === args.task_id)
-							: ready[0];
-						if (!target) return { text: "(no ready tasks available)" };
-						const claim = this.store.claimTaskLease(this.runId, target.id, ctx.agentId, DEFAULT_LEASE_MS);
-						if (!claim.claimed || !claim.task) return { text: claim.reason ?? "Could not claim task", isError: true };
-						this.bus.emit(
-							this.runId,
-							"task.claimed",
-							{ taskId: claim.task.id, agentId: ctx.agentId, fencingToken: claim.task.fencingToken, leaseExpiresAt: claim.task.leaseExpiresAt! },
-							ctx.agentId,
-						);
-						return {
-							text: `Claimed ${claim.task.id} (token=${claim.task.fencingToken}): ${claim.task.title}\n${claim.task.description}`,
-							data: { taskId: claim.task.id, fencingToken: claim.task.fencingToken },
-						};
-					},
-				},
-				{
-					name: "complete_task",
-					description: "Release a leased task as done or blocked with a concise summary.",
-					inputSchema: {
-						type: "object",
-						properties: {
-							task_id: { type: "string" },
-							fencing_token: { type: "number" },
-							status: { type: "string", enum: ["done", "blocked"] },
-							result: { type: "string" },
-							finding_id: { type: "string" },
+			if (opts.tasks !== false) {
+				tools.push(
+					{
+						name: "claim_task",
+						description: "Atomically lease the next ready task from the shared task queue.",
+						inputSchema: {
+							type: "object",
+							properties: { task_id: { type: "string", description: "Optional specific task ID" } },
 						},
-						required: ["task_id", "fencing_token", "status", "result"],
+						execute: (args, ctx) => {
+							const ready = this.readyTasks();
+							const target = typeof args.task_id === "string"
+								? ready.find((t) => t.id === args.task_id)
+								: ready[0];
+							if (!target) return { text: "(no ready tasks available)" };
+							const claim = this.store.claimTaskLease(this.runId, target.id, ctx.agentId, DEFAULT_LEASE_MS);
+							if (!claim.claimed) return { text: claim.reason, isError: true };
+							this.bus.emit(
+								this.runId,
+								"task.claimed",
+								{ taskId: claim.task.id, agentId: ctx.agentId, fencingToken: claim.task.fencingToken, leaseExpiresAt: claim.task.leaseExpiresAt },
+								ctx.agentId,
+							);
+							return {
+								text: `Claimed ${claim.task.id} (token=${claim.task.fencingToken}): ${claim.task.title}\n${claim.task.description}`,
+								data: { taskId: claim.task.id, fencingToken: claim.task.fencingToken },
+							};
+						},
 					},
-					execute: (args, ctx) => {
-						const taskId = String(args.task_id ?? "");
-						const token = Number(args.fencing_token);
-						const status = args.status === "blocked" ? "blocked" : "done";
-						const result = String(args.result ?? "");
-						const ok = this.store.releaseTaskLease(taskId, ctx.agentId, token, status, {
-							result,
-							findingId: typeof args.finding_id === "string" ? args.finding_id : undefined,
-						});
-						if (!ok) return { text: `Stale or invalid lease for task ${taskId} (token=${token})`, isError: true };
-						this.bus.emit(this.runId, "task.status", { taskId, status, result }, ctx.agentId);
-						return { text: `Marked ${taskId} ${status}.` };
+					{
+						name: "complete_task",
+						description: "Release a leased task as done or blocked with a concise summary.",
+						inputSchema: {
+							type: "object",
+							properties: {
+								task_id: { type: "string" },
+								fencing_token: { type: "number" },
+								status: { type: "string", enum: ["done", "blocked"] },
+								result: { type: "string" },
+								finding_id: { type: "string" },
+							},
+							required: ["task_id", "fencing_token", "status", "result"],
+						},
+						execute: (args, ctx) => {
+							const taskId = String(args.task_id ?? "");
+							const token = Number(args.fencing_token);
+							const status = args.status === "blocked" ? "blocked" : "done";
+							const result = String(args.result ?? "");
+							const ok = this.store.releaseTaskLease(taskId, ctx.agentId, token, status, {
+								result,
+								findingId: typeof args.finding_id === "string" ? args.finding_id : undefined,
+							});
+							if (!ok) return { text: `Stale or invalid lease for task ${taskId} (token=${token})`, isError: true };
+							this.bus.emit(this.runId, "task.status", { taskId, status, result }, ctx.agentId);
+							return { text: `Marked ${taskId} ${status}.` };
+						},
 					},
-				},
-				{
+				);
+			}
+
+			if (opts.findings !== false) {
+				tools.push({
 					name: "report_finding",
 					description: "Freeze a SHA-256 snapshot of your workspace and submit a verified finding.",
 					inputSchema: {
@@ -421,8 +453,11 @@ export class SwarmOS implements SwarmOsApi {
 							data: { findingId: finding.id, status: finding.status, revision: sub?.revision },
 						};
 					},
-				},
-				{
+				});
+			}
+
+			if (opts.nominate !== false) {
+				tools.push({
 					name: "nominate",
 					description: "Nominate an accepted finding ID as the final run deliverable.",
 					inputSchema: {
@@ -437,8 +472,8 @@ export class SwarmOS implements SwarmOsApi {
 						this.nominate(String(args.finding_id ?? ""), typeof args.revision === "number" ? args.revision : undefined, false);
 						return { text: `Nominated ${String(args.finding_id)} as final deliverable.` };
 					},
-				},
-			);
+				});
+			}
 		}
 
 		// Async non-blocking spawn is ONLY exposed when explicitly opted in by the topology plugin.
@@ -467,19 +502,40 @@ export class SwarmOS implements SwarmOsApi {
 			});
 		}
 
+		if (opts.skills !== false && this.skills.renderOnDemandCatalog(role, opts.excludeSkills).length > 0) {
+			tools.push(loadSkillTool(this.skills, this.bus));
+		}
+
+		if (opts.codeMode) {
+			tools.push(
+				createCodeModeTool({
+					runId: this.runId,
+					runDir: this.runDir,
+					bus: this.bus,
+					store: this.store,
+					artifacts: this.artifacts,
+					worktrees: this.worktrees,
+				}),
+			);
+		}
+
+		if (opts.extendedTools?.length) {
+			tools.push(createFrozenDispatcherTool(opts.extendedTools));
+		}
+
 		if (opts.includeWorkspaceTools) {
 			tools.push(
 				...workspaceTools({
 					bus: this.bus,
 					secrets: this.secrets,
+					artifacts: this.artifacts,
 					readOnly: opts.readOnly,
 					networkOff: this.networkOffWorkers,
 				}),
 			);
 		}
 
-		void role;
-		return tools;
+		return tools.sort((a, b) => a.name.localeCompare(b.name));
 	}
 
 	async spawnWorker(req: SpawnWorkerRequest): Promise<WorkerHandle> {
@@ -499,10 +555,42 @@ export class SwarmOS implements SwarmOsApi {
 		const buildTools = (driverKind: string) =>
 			req.tools ??
 			this.defaultToolsFor(req.role, {
-				canSpawn: req.canSpawn === true,
-				readOnly: req.readOnly === true,
-				includeWorkspaceTools: driverKind === "pi-in-process",
+				...(req.toolScope ?? {}),
+				canSpawn: req.canSpawn ?? req.toolScope?.canSpawn ?? false,
+				readOnly: req.readOnly ?? req.toolScope?.readOnly ?? false,
+				excludeSkills: req.skills,
+				includeWorkspaceTools: req.toolScope?.includeWorkspaceTools ?? driverKind === "pi-in-process",
 			});
+
+		if (req.toolScope?.extendedTools?.length) {
+			materializeToolSchemas(workspace, req.toolScope.extendedTools);
+		}
+
+		const staticSkills = this.skills.staticPromptFor(req.role, req.skills);
+		const onDemandCatalog = req.toolScope?.skills !== false
+			? this.skills.renderOnDemandCatalog(req.role, req.skills)
+			: "";
+		const extendedToolsHint = req.toolScope?.extendedTools?.length
+			? "Extended tools are cataloged in `.swarm/tools/INDEX.md`; read `.swarm/tools/<name>.json` and invoke via `call_tool(name, arguments)`."
+			: "";
+		const composedSystemPrompt = [req.systemPrompt, staticSkills, onDemandCatalog, extendedToolsHint]
+			.filter((s): s is string => Boolean(s && s.trim()))
+			.join("\n\n") || undefined;
+
+		const cacheKeyPrefix = req.cacheKeyPrefix ?? `${this.runId}:${req.role}`;
+		const compactionPolicy = {
+			watermarkFraction: 0.70,
+			keepRecentTurns: 6,
+			minPruneBytes: 1024,
+			maxCompactionsBeforeHandoff: 2,
+			spillArtifact: (label: string, content: string) => {
+				const rec = this.artifacts.put(label, content, { mimeType: "text/plain", createdBy: agentId });
+				return { id: rec.id, sha256: rec.sha256 };
+			},
+			onCompacted: (ev: { strategy: "micro" | "anchor"; beforeTokens: number; afterTokens: number; prunedCount: number; compactionCount: number }) => {
+				this.bus.emit(this.runId, "agent.compacted", { agentId, ...ev }, agentId);
+			},
+		};
 
 		let tools = buildTools(selection.driver.kind);
 		let mcpReg = this.mcp.registerWorker({
@@ -624,10 +712,12 @@ export class SwarmOS implements SwarmOsApi {
 				agentId,
 				role: req.role,
 				workspace,
-				systemPrompt: req.systemPrompt,
+				systemPrompt: composedSystemPrompt,
 				model: req.model,
 				maxTurns: req.maxTurns,
 				readOnly: req.readOnly,
+				cacheKeyPrefix,
+				compaction: compactionPolicy,
 				mcp: mcpReg.connection,
 				tools,
 				onActivity: handleActivity,
@@ -640,9 +730,29 @@ export class SwarmOS implements SwarmOsApi {
 		}
 
 		const abort = new AbortController();
-		let closed = false;
-		let lastTurnStatus: WorkerTurnResult["status"] | undefined;
-		let lastTurnError: string | undefined;
+		type LastTurnOutcome = { readonly status: WorkerTurnResult["status"]; readonly error?: string };
+		type PendingRollover = { readonly reason: string; readonly failedApproaches?: string[] };
+		type WorkerHandleState =
+			| {
+				readonly kind: "idle";
+				readonly lastOutcome?: LastTurnOutcome;
+				readonly pendingRollover?: PendingRollover;
+			}
+			| {
+				readonly kind: "running_turn";
+				readonly lastOutcome?: LastTurnOutcome;
+			}
+			| {
+				readonly kind: "closed";
+				readonly finalStatus: TerminalAgentStatus;
+				readonly reason?: string;
+			};
+		let handleState: WorkerHandleState = { kind: "idle" };
+		const transitionToIdle = (lastOutcome: LastTurnOutcome, pendingRollover?: PendingRollover): void => {
+			if (handleState.kind !== "closed") {
+				handleState = { kind: "idle", lastOutcome, pendingRollover };
+			}
+		};
 		const attemptedDrivers = new Set<string>([selection.driver.id]);
 		let pendingPermitWaitMs = selection.waitedMs ?? 0;
 
@@ -660,209 +770,314 @@ export class SwarmOS implements SwarmOsApi {
 				return selection;
 			},
 			runTurn: async (prompt: string, opts: { signal?: AbortSignal; outputSchema?: JsonSchema; timeoutMs?: number } = {}): Promise<WorkerTurnResult> => {
+				if (handleState.kind === "closed") {
+					throw new Error(`Worker ${agentId} is already closed (${handleState.finalStatus})`);
+				}
+				if (handleState.kind === "running_turn") {
+					throw new Error(`Worker ${agentId} already has an active turn in flight`);
+				}
+				const rollover = handleState.pendingRollover;
+				const prevOutcome = handleState.lastOutcome;
+				handleState = { kind: "running_turn", lastOutcome: prevOutcome };
 				let currentPrompt = prompt;
 				let rpmRetries = 0;
 
-				for (;;) {
-					const combinedSignal = opts.signal
-						? AbortSignal.any([this.runAbort.signal, abort.signal, opts.signal])
-						: AbortSignal.any([this.runAbort.signal, abort.signal]);
-
-					lastToolSig = "";
-					turnToolLog = [];
-					const turnWaitedMs = pendingPermitWaitMs;
-					pendingPermitWaitMs = 0;
-
-					const res = await session.runTurn(currentPrompt, { ...opts, signal: combinedSignal });
-					const latest = this.store.get("agents", agentId) ?? agent;
-					agent = {
-						...latest,
-						turns: latest.turns + 1,
-						sessionId: res.sessionId ?? latest.sessionId,
-						model: res.model ?? latest.model,
-						updatedAt: Date.now(),
-					};
-					this.bus.save("agents", agent, agentId);
-
-					let turnTokens: number | undefined;
-					if (res.usage) {
-						const computed = res.usage.totalTokens ?? ((res.usage.inputTokens ?? 0) + (res.usage.outputTokens ?? 0));
-						turnTokens = computed || undefined;
-						this.chargeBudget(agentId, selection.driver.id, turnTokens, res.usage.usd, undefined, res.usage, agent.model);
-					}
-					const diffSha = this.worktrees.diffSha(workspace);
-					const cleanError = res.error ? this.bus.redactor.redactText(res.error) : undefined;
-					const transcriptEntry = {
-						ts: Date.now(),
-						turn: agent.turns,
-						driverId: selection.driver.id,
-						model: agent.model,
-						sessionId: agent.sessionId,
-						status: res.status,
-						durationMs: res.usage?.durationMs,
-						waitedMs: turnWaitedMs || undefined,
-						diffSha,
-						usage: res.usage,
-						prompt: this.bus.redactor.redactText(currentPrompt),
-						finalText: this.bus.redactor.redactText(res.finalText ?? ""),
-						error: cleanError,
-						quotaError: res.quotaError ? { ...res.quotaError, raw: this.bus.redactor.redactText(res.quotaError.raw) } : undefined,
-						tools: turnToolLog,
-					};
-					try {
-						appendFileSync(transcriptAbs, `${JSON.stringify(transcriptEntry)}\n`, "utf8");
-					} catch {
-						// Best-effort durable transcript write; never crash worker turn.
-					}
-
-					this.bus.emit(
-						this.runId,
-						"agent.turn",
-						{
-							turn: agent.turns,
-							driverId: selection.driver.id,
-							model: agent.model,
-							status: res.status,
-							toolSig: lastToolSig || undefined,
-							diffSha,
-							durationMs: res.usage?.durationMs,
-							waitedMs: turnWaitedMs || undefined,
-							inputTokens: res.usage?.inputTokens,
-							outputTokens: res.usage?.outputTokens,
-							cachedTokens: res.usage?.cachedTokens,
-							cacheWriteTokens: res.usage?.cacheWriteTokens,
-							reasoningTokens: res.usage?.reasoningTokens,
-							totalTokens: turnTokens,
-							usd: res.usage?.usd,
-							error: cleanError?.slice(0, 600),
-							quotaErrorKind: res.quotaError?.kind,
-							promptBytes: Buffer.byteLength(currentPrompt),
-							finalTextBytes: Buffer.byteLength(res.finalText ?? ""),
-							transcriptFile: transcriptRel,
-						},
-						agentId,
-					);
-
-					if (res.status !== "rate_limited" || !res.quotaError) {
-						lastTurnStatus = res.status;
-						lastTurnError = res.error;
-						if (res.status === "completed") this.router.reportSuccess(selection.driver.id);
-						return res;
-					}
-
-					// Class 1: Transient RPM / 429 / 529 -> jittered backoff on same worker
-					if (res.quotaError.kind === "transient_rpm" && rpmRetries < 3) {
-						rpmRetries += 1;
-						const waitMs = res.quotaError.retryAfterMs ?? Math.min(30_000, 1_500 * 2 ** (rpmRetries - 1) + Math.floor(Math.random() * 500));
+				try {
+					// Tier 2 Clean-Slate Handoff rollover before starting a new turn on a heavily compacted session.
+					if (rollover && this.autoHandoffOnSecondCompaction) {
+						const handoff = synthesizeHandoffFile({
+							runId: this.runId,
+							agentId,
+							fromDriver: selection.driver.id,
+							reason: rollover.reason,
+							reasonKind: "compaction_limit",
+							originalPrompt: prompt,
+							workspace,
+							worktrees: this.worktrees,
+							store: this.store,
+							failedApproaches: rollover.failedApproaches,
+						});
+						await session.close().catch(() => {});
 						this.bus.emit(
 							this.runId,
-							"quota.retry",
+							"agent.handoff",
 							{
-								driverId: selection.driver.id,
-								attempt: rpmRetries,
-								waitMs,
-								reason: this.bus.redactor.redactText(res.error ?? res.quotaError.raw).slice(0, 240),
+								agentId,
+								fromDriver: selection.driver.id,
+								toDriver: selection.driver.id,
+								workspace,
+								handoffPath: handoff.handoffPath,
+								reasonKind: "compaction_limit",
 							},
 							agentId,
 						);
-						await delay(waitMs, undefined, { signal: combinedSignal });
-						continue;
-					}
-
-					// Class 2 (window exhausted) or Class 3 (hard auth/weekly cap): mark driver + failover worktree!
-					const failedDriver = selection.driver.id;
-					this.router.reportQuotaError(failedDriver, res.quotaError);
-
-					// Attempt seamless cross-provider failover onto another healthy driver in the role's pool.
-					let nextSelection;
-					try {
-						nextSelection = await this.router.acquireForRole(req.role, {
-							avoidDrivers: [...attemptedDrivers, ...(req.avoidDrivers ?? [])],
-							signal: combinedSignal,
-						});
-					} catch {
-						lastTurnStatus = res.status;
-						lastTurnError = res.error;
-						return res; // No alternate healthy driver left.
-					}
-
-					// If router only had the same driver available, stop instead of looping.
-					if (attemptedDrivers.has(nextSelection.driver.id)) {
-						nextSelection.release();
-						lastTurnStatus = res.status;
-						lastTurnError = res.error;
-						return res;
-					}
-
-					const handoff = synthesizeHandoffFile({
-						runId: this.runId,
-						agentId,
-						fromDriver: failedDriver,
-						reason: res.error ?? res.quotaError.raw,
-						originalPrompt: prompt,
-						workspace,
-						worktrees: this.worktrees,
-						store: this.store,
-					});
-
-					await session.close().catch(() => {});
-					selection.release();
-					mcpReg.unregister();
-
-					selection = nextSelection;
-					pendingPermitWaitMs += nextSelection.waitedMs ?? 0;
-					attemptedDrivers.add(selection.driver.id);
-					tools = buildTools(selection.driver.kind);
-					mcpReg = this.mcp.registerWorker({ runId: this.runId, agentId, role: req.role, workspace, tools });
-
-					const latestHandoff = this.store.get("agents", agentId) ?? agent;
-					agent = { ...latestHandoff, driverId: selection.driver.id, sessionId: undefined, model: undefined, updatedAt: Date.now() };
-					this.bus.save("agents", agent, agentId);
-					this.bus.emit(
-						this.runId,
-						"agent.handoff",
-						{
+						session = await selection.driver.spawn({
+							runId: this.runId,
 							agentId,
-							fromDriver: failedDriver,
-							toDriver: selection.driver.id,
+							role: req.role,
 							workspace,
-							handoffPath: handoff.handoffPath,
-							waitedMs: nextSelection.waitedMs || undefined,
-						},
-						agentId,
-					);
+							systemPrompt: composedSystemPrompt,
+							model: req.model,
+							maxTurns: req.maxTurns,
+							readOnly: req.readOnly,
+							cacheKeyPrefix,
+							compaction: compactionPolicy,
+							mcp: mcpReg.connection,
+							tools,
+							onActivity: handleActivity,
+						});
+						currentPrompt = `${handoff.prompt}\n\nNext instruction:\n${prompt}`;
+					}
 
-					session = await selection.driver.spawn({
-						runId: this.runId,
-						agentId,
-						role: req.role,
-						workspace,
-						systemPrompt: req.systemPrompt,
-						maxTurns: req.maxTurns,
-						readOnly: req.readOnly,
-						mcp: mcpReg.connection,
-						tools,
-						onActivity: handleActivity,
+					for (;;) {
+						const combinedSignal = opts.signal
+							? AbortSignal.any([this.runAbort.signal, abort.signal, opts.signal])
+							: AbortSignal.any([this.runAbort.signal, abort.signal]);
+
+						lastToolSig = "";
+						turnToolLog = [];
+						const turnWaitedMs = pendingPermitWaitMs;
+						pendingPermitWaitMs = 0;
+
+						const res = await session.runTurn(currentPrompt, { ...opts, signal: combinedSignal });
+						const latest = this.store.get("agents", agentId) ?? agent;
+						agent = {
+							...latest,
+							turns: latest.turns + 1,
+							sessionId: res.sessionId ?? latest.sessionId,
+							model: res.model ?? latest.model,
+							updatedAt: Date.now(),
+						};
+						this.bus.save("agents", agent, agentId);
+
+						let turnTokens: number | undefined;
+						if (res.usage) {
+							const computed = res.usage.totalTokens ?? ((res.usage.inputTokens ?? 0) + (res.usage.outputTokens ?? 0));
+							turnTokens = computed || undefined;
+							this.chargeBudget(agentId, selection.driver.id, turnTokens, res.usage.usd, undefined, res.usage, agent.model);
+						}
+						const diffSha = this.worktrees.diffSha(workspace);
+						const cleanError = res.status === "failed" || res.status === "rate_limited"
+							? this.bus.redactor.redactText(res.error)
+							: undefined;
+						const transcriptEntry = {
+							ts: Date.now(),
+							turn: agent.turns,
+							driverId: selection.driver.id,
+							model: agent.model,
+							sessionId: agent.sessionId,
+							status: res.status,
+							durationMs: res.usage?.durationMs,
+							waitedMs: turnWaitedMs || undefined,
+							diffSha,
+							usage: res.usage,
+							prompt: this.bus.redactor.redactText(currentPrompt),
+							finalText: this.bus.redactor.redactText(res.finalText ?? ""),
+							error: cleanError,
+							quotaError: res.status === "rate_limited"
+								? { ...res.quotaError, raw: this.bus.redactor.redactText(res.quotaError.raw) }
+								: undefined,
+							tools: turnToolLog,
+						};
+						try {
+							appendFileSync(transcriptAbs, `${JSON.stringify(transcriptEntry)}\n`, "utf8");
+						} catch {
+							// Best-effort durable transcript write; never crash worker turn.
+						}
+
+						const cachedTok = res.usage?.cachedTokens;
+						const inputTok = res.usage?.inputTokens ?? 0;
+						const cacheWriteTok = res.usage?.cacheWriteTokens ?? 0;
+						// pi-ai splits inputTokens (uncached) from cachedTokens; CLI drivers (Codex/Grok/Agy) report inputTokens inclusive of cachedTokens.
+						const totalPromptIn = selection.driver.kind === "pi-in-process"
+							? inputTok + (cachedTok ?? 0) + cacheWriteTok
+							: Math.max(inputTok, cachedTok ?? 0);
+						const cacheHitRate = cachedTok !== undefined && totalPromptIn > 0
+							? Math.min(1, Math.round((cachedTok / totalPromptIn) * 10_000) / 10_000)
+							: undefined;
+
+						this.bus.emit(
+							this.runId,
+							"agent.turn",
+							{
+								turn: agent.turns,
+								driverId: selection.driver.id,
+								model: agent.model,
+								status: res.status,
+								toolSig: lastToolSig || undefined,
+								diffSha,
+								durationMs: res.usage?.durationMs,
+								waitedMs: turnWaitedMs || undefined,
+								inputTokens: res.usage?.inputTokens,
+								outputTokens: res.usage?.outputTokens,
+								cachedTokens: res.usage?.cachedTokens,
+								cacheWriteTokens: res.usage?.cacheWriteTokens,
+								cacheHitRate,
+								reasoningTokens: res.usage?.reasoningTokens,
+								totalTokens: turnTokens,
+								usd: res.usage?.usd,
+								error: cleanError?.slice(0, 600),
+								quotaErrorKind: res.status === "rate_limited" ? res.quotaError.kind : undefined,
+								promptBytes: Buffer.byteLength(currentPrompt),
+								finalTextBytes: Buffer.byteLength(res.finalText ?? ""),
+								transcriptFile: transcriptRel,
+							},
+							agentId,
+						);
+
+						switch (res.status) {
+							case "completed":
+							case "yielded":
+							case "interrupted": {
+								if (res.status === "completed") this.router.reportSuccess(selection.driver.id);
+								transitionToIdle(
+									{ status: res.status },
+									res.needsHandoff && this.autoHandoffOnSecondCompaction
+										? { reason: "Session hit compaction rollover threshold", failedApproaches: res.failedApproaches }
+										: undefined,
+								);
+								return res;
+							}
+
+							case "failed": {
+								transitionToIdle(
+									{ status: "failed", error: res.error },
+									res.needsHandoff && this.autoHandoffOnSecondCompaction
+										? { reason: "Session hit compaction rollover threshold", failedApproaches: res.failedApproaches }
+										: undefined,
+								);
+								return res;
+							}
+
+							case "rate_limited": {
+								// Class 1: Transient RPM / 429 / 529 -> jittered backoff on same worker
+								if (res.quotaError.kind === "transient_rpm" && rpmRetries < 3) {
+									rpmRetries += 1;
+									const waitMs = res.quotaError.retryAfterMs ?? Math.min(30_000, 1_500 * 2 ** (rpmRetries - 1) + Math.floor(Math.random() * 500));
+									this.bus.emit(
+										this.runId,
+										"quota.retry",
+										{
+											driverId: selection.driver.id,
+											attempt: rpmRetries,
+											waitMs,
+											reason: this.bus.redactor.redactText(res.error || res.quotaError.raw).slice(0, 240),
+										},
+										agentId,
+									);
+									await delay(waitMs, undefined, { signal: combinedSignal });
+									continue;
+								}
+
+								// Class 2 (window exhausted) or Class 3 (hard auth/weekly cap): mark driver + failover worktree!
+								const failedDriver = selection.driver.id;
+								this.router.reportQuotaError(failedDriver, res.quotaError);
+
+								let nextSelection;
+								try {
+									nextSelection = await this.router.acquireForRole(req.role, {
+										avoidDrivers: [...attemptedDrivers, ...(req.avoidDrivers ?? [])],
+										signal: combinedSignal,
+									});
+								} catch {
+									transitionToIdle({ status: "rate_limited", error: res.error });
+									return res;
+								}
+
+								if (attemptedDrivers.has(nextSelection.driver.id)) {
+									nextSelection.release();
+									transitionToIdle({ status: "rate_limited", error: res.error });
+									return res;
+								}
+
+								const handoff = synthesizeHandoffFile({
+									runId: this.runId,
+									agentId,
+									fromDriver: failedDriver,
+									reason: res.error || res.quotaError.raw,
+									reasonKind: "quota_failover",
+									originalPrompt: prompt,
+									workspace,
+									worktrees: this.worktrees,
+									store: this.store,
+									failedApproaches: res.failedApproaches,
+								});
+
+								await session.close().catch(() => {});
+								selection.release();
+								mcpReg.unregister();
+
+								selection = nextSelection;
+								pendingPermitWaitMs += nextSelection.waitedMs ?? 0;
+								attemptedDrivers.add(selection.driver.id);
+								tools = buildTools(selection.driver.kind);
+								mcpReg = this.mcp.registerWorker({ runId: this.runId, agentId, role: req.role, workspace, tools });
+
+								const latestHandoff = this.store.get("agents", agentId) ?? agent;
+								agent = { ...latestHandoff, driverId: selection.driver.id, sessionId: undefined, model: undefined, updatedAt: Date.now() };
+								this.bus.save("agents", agent, agentId);
+								this.bus.emit(
+									this.runId,
+									"agent.handoff",
+									{
+										agentId,
+										fromDriver: failedDriver,
+										toDriver: selection.driver.id,
+										workspace,
+										handoffPath: handoff.handoffPath,
+										reasonKind: "quota_failover",
+										waitedMs: nextSelection.waitedMs || undefined,
+									},
+									agentId,
+								);
+
+								session = await selection.driver.spawn({
+									runId: this.runId,
+									agentId,
+									role: req.role,
+									workspace,
+									systemPrompt: composedSystemPrompt,
+									maxTurns: req.maxTurns,
+									readOnly: req.readOnly,
+									cacheKeyPrefix,
+									compaction: compactionPolicy,
+									mcp: mcpReg.connection,
+									tools,
+									onActivity: handleActivity,
+								});
+								currentPrompt = handoff.prompt;
+								rpmRetries = 0;
+								break;
+							}
+
+							default:
+								return assertNever(res, "Unhandled WorkerTurnResult status");
+						}
+					}
+				} catch (error) {
+					transitionToIdle({
+						status: "failed",
+						error: error instanceof Error ? error.message : String(error),
 					});
-					currentPrompt = handoff.prompt;
-					rpmRetries = 0;
+					throw error;
 				}
 			},
-			steer: (msg) => session.steer?.(msg) ?? Promise.resolve(),
-			interrupt: () => session.interrupt?.() ?? Promise.resolve(),
+			steer: (msg) => (handleState.kind === "closed" ? Promise.resolve() : (session.steer?.(msg) ?? Promise.resolve())),
+			interrupt: () => (handleState.kind === "closed" ? Promise.resolve() : (session.interrupt?.() ?? Promise.resolve())),
 			close: async () => {
-				if (closed) return;
-				closed = true;
+				if (handleState.kind === "closed") return;
+				const last = handleState.lastOutcome;
+				const finalStatus: TerminalAgentStatus =
+					last?.status === "failed" || last?.status === "rate_limited"
+						? "failed"
+						: last?.status === "interrupted"
+							? "stopped"
+							: "done";
+				handleState = { kind: "closed", finalStatus, reason: last?.error };
 				this.activeHandles.delete(agentId);
 				const latestClose = this.store.get("agents", agentId) ?? agent;
 				if (latestClose.status === "running") {
-					const finalStatus =
-						lastTurnStatus === "failed" || lastTurnStatus === "rate_limited"
-							? "failed"
-							: lastTurnStatus === "interrupted"
-								? "stopped"
-								: "done";
-					this.updateAgentStatus(agentId, finalStatus, lastTurnError);
+					this.updateAgentStatus(agentId, finalStatus, last?.error);
 				}
 				await session.close().catch(() => {});
 				mcpReg.unregister();
@@ -898,19 +1113,21 @@ export class SwarmOS implements SwarmOsApi {
 		// Close any lingering workers cleanly before final verification & closeout.
 		await Promise.allSettled([...this.activeHandles.values()].map(({ handle }) => handle.close()));
 
-		this.currentRun = {
-			...this.currentRun,
+		this.currentRun = transitionRun(this.currentRun, {
+			type: "finish",
 			status: outcome.status,
-			statusReason: outcome.summary,
-			updatedAt: Date.now(),
-		};
+			reason: outcome.summary,
+			now: Date.now(),
+		}).next;
 		const closedOut = await this.closeout.finalize(this.currentRun, outcome.summary);
-		this.currentRun = {
-			...this.currentRun,
-			nominatedFindingId: closedOut.nominatedFindingId,
-			nominatedRevision: closedOut.nominatedRevision,
-			updatedAt: Date.now(),
-		};
+		if (closedOut.nominatedFindingId !== undefined) {
+			this.currentRun = transitionRun(this.currentRun, {
+				type: "nominate",
+				findingId: closedOut.nominatedFindingId,
+				revision: closedOut.nominatedRevision,
+				now: Date.now(),
+			}).next;
+		}
 		this.bus.save("runs", this.currentRun);
 		this.bus.emit(this.runId, "run.finished", { status: outcome.status, reason: outcome.summary });
 
