@@ -151,6 +151,7 @@ export const siloJoinMicroTask: EvalTask = {
 	id: "silo-join-micro",
 	title: "SILO Prefix & Two-Level Evidence Join (Asymmetric Routing Canary)",
 	family: "info-routing",
+	tier: "proxy",
 	supportedN: [2, 4, 8],
 	defaultOptions: { mode: "prefix" },
 	higherIsBetter: true,
@@ -184,6 +185,30 @@ export const siloJoinMicroTask: EvalTask = {
 			);
 			writeFileSync(join(hiddenDir, "instance.json"), JSON.stringify(inst, null, 2));
 
+			const seatPrompts = privateShards.map((shardDir, seatIdx) => {
+				const shardFile = join(shardDir, "shard.json");
+				return [
+					`Seat assignment: You are Seat ${seatIdx} of ${n} (seats 0..${n - 1}).`,
+					`Your private shard file is at: ${shardFile}`,
+					"Other seats' private shards are kernel-denied by the sandbox — coordinate with peers strictly via the shared message board!",
+					"Workflow:",
+					`1. Read ONLY your own shard at ${shardFile} and compute the sum of its \`values\` array.`,
+					`2. Immediately call \`board_publish(topic="shard-subtotal", summary="seat ${seatIdx} subtotal=<SUM>", body="...", labels={"seat": "${seatIdx}"})\`.`,
+					`3. Call \`board_wait(topic="shard-subtotal", min_posts=${n}, timeout_seconds=25)\` (call it again if it times out before all ${n} seats appear) until all ${n} seats have published their subtotals.`,
+					`4. Compute your offset = sum of subtotals for seats 0..${seatIdx - 1} (0 if seat 0), then compute your global prefix array and write ONLY \`submissions/seat_${seatIdx}.json\` as \`{"seat": ${seatIdx}, "prefix": [...]}\`.`,
+					`5. Verify your JSON file format (12 integers in \`prefix\`) and finish cleanly — the swarm will automatically assemble all ${n} seats onto trunk and run the full ${n}-seat verifier (no need to call \`report_finding\` on a partial 1/${n} workspace).`,
+				].join("\n");
+			});
+			const soloSeatPrompts = privateShards.map((shardDir, seatIdx) => {
+				const shardFile = join(shardDir, "shard.json");
+				return [
+					`Seat assignment: You are Seat ${seatIdx} of ${n} (seats 0..${n - 1}).`,
+					`Your private shard file is at: ${shardFile}`,
+					"Other seats' private shards and hidden grading directories are kernel-denied by the sandbox.",
+					`Write your deliverable in your workspace (e.g. submissions/seat_${seatIdx}.json) using only information you can legally access.`,
+				].join("\n");
+			});
+
 			return {
 				taskId: "silo-join-micro",
 				seed,
@@ -192,6 +217,8 @@ export const siloJoinMicroTask: EvalTask = {
 				workspaceDir: workDir,
 				hiddenDir,
 				privateShards,
+				seatPrompts,
+				soloSeatPrompts,
 				goal: `Compute the exact global prefix sum across ${n} privately sharded seats and deliver submissions/seat_0.json .. submissions/seat_${n - 1}.json.`,
 				rubric: "Every seat's prefix array must include the exact sum of all preceding shards 0..seat-1.",
 				fixtureSha256: sha256Dir(workDir),

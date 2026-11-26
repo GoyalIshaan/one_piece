@@ -159,6 +159,7 @@ export const miniOptPackTask: EvalTask = {
 	id: "mini-opt-pack",
 	title: "Circle Packing n=26 (Continuous Exact-Oracle Canary)",
 	family: "scalar-optimization",
+	tier: "proxy",
 	supportedN: [1, 2, 4, 8],
 	defaultOptions: {},
 	higherIsBetter: true,

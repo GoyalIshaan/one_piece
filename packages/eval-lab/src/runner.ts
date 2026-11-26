@@ -87,7 +87,7 @@ async function runSilentBestOfN(
 	let cumulativeTokens = 0;
 
 	try {
-		for (let i = 0; i < n; i++) {
+		const runOneSeat = async (i: number): Promise<{ idx: number; subDir: string; subDbPath: string; subRunId: string; receipt: HarnessRunReceipt }> => {
 			const subDir = join(spec.runDir, `silent-seat-${i}`);
 			const subWorkspace = join(subDir, "workspace");
 			mkdirSync(subDir, { recursive: true });
@@ -103,6 +103,8 @@ async function runSilentBestOfN(
 				dbPath: subDbPath,
 				workspaceDir: subWorkspace,
 				privateShards: spec.privateShards?.[i] ? [spec.privateShards[i]!] : undefined,
+				seatPrompts: undefined,
+				soloSeatPrompts: spec.soloSeatPrompts?.[i] ? [spec.soloSeatPrompts[i]!] : undefined,
 				seatIndex: i,
 				totalSeats: spec.totalSeats ?? spec.privateShards?.length ?? n,
 				hiddenDenyPaths: [...spec.hiddenDenyPaths, ...otherShards],
@@ -111,6 +113,19 @@ async function runSilentBestOfN(
 				swarmSize: 1,
 				budget: perWorkerBudget,
 			});
+			return { idx: i, subDir, subDbPath, subRunId, receipt: subReceipt };
+		};
+
+		const seatResults =
+			spec.budgetMode === "wall_clock"
+				? await Promise.all(Array.from({ length: n }, (_, i) => runOneSeat(i)))
+				: await (async () => {
+					const out: Array<Awaited<ReturnType<typeof runOneSeat>>> = [];
+					for (let i = 0; i < n; i++) out.push(await runOneSeat(i));
+					return out;
+				})();
+
+		for (const { idx: i, subDbPath, subRunId, receipt: subReceipt } of seatResults) {
 			subReceipts.push(subReceipt);
 			faults.push(...subReceipt.harnessFaults);
 			for (const d of subReceipt.driverIds ?? []) driverSet.add(d);
@@ -121,6 +136,7 @@ async function runSilentBestOfN(
 			for (const ev of events) {
 				if (ev.type === "run.started" || ev.type === "run.finished") continue;
 				if (ev.type === "model.call") seatTokens += Number(ev.data.totalTokens ?? 0);
+				else if (ev.type === "budget.charged") seatTokens += Number(ev.data.tokens ?? 0);
 				insertEvent.run(
 					ev.ts,
 					spec.runId,
@@ -215,7 +231,11 @@ export function renderCampaignReport(
 	];
 	for (const arm of arms) {
 		const rows = scorecards.filter(
-			(s) => s.reproducibility.topology === (arm.topology ?? arm.controlRung) && s.dynamics.swarmSize === arm.swarmSize && s.reproducibility.controlRung === arm.controlRung,
+			(s) =>
+				s.runId.endsWith(`-${arm.id}`) ||
+				(s.reproducibility.topology === (arm.topology ?? arm.controlRung) &&
+					s.dynamics.swarmSize === arm.swarmSize &&
+					s.reproducibility.controlRung === arm.controlRung),
 		);
 		if (!rows.length) continue;
 		const avg = (fn: (s: Scorecard) => number) => rows.reduce((acc, r) => acc + fn(r), 0) / rows.length;
@@ -300,6 +320,8 @@ export async function runCampaign(options: CampaignOptions): Promise<CampaignRes
 				rubric: prepared.rubric,
 				workspaceDir: prepared.workspaceDir,
 				privateShards: prepared.privateShards,
+				seatPrompts: prepared.seatPrompts,
+				soloSeatPrompts: prepared.soloSeatPrompts,
 				seatIndex: arm.controlRung === "solo" ? 0 : undefined,
 				totalSeats: prepared.n,
 				hiddenDenyPaths: [hiddenDir, dbPath, `${dbPath}-wal`, `${dbPath}-shm`],

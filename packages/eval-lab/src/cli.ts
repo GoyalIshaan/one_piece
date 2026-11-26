@@ -1,10 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createMockAdapter } from "./adapters/mock.ts";
 import { createCliV2Router, createV2Adapter } from "./adapters/v2.ts";
 import { runTaskCalibration } from "./calibration.ts";
-import type { BudgetMode, ControlRung } from "./contracts.ts";
+import type { BudgetMode, ControlRung, Scorecard } from "./contracts.ts";
+import { analyzeProxyToTargetCorrelation, renderCorrelationReport } from "./correlation.ts";
 import { runFaultInjectionSuite } from "./faults.ts";
 import { runCampaign, type ArmSpec } from "./runner.ts";
 import { EVAL_TASKS, getEvalTask } from "./tasks/registry.ts";
@@ -56,9 +57,10 @@ async function main(): Promise<void> {
 				"  list                                 List registered eval-lab tasks",
 				"  calibrate [--task <id|all>]          Run the 6-check zero-cost calibration gate",
 				"  faults [--task <id|all>]             Run the deterministic fault-injection integrity suite",
-				"  run --task <id> [--rungs solo,silent_bon,swarm] [--topology pull-refinery] [--n 2] [--seeds 1..5]",
-				"      [--budget-tokens 120000] [--budget-mode tokens|wall_clock] [--opt key=val]",
-				"      [--out <dir>] [--adapter mock:reference|mock:starter|v2] [--drivers codex,gemini,grok]",
+				"  run --task <id> [--rungs solo,silent_bon,swarm] [--topology pull-refinery] [--topologies a,b] [--n 2] [--seeds 1..5]",
+				"      [--budget-tokens 120000] [--wall-ms 300000] [--budget-mode tokens|wall_clock] [--opt key=val]",
+				"      [--no-field-guide] [--no-semantic-repair] [--out <dir>] [--adapter mock:reference|mock:starter|v2] [--drivers codex,gemini,grok]",
+				"  correlate --dirs <dir1,dir2,...> [--out <report.md>]  Compute proxy-to-long-horizon rank correlations",
 				"  report --dir <campaignDir>           Print saved campaign summary & report",
 			].join("\n"),
 		);
@@ -67,7 +69,8 @@ async function main(): Promise<void> {
 
 	if (command === "list") {
 		for (const t of EVAL_TASKS) {
-			console.log(`${t.id.padEnd(20)} family=${t.family.padEnd(20)} supportedN=[${t.supportedN.join(",")}]  ${t.title}`);
+			const tier = (t.tier ?? "proxy").padEnd(13);
+			console.log(`${t.id.padEnd(24)} tier=${tier} family=${t.family.padEnd(20)} supportedN=[${t.supportedN.join(",")}]  ${t.title}`);
 		}
 		return;
 	}
@@ -116,22 +119,33 @@ async function main(): Promise<void> {
 			.map((s) => Number(s.trim()));
 		const seeds = parseSeeds(parseFlag(rest, "--seeds"));
 		const budgetTokens = Number(parseFlag(rest, "--budget-tokens") ?? 120_000);
+		const wallMsRaw = parseFlag(rest, "--wall-ms");
+		const wallClockMs = wallMsRaw !== undefined ? Number(wallMsRaw) : undefined;
 		const budgetMode = (parseFlag(rest, "--budget-mode") ?? "tokens") as BudgetMode;
 		const adapterArg = parseFlag(rest, "--adapter") ?? "mock:starter";
 		const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 		const outDir = resolve(parseFlag(rest, "--out") ?? join(REPO_ROOT, ".one_piece", "eval-lab", `${stamp}-${task.id}`));
 
+		const topologiesArg = parseFlag(rest, "--topologies");
 		const topology = parseFlag(rest, "--topology") ?? "pull-refinery";
+		const swarmTopologies = topologiesArg ? topologiesArg.split(",").map((s) => s.trim()).filter(Boolean) : [topology];
 		const driversArg = parseFlag(rest, "--drivers") ?? "codex";
+		const enableFieldGuide = !rest.includes("--no-field-guide");
+		const enableSemanticRepair = !rest.includes("--no-semantic-repair");
 
 		const arms: ArmSpec[] = [];
 		for (const rung of rungs) {
 			if (rung === "solo") {
 				arms.push({ id: "solo-n1", controlRung: "solo", topology: "single", swarmSize: 1 });
+			} else if (rung === "swarm") {
+				for (const topo of swarmTopologies) {
+					for (const n of nValues) {
+						arms.push({ id: `${topo}-n${n}`, controlRung: "swarm", topology: topo, swarmSize: n });
+					}
+				}
 			} else {
 				for (const n of nValues) {
-					const topo = rung === "swarm" ? topology : rung;
-					arms.push({ id: `${topo}-n${n}`, controlRung: rung, topology: topo, swarmSize: n });
+					arms.push({ id: `${rung}-n${n}`, controlRung: rung, topology: rung, swarmSize: n });
 				}
 			}
 		}
@@ -141,6 +155,8 @@ async function main(): Promise<void> {
 				? createV2Adapter({
 						router: createCliV2Router(driversArg.split(",")),
 						task,
+						enableFieldGuide,
+						topologyOptions: { enableSemanticRepair },
 					})
 				: createMockAdapter({
 						mode: adapterArg === "mock:reference" ? "reference" : "starter",
@@ -151,7 +167,7 @@ async function main(): Promise<void> {
 			adapter,
 			arms,
 			seeds,
-			budget: { tokens: budgetTokens },
+			budget: { tokens: budgetTokens, ...(wallClockMs !== undefined ? { wallClockMs } : {}) },
 			budgetMode,
 			taskOptions: parseOptions(rest),
 			outDir,
@@ -159,6 +175,40 @@ async function main(): Promise<void> {
 			log: (line) => console.log(line),
 		});
 		console.log(`\nSaved campaign report -> ${result.reportPath}`);
+		return;
+	}
+
+	if (command === "correlate") {
+		const dirsArg = parseFlag(rest, "--dirs");
+		if (!dirsArg) throw new Error("--dirs <dir1,dir2,...> is required");
+		const scorecards: Scorecard[] = [];
+		for (const rawDir of dirsArg.split(",").map((s) => s.trim()).filter(Boolean)) {
+			const dir = resolve(rawDir);
+			const jsonl = join(dir, "results.jsonl");
+			if (existsSync(jsonl)) {
+				for (const line of readFileSync(jsonl, "utf8").split("\n")) {
+					if (line.trim()) scorecards.push(JSON.parse(line) as Scorecard);
+				}
+			} else if (existsSync(join(dir, "scorecards"))) {
+				for (const f of readdirSync(join(dir, "scorecards"))) {
+					if (f.endsWith(".json")) scorecards.push(JSON.parse(readFileSync(join(dir, "scorecards", f), "utf8")) as Scorecard);
+				}
+			}
+		}
+		const seenTasks = [...new Set(scorecards.map((s) => s.taskId))];
+		const proxyTaskIds = seenTasks.filter((id) => (EVAL_TASKS.find((t) => t.id === id)?.tier ?? "proxy") === "proxy");
+		const targetTaskIds = seenTasks.filter((id) => EVAL_TASKS.find((t) => t.id === id)?.tier === "long-horizon");
+		const report = analyzeProxyToTargetCorrelation(scorecards, { proxyTaskIds, targetTaskIds });
+		const md = renderCorrelationReport(report);
+		const outPath = parseFlag(rest, "--out");
+		if (outPath) {
+			const absOut = resolve(outPath);
+			writeFileSync(absOut, md, "utf8");
+			writeFileSync(absOut.replace(/\.md$/i, ".json"), JSON.stringify(report, null, 2) + "\n", "utf8");
+			console.log(`Saved correlation report -> ${absOut}`);
+		} else {
+			console.log(md);
+		}
 		return;
 	}
 

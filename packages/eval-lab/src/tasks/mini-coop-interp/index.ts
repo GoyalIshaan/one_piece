@@ -691,6 +691,7 @@ export const miniCoopInterpTask: EvalTask = {
 	id: "mini-coop-interp",
 	title: "Mini Coupled Interpreter (Semantic Interference Canary)",
 	family: "coupled-swe",
+	tier: "proxy",
 	supportedN: [1, 2, 4],
 	defaultOptions: { coupling: "high" },
 	higherIsBetter: true,

@@ -3,6 +3,8 @@
 
 export type TaskFamily = "coupled-swe" | "info-routing" | "scalar-optimization" | "mixed-phase";
 
+export type BenchmarkTier = "proxy" | "long-horizon";
+
 export type ControlRung = "solo" | "silent_bon" | "scripted_dag" | "swarm";
 
 export type BudgetMode = "tokens" | "wall_clock";
@@ -42,6 +44,10 @@ export interface PreparedTask {
 	hiddenDir: string;
 	/** Per-seat private shard directories for asymmetric-information tasks. */
 	privateShards?: readonly string[];
+	/** Optional task-specific per-seat prompt instructions for multi-peer runs (keeps task wording out of adapters). */
+	seatPrompts?: readonly string[];
+	/** Optional task-specific prompt instructions for a single-seat / solo run on a sharded task. */
+	soloSeatPrompts?: readonly string[];
 	goal: string;
 	rubric?: string;
 	fixtureSha256: string;
@@ -68,6 +74,7 @@ export interface EvalTask {
 	readonly id: string;
 	readonly title: string;
 	readonly family: TaskFamily;
+	readonly tier?: BenchmarkTier;
 	readonly supportedN: readonly number[];
 	readonly defaultOptions?: Record<string, string>;
 	readonly higherIsBetter?: boolean;
@@ -154,6 +161,8 @@ export interface HarnessRunSpec {
 	rubric?: string;
 	workspaceDir: string;
 	privateShards?: readonly string[];
+	seatPrompts?: readonly string[];
+	soloSeatPrompts?: readonly string[];
 	/** Assigned seat index (0-based) for single-seat runs on sharded tasks. */
 	seatIndex?: number;
 	/** Total seat count of the prepared task instance (may exceed swarmSize for solo arms). */
