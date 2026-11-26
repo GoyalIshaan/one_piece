@@ -140,6 +140,7 @@ export class SwarmOS implements SwarmOsApi {
 	>();
 	private readonly runAbort = new AbortController();
 	private wallReserveTimer?: ReturnType<typeof setTimeout>;
+	private wallHardTimer?: ReturnType<typeof setTimeout>;
 	private lifecycle:
 		| { readonly kind: "ready" }
 		| { readonly kind: "executing"; readonly topology: string }
@@ -255,7 +256,7 @@ export class SwarmOS implements SwarmOsApi {
 		});
 		this.triggers.start();
 		if (this.wallSeconds && this.wallSeconds > 0) {
-			const ms = Math.max(1_000, Math.floor(this.wallSeconds * (1 - this.reservePct) * 1000));
+			const reserveMs = Math.max(1_000, Math.floor(this.wallSeconds * (1 - this.reservePct) * 1000));
 			this.wallReserveTimer = setTimeout(() => {
 				const { next, changed } = transitionRun(this.currentRun, { type: "enter_closing", reason: "Wall-clock reserve reached", now: Date.now() });
 				if (changed) {
@@ -263,8 +264,17 @@ export class SwarmOS implements SwarmOsApi {
 					this.bus.save("runs", this.currentRun);
 					this.bus.emit(this.runId, "run.closing", { reason: "Wall-clock reserve reached", reservePct: this.reservePct });
 				}
-			}, ms);
+			}, reserveMs);
 			this.wallReserveTimer.unref?.();
+
+			// Hard wall-clock cutoff: abort any hung/runaway worker turn at 100% wallSeconds so CloseoutController still runs.
+			const hardMs = Math.max(reserveMs + 1_000, Math.ceil(this.wallSeconds * 1000));
+			this.wallHardTimer = setTimeout(() => {
+				if (!this.runAbort.signal.aborted) {
+					this.runAbort.abort(new Error(`Wall-clock limit (${this.wallSeconds}s) exceeded`));
+				}
+			}, hardMs);
+			this.wallHardTimer.unref?.();
 		}
 	}
 
@@ -1550,6 +1560,7 @@ export class SwarmOS implements SwarmOsApi {
 		if (this.lifecycle.kind === "disposed") return;
 		this.lifecycle = { kind: "disposed" };
 		if (this.wallReserveTimer) clearTimeout(this.wallReserveTimer);
+		if (this.wallHardTimer) clearTimeout(this.wallHardTimer);
 		this.triggers.stop();
 		this.runAbort.abort();
 		await Promise.allSettled([...this.activeHandles.values()].map(({ handle }) => handle.close()));

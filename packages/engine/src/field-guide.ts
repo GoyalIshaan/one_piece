@@ -167,10 +167,10 @@ export function buildDeterministicFieldGuide(params: {
 		.sort((a, b) => (b.score ?? b.confidence ?? 0) - (a.score ?? a.confidence ?? 0) || b.updatedAt - a.updatedAt)
 		.slice(0, 5);
 	if (accepted.length) {
-		sections.push("## Verified Wins");
+		sections.push("## Verified Wins (swarm telemetry — not local workspace files)");
 		for (const f of accepted) {
-			const scoreStr = f.score !== undefined ? ` score=${f.score.toFixed(4)}` : "";
-			sections.push(`- [${f.id}${scoreStr}] ${f.claim.slice(0, 120)}`);
+			const scoreStr = f.score !== undefined ? `score=${f.score.toFixed(4)}` : "accepted";
+			sections.push(`- (${scoreStr}) ${f.claim.slice(0, 120)}`);
 		}
 	}
 

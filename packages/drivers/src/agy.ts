@@ -252,9 +252,22 @@ export class AgyAcpDriver implements WorkerDriver {
 				const text = spec.systemPrompt && !sentSystemFallback ? `${spec.systemPrompt}\n\n${prompt}` : prompt;
 				sentSystemFallback = true;
 				let timer: ReturnType<typeof setTimeout> | undefined;
+				let killGraceTimer: ReturnType<typeof setTimeout> | undefined;
+				let abortedLocally = false;
 				const onAbort = () => {
+					abortedLocally = true;
 					if (acpSessionId) void sendRpc("session/cancel", { sessionId: acpSessionId }).catch(() => {});
+					if (!killGraceTimer) {
+						killGraceTimer = setTimeout(() => {
+							killTree(child);
+						}, 3_000);
+						killGraceTimer.unref?.();
+					}
 				};
+				if (opts.signal?.aborted) {
+					resetToIdle();
+					return { status: "interrupted", finalText: "", sessionId: acpSessionId, model: resolvedModel, usage: { durationMs: 0 } };
+				}
 				opts.signal?.addEventListener("abort", onAbort, { once: true });
 				if (opts.timeoutMs) timer = setTimeout(onAbort, opts.timeoutMs);
 				try {
@@ -273,7 +286,7 @@ export class AgyAcpDriver implements WorkerDriver {
 						}
 						: { durationMs };
 					return {
-						status: opts.signal?.aborted ? "interrupted" : "completed",
+						status: opts.signal?.aborted || abortedLocally ? "interrupted" : "completed",
 						finalText: chunks.join("").trim(),
 						sessionId: acpSessionId,
 						model: resolvedModel,
@@ -283,15 +296,16 @@ export class AgyAcpDriver implements WorkerDriver {
 					const raw = `${error instanceof Error ? error.message : String(error)}\n${stderr}`.trim();
 					const quota = classifyQuotaError(raw);
 					const usage = { durationMs: Date.now() - startedAt };
+					if (opts.signal?.aborted || abortedLocally) {
+						return { status: "interrupted", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage };
+					}
 					if (quota) {
 						return { status: "rate_limited", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, quotaError: quota, error: raw };
-					}
-					if (opts.signal?.aborted) {
-						return { status: "interrupted", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage };
 					}
 					return { status: "failed", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, error: raw };
 				} finally {
 					if (timer) clearTimeout(timer);
+					if (killGraceTimer) clearTimeout(killGraceTimer);
 					opts.signal?.removeEventListener("abort", onAbort);
 					resetToIdle();
 				}

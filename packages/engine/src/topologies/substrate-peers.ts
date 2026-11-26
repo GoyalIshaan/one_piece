@@ -39,6 +39,7 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 		async run(os: SwarmOsApi, { goal, rubric, signal }): Promise<TopologyOutcome> {
 			os.bus.emit(os.runId, "phase.changed", { to: "peer-explore", reason: `Launching ${peerCount} peers over Board v2 substrate` });
 
+			const isSharded = Boolean(opts.seatConfigs && opts.seatConfigs.length > 0);
 			const handles = await Promise.all(
 				Array.from({ length: peerCount }, (_, idx) => {
 					const seatCfg = opts.seatConfigs?.[idx];
@@ -51,7 +52,9 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 						toolScope: {
 							board: "read-write",
 							artifacts: true,
-							findings: true,
+							// On privately sharded tasks, a single 1/N seat cannot satisfy the full N-seat verifier;
+							// hide report_finding so peers don't waste turns retrying partial rejections before trunk assembly.
+							findings: !isSharded,
 							tasks: false,
 							nominate: false,
 							scheduler: "auto",
@@ -63,7 +66,9 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 							"- `board_search(query?, topic?, labels?, after?, thread_id?)` to read peer notes (omit query to list latest posts + active topics).",
 							"- `board_wait(topic?, after?, min_posts?, timeout_seconds?)` to wait reactively (up to 25s, zero polling) for peers to publish before proceeding.",
 							"- `board_visit(post_id)` to read full untruncated posts.",
-							"Cite useful peer post IDs via `parent_ids`, avoid overwriting peers' files unnecessarily, and call `report_finding` when your worktree has a verified deliverable.",
+							isSharded
+								? "Cite useful peer post IDs via `parent_ids`, write ONLY your seat deliverable cleanly, and exit once verified — trunk assembly verifies the combined N-seat output."
+								: "Cite useful peer post IDs via `parent_ids`, avoid overwriting peers' files unnecessarily, and call `report_finding` when your worktree has a verified deliverable.",
 						].join("\n"),
 					});
 				}),
@@ -79,25 +84,31 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 							const pulse = os.board.digest(os.runId);
 							const rubricLine = rubric ? `Rubric: ${rubric}` : "";
 							const seatLine = seatCfg?.seatPrompt ? seatCfg.seatPrompt : "";
-							const prompt = round === 1
+							const prompt = seatLine
 								? [
-									`Goal: ${goal}`,
-									rubricLine,
-									`You are ${handle} (Peer #${idx + 1} of ${peerCount}).`,
+									round === 1 ? `Goal: ${goal}` : `Round ${round}/${rounds} (${handle}, Peer #${idx + 1} of ${peerCount}):`,
+									round === 1 ? rubricLine : "",
+									round === 1 ? `You are ${handle} (Peer #${idx + 1} of ${peerCount}).` : "",
 									pulse,
 									seatLine,
-									"Coordinate via `board_publish` + `board_wait` / `board_search`. Publish your local findings/subtotals promptly so peers can build on them, wait for needed peer inputs with `board_wait(min_posts=...)` if peers are still computing, write your deliverable cleanly in your worktree, and call `report_finding` when ready.",
 								].filter(Boolean).join("\n\n")
-								: [
-									`Round ${round}/${rounds} (${handle}, Peer #${idx + 1} of ${peerCount}):`,
-									pulse,
-									seatLine,
-									"Check the latest board updates with `board_search` (or `board_wait` if any peer is still publishing), finalize your deliverable in your worktree using all verified peer inputs, and submit via `report_finding`.",
-								].filter(Boolean).join("\n\n");
+								: round === 1
+									? [
+										`Goal: ${goal}`,
+										rubricLine,
+										`You are ${handle} (Peer #${idx + 1} of ${peerCount}).`,
+										pulse,
+										"Coordinate via `board_publish` + `board_wait` / `board_search`. Publish your local findings/subtotals promptly so peers can build on them, wait for needed peer inputs with `board_wait(min_posts=...)` if peers are still computing, write your deliverable cleanly in your worktree, and call `report_finding` when ready.",
+									].filter(Boolean).join("\n\n")
+									: [
+										`Round ${round}/${rounds} (${handle}, Peer #${idx + 1} of ${peerCount}):`,
+										pulse,
+										"Check the latest board updates with `board_search` (or `board_wait` if any peer is still publishing), finalize your deliverable in your worktree using all verified peer inputs, and submit via `report_finding`.",
+									].filter(Boolean).join("\n\n");
 							const res = await worker.runTurn(prompt, { signal });
 							os.worktrees.commitWip(worker.workspace, `${handle} round ${round}`);
 							const hasFinding = os.store.list("findings", { runId: os.runId }).some((f) => f.authorAgentId === worker.agent.id);
-							if (!hasFinding && round === rounds && res.status === "completed") {
+							if (!isSharded && !hasFinding && round === rounds && res.status === "completed") {
 								await os.trust.submitFinding(
 									{
 										agentId: worker.agent.id,

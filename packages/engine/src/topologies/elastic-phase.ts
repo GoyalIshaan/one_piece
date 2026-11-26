@@ -210,7 +210,7 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 						toolScope: {
 							board: "read-write",
 							artifacts: true,
-							findings: true,
+							findings: !hasSeatConfigs,
 							tasks: false,
 							nominate: false,
 							scheduler: "auto",

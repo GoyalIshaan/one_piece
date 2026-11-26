@@ -156,7 +156,8 @@ export class GrokCliDriver implements WorkerDriver {
 					opts.signal?.addEventListener("abort", onAbort, { once: true });
 					if (opts.timeoutMs) timer = setTimeout(onAbort, opts.timeoutMs);
 
-					const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity });
+					const toolNameByCallId = new Map<string, string>();
+		const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity });
 					rl.on("line", (line) => {
 						const trimmed = line.trim();
 						if (!trimmed) return;
@@ -376,6 +377,7 @@ export class GrokAcpDriver implements WorkerDriver {
 				child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
 			});
 
+		const toolNameByCallId = new Map<string, string>();
 		const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity });
 		rl.on("line", (line) => {
 			const trimmed = line.trim();
@@ -430,13 +432,19 @@ export class GrokAcpDriver implements WorkerDriver {
 				} else if (update?.sessionUpdate === "tool_call") {
 					const rawName = update.rawInput?.tool_name ?? update.title ?? update.toolCallId ?? "tool";
 					const toolName = String(rawName);
+					if (typeof update.toolCallId === "string" && update.toolCallId) {
+						toolNameByCallId.set(update.toolCallId, toolName);
+					}
 					const rawArgs = update.rawInput?.tool_input ?? update.rawInput;
 					const argsPreview = rawArgs !== undefined
 						? (typeof rawArgs === "string" ? rawArgs : JSON.stringify(rawArgs)).slice(0, 240)
 						: undefined;
 					spec.onActivity?.({ type: "tool_call", name: toolName, argsPreview, isMcp: isMcpToolName(toolName) });
 				} else if (update?.sessionUpdate === "tool_call_update" && (update.status === "completed" || update.status === "failed")) {
-					const toolName = String(update.rawOutput?.tool_name ?? update.title ?? update.toolCallId ?? "tool");
+					const callId = typeof update.toolCallId === "string" ? update.toolCallId : undefined;
+					const mappedName = callId ? toolNameByCallId.get(callId) : undefined;
+					const toolName = String(update.rawOutput?.tool_name ?? mappedName ?? update.title ?? callId ?? "tool");
+					if (callId) toolNameByCallId.delete(callId);
 					const outRaw = update.rawOutput?.output?.OkayOutput ?? update.rawOutput ?? update.content;
 					const outputPreview = outRaw !== undefined
 						? (typeof outRaw === "string" ? outRaw : JSON.stringify(outRaw)).slice(0, 500)
@@ -512,9 +520,22 @@ export class GrokAcpDriver implements WorkerDriver {
 				const text = spec.systemPrompt && !sentSystemPrompt ? `${spec.systemPrompt}\n\n${prompt}` : prompt;
 				sentSystemPrompt = true;
 				let timer: ReturnType<typeof setTimeout> | undefined;
+				let killGraceTimer: ReturnType<typeof setTimeout> | undefined;
+				let abortedLocally = false;
 				const onAbort = () => {
+					abortedLocally = true;
 					if (acpSessionId) void sendRpc("session/cancel", { sessionId: acpSessionId }).catch(() => {});
+					if (!killGraceTimer) {
+						killGraceTimer = setTimeout(() => {
+							killTree(child);
+						}, 3_000);
+						killGraceTimer.unref?.();
+					}
 				};
+				if (opts.signal?.aborted) {
+					resetToIdle();
+					return { status: "interrupted", finalText: "", sessionId: acpSessionId, model: resolvedModel, usage: { durationMs: 0 } };
+				}
 				opts.signal?.addEventListener("abort", onAbort, { once: true });
 				if (opts.timeoutMs) timer = setTimeout(onAbort, opts.timeoutMs);
 				try {
@@ -533,7 +554,7 @@ export class GrokAcpDriver implements WorkerDriver {
 							durationMs,
 						};
 					return {
-						status: opts.signal?.aborted ? "interrupted" : "completed",
+						status: opts.signal?.aborted || abortedLocally ? "interrupted" : "completed",
 						finalText: turn.chunks.join("").trim(),
 						sessionId: acpSessionId,
 						model: resolvedModel,
@@ -543,15 +564,16 @@ export class GrokAcpDriver implements WorkerDriver {
 					const raw = `${error instanceof Error ? error.message : String(error)}\n${stderr}`.trim();
 					const quota = classifyQuotaError(raw);
 					const usage = { ...(turn.usage ?? {}), durationMs: Date.now() - startedAt };
+					if (opts.signal?.aborted || abortedLocally) {
+						return { status: "interrupted", finalText: turn.chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage };
+					}
 					if (quota) {
 						return { status: "rate_limited", finalText: turn.chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, quotaError: quota, error: raw };
-					}
-					if (opts.signal?.aborted) {
-						return { status: "interrupted", finalText: turn.chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage };
 					}
 					return { status: "failed", finalText: turn.chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, error: raw };
 				} finally {
 					if (timer) clearTimeout(timer);
+					if (killGraceTimer) clearTimeout(killGraceTimer);
 					opts.signal?.removeEventListener("abort", onAbort);
 					resetToIdle();
 				}

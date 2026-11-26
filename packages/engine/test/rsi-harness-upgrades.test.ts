@@ -408,4 +408,83 @@ describe("RSI Harness Upgrades: Field Guide, Semantic Auto-Repair, Fail-Closed T
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	it("aborts hung worker turns cleanly when wallSeconds hard limit fires and still auto-nominates sibling wins", async () => {
+		const root = mkdtempSync(join(tmpdir(), "rsi-wall-"));
+		try {
+			const seed = join(root, "seed");
+			mkdirSync(seed, { recursive: true });
+			writeFileSync(join(seed, "out.txt"), "starter\n");
+
+			let spawnedCount = 0;
+			const mixedDriver: WorkerDriver = {
+				id: "mixed",
+				kind: "codex-exec",
+				capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema: false, supportsMcpHttp: false },
+				async healthCheck() {
+					return { ok: true, driverId: "mixed", kind: "codex-exec", version: "1" };
+				},
+				async spawn(spec) {
+					const idx = ++spawnedCount;
+					return {
+						driverId: "mixed",
+						sessionId: `s-${idx}`,
+						async runTurn(_prompt, opts) {
+							if (idx === 1) {
+								writeFileSync(join(spec.workspace, "out.txt"), "GOOD\n");
+								return { status: "completed", finalText: "slot 1 finished fast" };
+							}
+							// Slot 2 simulates a hung CLI process until hard wallSeconds aborts its signal!
+							return new Promise<WorkerTurnResult>((resolve) => {
+								if (opts?.signal?.aborted) {
+									resolve({ status: "interrupted", finalText: "" });
+									return;
+								}
+								opts?.signal?.addEventListener("abort", () => resolve({ status: "interrupted", finalText: "" }), { once: true });
+							});
+						},
+						async close() {},
+					};
+				},
+			};
+
+			const store = new SqliteStore(join(root, "wall.db"));
+			const os = await SwarmOS.create({
+				runDir: join(root, "run"),
+				workspace: seed,
+				topology: "evolution",
+				goal: { title: "Wall cutoff", text: "Test hard wall timer" },
+				wallSeconds: 1.5,
+				reservePct: 0.2,
+				verifier: {
+					name: "check",
+					version: "1.0.0",
+					scopes: ["deliverable"],
+					defaultScope: "deliverable",
+					async check({ workspace }) {
+						const ok = readFileSync(join(workspace, "out.txt"), "utf8").trim() === "GOOD";
+						return { status: ok ? "passed" : "failed", score: ok ? 1 : 0, message: ok ? "ok" : "bad" };
+					},
+				},
+				store,
+				router: new DriverQuotaRouter({
+					drivers: [{ driver: mixedDriver, config: { id: "mixed", kind: "codex-exec", maxConcurrent: 4 } }],
+					roles: { default: ["mixed"] },
+				}),
+			});
+			try {
+				const began = Date.now();
+				const outcome = await os.execute(createTopology("evolution", { generations: 1, populationPerGen: 2 }));
+				const elapsed = Date.now() - began;
+				// Must unwind shortly after 1.5s hard wallSeconds (NOT hang forever!) and preserve slot 1's verified win!
+				expect(elapsed).toBeLessThan(6_000);
+				expect(outcome.nominatedFindingId).toBeTruthy();
+			} finally {
+				await os.dispose();
+				store.close();
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
 });
