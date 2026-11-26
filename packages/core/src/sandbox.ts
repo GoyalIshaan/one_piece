@@ -97,15 +97,23 @@ function real(path: string): string {
 	}
 }
 
-/** Paths no sandboxed command may read (eval graders, hidden answers). Process-wide. */
-const deniedReads = new Set<string>();
+/** Paths no sandboxed command may read (eval graders, hidden answers). Process-wide, ref-counted for parallel runs. */
+const deniedReadCounts = new Map<string, number>();
 
 export function denySandboxReads(paths: string[]): void {
-	for (const p of paths) deniedReads.add(real(p));
+	for (const p of paths) {
+		const key = real(p);
+		deniedReadCounts.set(key, (deniedReadCounts.get(key) ?? 0) + 1);
+	}
 }
 
 export function allowSandboxReads(paths: string[]): void {
-	for (const p of paths) deniedReads.delete(real(p));
+	for (const p of paths) {
+		const key = real(p);
+		const count = deniedReadCounts.get(key) ?? 0;
+		if (count <= 1) deniedReadCounts.delete(key);
+		else deniedReadCounts.set(key, count - 1);
+	}
 }
 
 const operatorArchive = join(homedir(), ".one_piece", "archives.noindex");
@@ -120,7 +128,7 @@ export function isOperatorArchivePath(path: string): boolean {
 /** Match restrictions for reads performed by the host process instead of Seatbelt. */
 export function isSandboxReadBlocked(path: string): boolean {
 	const canonical = real(path);
-	return isOperatorArchivePath(canonical) || [...deniedReads].some(root => canonical === root || canonical.startsWith(root + "/"));
+	return isOperatorArchivePath(canonical) || [...deniedReadCounts.keys()].some(root => canonical === root || canonical.startsWith(root + "/"));
 }
 
 function seatbeltProfile(profile: SandboxProfile, roots: string[], archive: string | undefined, unrestricted: boolean, leasedMacGpu: boolean, networkOff = false): string {
@@ -132,7 +140,7 @@ function seatbeltProfile(profile: SandboxProfile, roots: string[], archive: stri
 		'(deny network-outbound (remote ip "localhost:*") (remote unix-socket))',
 		profile === "worker" && !networkOff ? '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))' : "",
 	].join("\n");
-	const privateReads = deniedReads.size ? `(deny file-read* ${[...deniedReads].map(quote).join(" ")})` : "";
+	const privateReads = deniedReadCounts.size ? `(deny file-read* ${[...deniedReadCounts.keys()].map(quote).join(" ")})` : "";
 	if (unrestricted && profile !== "isolated") return ["(version 1)", "(allow default)", privateReads, privateArchive, gpuPolicy].join("\n");
 	const writes = roots.map(quote).join(" ");
 	const isolatedReads = profile === "isolated" ? [

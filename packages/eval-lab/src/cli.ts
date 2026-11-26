@@ -5,7 +5,11 @@ import { createMockAdapter } from "./adapters/mock.ts";
 import { createCliV2Router, createV2Adapter } from "./adapters/v2.ts";
 import { runTaskCalibration } from "./calibration.ts";
 import type { BudgetMode, ControlRung, Scorecard } from "./contracts.ts";
-import { analyzeProxyToTargetCorrelation, renderCorrelationReport } from "./correlation.ts";
+import {
+	analyzeDeltaTransferCorrelation,
+	analyzeProxyToTargetCorrelation,
+	renderCorrelationReport,
+} from "./correlation.ts";
 import { runFaultInjectionSuite } from "./faults.ts";
 import { runCampaign, type ArmSpec } from "./runner.ts";
 import { EVAL_TASKS, getEvalTask } from "./tasks/registry.ts";
@@ -179,26 +183,45 @@ async function main(): Promise<void> {
 	}
 
 	if (command === "correlate") {
-		const dirsArg = parseFlag(rest, "--dirs");
-		if (!dirsArg) throw new Error("--dirs <dir1,dir2,...> is required");
-		const scorecards: Scorecard[] = [];
-		for (const rawDir of dirsArg.split(",").map((s) => s.trim()).filter(Boolean)) {
-			const dir = resolve(rawDir);
-			const jsonl = join(dir, "results.jsonl");
-			if (existsSync(jsonl)) {
-				for (const line of readFileSync(jsonl, "utf8").split("\n")) {
-					if (line.trim()) scorecards.push(JSON.parse(line) as Scorecard);
-				}
-			} else if (existsSync(join(dir, "scorecards"))) {
-				for (const f of readdirSync(join(dir, "scorecards"))) {
-					if (f.endsWith(".json")) scorecards.push(JSON.parse(readFileSync(join(dir, "scorecards", f), "utf8")) as Scorecard);
+		const loadDirs = (rawArg: string): Scorecard[] => {
+			const out: Scorecard[] = [];
+			for (const rawDir of rawArg.split(",").map((s) => s.trim()).filter(Boolean)) {
+				const dir = resolve(rawDir);
+				const jsonl = join(dir, "results.jsonl");
+				if (existsSync(jsonl)) {
+					for (const line of readFileSync(jsonl, "utf8").split("\n")) {
+						if (line.trim()) out.push(JSON.parse(line) as Scorecard);
+					}
+				} else if (existsSync(join(dir, "scorecards"))) {
+					for (const f of readdirSync(join(dir, "scorecards"))) {
+						if (f.endsWith(".json")) out.push(JSON.parse(readFileSync(join(dir, "scorecards", f), "utf8")) as Scorecard);
+					}
 				}
 			}
+			return out;
+		};
+
+		const excludeFaulted = !rest.includes("--include-faulted");
+		const baseDirsArg = parseFlag(rest, "--baseline-dirs");
+		const candDirsArg = parseFlag(rest, "--candidate-dirs");
+		if (baseDirsArg && candDirsArg) {
+			const baseCards = loadDirs(baseDirsArg);
+			const candCards = loadDirs(candDirsArg);
+			const proxyTaskId = parseFlag(rest, "--proxy-task") ?? [...new Set(baseCards.map((c) => c.taskId))].find((id) => (EVAL_TASKS.find((t) => t.id === id)?.tier ?? "proxy") === "proxy");
+			const targetTaskId = parseFlag(rest, "--target-task") ?? [...new Set(baseCards.map((c) => c.taskId))].find((id) => EVAL_TASKS.find((t) => t.id === id)?.tier === "long-horizon");
+			if (!proxyTaskId || !targetTaskId) throw new Error("Could not infer --proxy-task and --target-task from baseline dirs");
+			const delta = analyzeDeltaTransferCorrelation(baseCards, candCards, { proxyTaskId, targetTaskId, excludeFaulted });
+			console.log(JSON.stringify(delta, null, 2));
+			return;
 		}
+
+		const dirsArg = parseFlag(rest, "--dirs");
+		if (!dirsArg) throw new Error("--dirs <dir1,dir2,...> (or --baseline-dirs + --candidate-dirs) is required");
+		const scorecards = loadDirs(dirsArg);
 		const seenTasks = [...new Set(scorecards.map((s) => s.taskId))];
 		const proxyTaskIds = seenTasks.filter((id) => (EVAL_TASKS.find((t) => t.id === id)?.tier ?? "proxy") === "proxy");
 		const targetTaskIds = seenTasks.filter((id) => EVAL_TASKS.find((t) => t.id === id)?.tier === "long-horizon");
-		const report = analyzeProxyToTargetCorrelation(scorecards, { proxyTaskIds, targetTaskIds });
+		const report = analyzeProxyToTargetCorrelation(scorecards, { proxyTaskIds, targetTaskIds, excludeFaulted });
 		const md = renderCorrelationReport(report);
 		const outPath = parseFlag(rest, "--out");
 		if (outPath) {

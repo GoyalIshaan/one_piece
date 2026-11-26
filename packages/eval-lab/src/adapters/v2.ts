@@ -154,7 +154,12 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 
 				const buildSeatPrompt = (seatIdx: number, shardDir: string, multiPeer: boolean): string => {
 					if (multiPeer && spec.seatPrompts?.[seatIdx]) return spec.seatPrompts[seatIdx]!;
-					if (!multiPeer && spec.soloSeatPrompts?.[seatIdx]) return spec.soloSeatPrompts[seatIdx]!;
+					if (!multiPeer) {
+						const soloPrompt =
+							spec.soloSeatPrompts?.[seatIdx] ??
+							(spec.soloSeatPrompts?.length === 1 && shards.length === 1 ? spec.soloSeatPrompts[0] : undefined);
+						if (soloPrompt) return soloPrompt;
+					}
 					const shardFile = join(shardDir, "shard.json");
 					if (!multiPeer) {
 						return [
@@ -172,7 +177,7 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 					].join("\n");
 				};
 
-				const supportsSeatConfigs = topologyName === "substrate-peers" || topologyName === "elastic-phase";
+				const supportsSeatConfigs = topologyName === "substrate-peers" || topologyName === "elastic-phase" || topologyName === "adaptive";
 				const seatConfigs =
 					supportsSeatConfigs && shards.length > 0
 						? Array.from({ length: Math.max(2, n) }, (_, idx) => {

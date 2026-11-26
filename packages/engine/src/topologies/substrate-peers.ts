@@ -334,11 +334,12 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 								const repRes = await repairer.runTurn(repairPrompt, { signal });
 								const repWip = os.worktrees.commitWip(repairer.workspace, "substrate-peers: semantic trunk repair");
 								const repHead = os.worktrees.headSha(repairer.workspace);
-								if (repRes.status === "completed" && repairer.branch && (repWip || (repHead && repHead !== lastTrunkSha))) {
+								if ((repRes.status === "completed" || repRes.status === "interrupted") && repairer.branch && (repWip || (repHead && repHead !== lastTrunkSha))) {
 									const repMerge = os.worktrees.mergeIntoTrunk(repairer.branch, {
 										message: "substrate-peers: semantic trunk repair",
 									});
 									if (repMerge.ok) {
+										const repVerifySig = signal.aborted ? new AbortController().signal : signal;
 										const repFinding = await os.trust.submitFinding(
 											{
 												agentId: repairer.agent.id,
@@ -349,7 +350,7 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 												summary: `Impartial semantic repair fixed trunk verifier failure after ${mergedCount}-branch assembly.`,
 												level: "empirical",
 											},
-											signal,
+											repVerifySig,
 										);
 										if (repFinding.status === "accepted") {
 											repaired = true;

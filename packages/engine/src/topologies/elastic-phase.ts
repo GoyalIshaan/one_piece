@@ -489,11 +489,14 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 								});
 								if (repMerge.ok) {
 									const repVerifySig = signal.aborted ? new AbortController().signal : signal;
+									// When `prevAccepted` is true, submit a FRESH candidate finding rather than mutating
+									// `trunkFinding.id` in place so a failed speculative completion + rollback NEVER
+									// corrupts the previously accepted finding's status in SQLite!
 									const nextFinding = await os.trust.submitFinding(
 										{
 											agentId: repairer.agent.id,
 											driverId: repairer.agent.driverId,
-											findingId: trunkFinding.id,
+											...(prevAccepted ? {} : { findingId: trunkFinding.id }),
 											workspace: os.worktrees.trunkPath,
 											claim: `Elastic repaired integrated trunk (${repMerge.commitSha.slice(0, 8)})`,
 											summary: `Phase-4 narrow integration completed missing lanes / resolved trunk verifier failure cleanly.`,
@@ -507,7 +510,7 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 										repairedSha = repMerge.commitSha;
 										lastTrunkSha = repMerge.commitSha;
 									} else if (prevAccepted) {
-										// Monotonic guard: never let a broken completion regress a previously green trunk!
+										// Monotonic guard: roll back trunk while keeping the original accepted `trunkFinding` intact in store!
 										os.worktrees.resetTrunk?.(prevSha);
 									} else {
 										trunkFinding = nextFinding;

@@ -29,6 +29,12 @@ export interface ProxyToTargetReport {
 	armKeys: string[];
 	proxyTaskIds: string[];
 	targetTaskIds: string[];
+	/** Number of faulted runs excluded before computing correlations. */
+	excludedFaultedRuns: number;
+	/** Warnings emitted when an arm pools multiple git SHAs or has partial task coverage. */
+	integrityWarnings: string[];
+	/** Tasks with zero variance across arms (saturated proxies/targets). */
+	saturatedTaskIds: string[];
 	/** Per-arm aggregated scores on each task. */
 	armTaskTable: Record<
 		string,
@@ -43,20 +49,56 @@ export interface ProxyToTargetReport {
 				meanNominationLoss: number;
 				meanCoordShare: number;
 				meanToolErrorRate: number;
+				gitShas: string[];
 			}
 		>
 	>;
 	/** Pairwise proxy -> target rank correlations across all shared arms. */
 	pairwise: ProxyTargetPairCorrelation[];
-	/** Composite normalized proxy rank vs composite normalized long-horizon rank. */
+	/** Composite normalized proxy rank vs composite normalized long-horizon rank (non-saturated tasks). */
 	composite: {
 		sharedArms: string[];
-		perArmComposite: Array<{ arm: string; proxyComposite: number; targetComposite: number }>;
+		perArmComposite: Array<{
+			arm: string;
+			proxyComposite: number;
+			targetComposite: number;
+			proxyEfficiency: number;
+			targetEfficiency: number;
+			proxyTasksCovered: number;
+			targetTasksCovered: number;
+		}>;
 		scoreCorrelation: CorrelationStats;
 		passRateCorrelation: CorrelationStats;
+		efficiencyCorrelation: CorrelationStats;
+	};
+	/** Strictly balanced composite restricted to tasks covered by ALL participating arms (eliminates Simpson's paradox). */
+	balancedComposite: {
+		sharedArms: string[];
+		proxyTaskIds: string[];
+		targetTaskIds: string[];
+		perArmComposite: Array<{ arm: string; proxyComposite: number; targetComposite: number }>;
+		scoreCorrelation: CorrelationStats;
 	};
 	/** Diagnostic proxy metrics (e.g. coordination share, nomination loss) vs target delivered score. */
 	diagnosticTransfers: DiagnosticTransferEntry[];
+}
+
+export interface DeltaTransferArmRow {
+	arm: string;
+	baselineProxy: number;
+	candidateProxy: number;
+	deltaProxy: number;
+	baselineTarget: number;
+	candidateTarget: number;
+	deltaTarget: number;
+}
+
+export interface DeltaTransferReport {
+	proxyTaskId: string;
+	targetTaskId: string;
+	arms: DeltaTransferArmRow[];
+	deltaCorrelation: CorrelationStats;
+	pooledCorrelation: CorrelationStats;
 }
 
 function round6(x: number): number {
@@ -241,14 +283,27 @@ export function analyzeProxyToTargetCorrelation(
 		proxyTaskIds: readonly string[];
 		targetTaskIds: readonly string[];
 		armKeyFn?: (card: Scorecard) => string;
+		/** Exclude runs with `hasHarnessFault === true` (default true). */
+		excludeFaulted?: boolean;
 	},
 ): ProxyToTargetReport {
 	const armKeyFn = options.armKeyFn ?? defaultArmKey;
+	const excludeFaulted = options.excludeFaulted ?? true;
 	const proxySet = new Set(options.proxyTaskIds);
 	const targetSet = new Set(options.targetTaskIds);
 
-	const grouped = new Map<string, Map<string, Scorecard[]>>();
+	let excludedFaultedRuns = 0;
+	const cleanCards: Scorecard[] = [];
 	for (const card of scorecards) {
+		if (excludeFaulted && card.hasHarnessFault) {
+			excludedFaultedRuns += 1;
+			continue;
+		}
+		cleanCards.push(card);
+	}
+
+	const grouped = new Map<string, Map<string, Scorecard[]>>();
+	for (const card of cleanCards) {
 		const arm = armKeyFn(card);
 		if (!grouped.has(arm)) grouped.set(arm, new Map());
 		const byTask = grouped.get(arm)!;
@@ -258,6 +313,7 @@ export function analyzeProxyToTargetCorrelation(
 
 	const armKeys = [...grouped.keys()].sort();
 	const armTaskTable: ProxyToTargetReport["armTaskTable"] = {};
+	const integrityWarnings: string[] = [];
 
 	for (const arm of armKeys) {
 		armTaskTable[arm] = {};
@@ -267,6 +323,10 @@ export function analyzeProxyToTargetCorrelation(
 			const passRate = rows.filter((r) => r.deliveredPass).length / rows.length;
 			const meanTokens = avg((r) => r.tokens.total);
 			const efficiency = meanScore / Math.max(0.1, meanTokens / 100_000);
+			const gitShas = [...new Set(rows.map((r) => r.reproducibility?.harnessGitSha).filter((s): s is string => Boolean(s)))].sort();
+			if (gitShas.length > 1) {
+				integrityWarnings.push(`Arm "${arm}" on "${taskId}" pools ${gitShas.length} distinct harness commits (${gitShas.map((s) => s.slice(0, 7)).join(", ")})`);
+			}
 			armTaskTable[arm]![taskId] = {
 				runs: rows.length,
 				meanScore: round6(meanScore),
@@ -276,6 +336,7 @@ export function analyzeProxyToTargetCorrelation(
 				meanNominationLoss: round6(avg((r) => r.losses.nominationLoss)),
 				meanCoordShare: round6(avg((r) => r.tokens.coordinationTokenShare)),
 				meanToolErrorRate: round6(avg((r) => r.dynamics.toolErrorRate)),
+				gitShas,
 			};
 		}
 	}
@@ -305,44 +366,131 @@ export function analyzeProxyToTargetCorrelation(
 	// Min-max normalize each task across arms so unbounded objectives (e.g. VLIW speedup, circle radius sum)
 	// combine fairly with [0, 1] benchmarks in the composite rank.
 	const taskRange = new Map<string, { min: number; max: number }>();
+	const effRange = new Map<string, { min: number; max: number }>();
+	const saturatedTaskIds: string[] = [];
 	for (const taskId of [...proxySet, ...targetSet]) {
 		const vals = armKeys
 			.map((a) => armTaskTable[a]?.[taskId]?.meanScore)
 			.filter((v): v is number => typeof v === "number");
 		if (vals.length) {
-			taskRange.set(taskId, { min: Math.min(...vals), max: Math.max(...vals) });
+			const min = Math.min(...vals);
+			const max = Math.max(...vals);
+			taskRange.set(taskId, { min, max });
+			if (Math.abs(max - min) <= 1e-12) saturatedTaskIds.push(taskId);
+		}
+		const effs = armKeys
+			.map((a) => armTaskTable[a]?.[taskId]?.efficiency)
+			.filter((v): v is number => typeof v === "number");
+		if (effs.length) {
+			effRange.set(taskId, { min: Math.min(...effs), max: Math.max(...effs) });
 		}
 	}
+	const saturatedSet = new Set(saturatedTaskIds);
 	const normTaskScore = (taskId: string, val: number): number => {
 		const r = taskRange.get(taskId);
 		if (!r || Math.abs(r.max - r.min) <= 1e-12) return 0.5;
 		return (val - r.min) / (r.max - r.min);
 	};
+	const normTaskEff = (taskId: string, val: number): number => {
+		const r = effRange.get(taskId);
+		if (!r || Math.abs(r.max - r.min) <= 1e-12) return 0.5;
+		return (val - r.min) / (r.max - r.min);
+	};
+
+	const activeProxyTasks = options.proxyTaskIds.filter((t) => !saturatedSet.has(t));
+	const effectiveProxyTasks = activeProxyTasks.length ? activeProxyTasks : [...options.proxyTaskIds];
+	const activeTargetTasks = options.targetTaskIds.filter((t) => !saturatedSet.has(t));
+	const effectiveTargetTasks = activeTargetTasks.length ? activeTargetTasks : [...options.targetTaskIds];
 
 	const compositeArms = armKeys.filter(
 		(a) =>
-			options.proxyTaskIds.some((t) => Boolean(armTaskTable[a]?.[t])) &&
-			options.targetTaskIds.some((t) => Boolean(armTaskTable[a]?.[t])),
+			effectiveProxyTasks.some((t) => Boolean(armTaskTable[a]?.[t])) &&
+			effectiveTargetTasks.some((t) => Boolean(armTaskTable[a]?.[t])),
 	);
 	const perArmComposite = compositeArms.map((arm) => {
-		const pTasks = options.proxyTaskIds.filter((t) => Boolean(armTaskTable[arm]?.[t]));
-		const tTasks = options.targetTaskIds.filter((t) => Boolean(armTaskTable[arm]?.[t]));
+		const pTasks = effectiveProxyTasks.filter((t) => Boolean(armTaskTable[arm]?.[t]));
+		const tTasks = effectiveTargetTasks.filter((t) => Boolean(armTaskTable[arm]?.[t]));
 		const proxyComposite =
 			pTasks.reduce((s, t) => s + normTaskScore(t, armTaskTable[arm]![t]!.meanScore), 0) / pTasks.length;
 		const targetComposite =
 			tTasks.reduce((s, t) => s + normTaskScore(t, armTaskTable[arm]![t]!.meanScore), 0) / tTasks.length;
+		const allPTasks = options.proxyTaskIds.filter((t) => Boolean(armTaskTable[arm]?.[t]));
+		const allTTasks = options.targetTaskIds.filter((t) => Boolean(armTaskTable[arm]?.[t]));
+		const proxyEfficiency =
+			allPTasks.reduce((s, t) => s + normTaskEff(t, armTaskTable[arm]![t]!.efficiency), 0) / Math.max(1, allPTasks.length);
+		const targetEfficiency =
+			allTTasks.reduce((s, t) => s + normTaskEff(t, armTaskTable[arm]![t]!.efficiency), 0) / Math.max(1, allTTasks.length);
 		return {
 			arm,
 			proxyComposite: round6(proxyComposite),
 			targetComposite: round6(targetComposite),
+			proxyEfficiency: round6(proxyEfficiency),
+			targetEfficiency: round6(targetEfficiency),
+			proxyTasksCovered: pTasks.length,
+			targetTasksCovered: tTasks.length,
 		};
 	});
+
+	const unbalancedArms = perArmComposite.filter(
+		(row) => row.proxyTasksCovered < effectiveProxyTasks.length || row.targetTasksCovered < effectiveTargetTasks.length,
+	);
+	if (unbalancedArms.length > 0) {
+		integrityWarnings.push(
+			`Unbalanced composite coverage: ${unbalancedArms.map((r) => `${r.arm} (${r.proxyTasksCovered}/${effectiveProxyTasks.length} proxy, ${r.targetTasksCovered}/${effectiveTargetTasks.length} target)`).join("; ")} — consult balancedComposite for apples-to-apples comparison.`,
+		);
+	}
+
+	// Strictly balanced composite: choose the largest subset of non-saturated tasks covered by ALL arms
+	// (or, if none cover all arms, restrict to arms covering the most common proxy+target task pair).
+	const commonProxyTasks = effectiveProxyTasks.filter((t) => compositeArms.every((a) => Boolean(armTaskTable[a]?.[t])));
+	const commonTargetTasks = effectiveTargetTasks.filter((t) => compositeArms.every((a) => Boolean(armTaskTable[a]?.[t])));
+	let balArms = compositeArms;
+	let balProxyTasks = commonProxyTasks;
+	let balTargetTasks = commonTargetTasks;
+	if (!balProxyTasks.length || !balTargetTasks.length) {
+		// Fall back to arms that cover ALL effective proxy & target tasks
+		const fullArms = compositeArms.filter(
+			(a) =>
+				effectiveProxyTasks.every((t) => Boolean(armTaskTable[a]?.[t])) &&
+				effectiveTargetTasks.every((t) => Boolean(armTaskTable[a]?.[t])),
+		);
+		if (fullArms.length >= 3) {
+			balArms = fullArms;
+			balProxyTasks = effectiveProxyTasks;
+			balTargetTasks = effectiveTargetTasks;
+		} else {
+			// Pick the non-saturated proxy & target tasks with maximum arm coverage
+			const bestP = [...effectiveProxyTasks].sort(
+				(a, b) => compositeArms.filter((x) => armTaskTable[x]?.[b]).length - compositeArms.filter((x) => armTaskTable[x]?.[a]).length,
+			)[0];
+			const bestT = [...effectiveTargetTasks].sort(
+				(a, b) => compositeArms.filter((x) => armTaskTable[x]?.[b]).length - compositeArms.filter((x) => armTaskTable[x]?.[a]).length,
+			)[0];
+			balProxyTasks = bestP ? [bestP] : [];
+			balTargetTasks = bestT ? [bestT] : [];
+			balArms = compositeArms.filter(
+				(a) =>
+					balProxyTasks.every((t) => Boolean(armTaskTable[a]?.[t])) &&
+					balTargetTasks.every((t) => Boolean(armTaskTable[a]?.[t])),
+			);
+		}
+	}
+	const balPerArm = balArms.map((arm) => ({
+		arm,
+		proxyComposite: round6(
+			balProxyTasks.reduce((s, t) => s + normTaskScore(t, armTaskTable[arm]![t]!.meanScore), 0) / Math.max(1, balProxyTasks.length),
+		),
+		targetComposite: round6(
+			balTargetTasks.reduce((s, t) => s + normTaskScore(t, armTaskTable[arm]![t]!.meanScore), 0) / Math.max(1, balTargetTasks.length),
+		),
+	}));
+
 	const compPxPass = compositeArms.map((arm) => {
-		const pTasks = options.proxyTaskIds.filter((t) => Boolean(armTaskTable[arm]?.[t]));
+		const pTasks = effectiveProxyTasks.filter((t) => Boolean(armTaskTable[arm]?.[t]));
 		return pTasks.reduce((s, t) => s + armTaskTable[arm]![t]!.passRate, 0) / pTasks.length;
 	});
 	const compTgPass = compositeArms.map((arm) => {
-		const tTasks = options.targetTaskIds.filter((t) => Boolean(armTaskTable[arm]?.[t]));
+		const tTasks = effectiveTargetTasks.filter((t) => Boolean(armTaskTable[arm]?.[t]));
 		return tTasks.reduce((s, t) => s + armTaskTable[arm]![t]!.passRate, 0) / tTasks.length;
 	});
 
@@ -373,6 +521,9 @@ export function analyzeProxyToTargetCorrelation(
 		armKeys,
 		proxyTaskIds: [...options.proxyTaskIds],
 		targetTaskIds: [...options.targetTaskIds],
+		excludedFaultedRuns,
+		integrityWarnings,
+		saturatedTaskIds,
 		armTaskTable,
 		pairwise,
 		composite: {
@@ -383,8 +534,94 @@ export function analyzeProxyToTargetCorrelation(
 				perArmComposite.map((p) => p.targetComposite),
 			),
 			passRateCorrelation: computeCorrelationStats(compPxPass, compTgPass),
+			efficiencyCorrelation: computeCorrelationStats(
+				perArmComposite.map((p) => p.proxyEfficiency),
+				perArmComposite.map((p) => p.targetEfficiency),
+			),
+		},
+		balancedComposite: {
+			sharedArms: balArms,
+			proxyTaskIds: balProxyTasks,
+			targetTaskIds: balTargetTasks,
+			perArmComposite: balPerArm,
+			scoreCorrelation: computeCorrelationStats(
+				balPerArm.map((p) => p.proxyComposite),
+				balPerArm.map((p) => p.targetComposite),
+			),
 		},
 		diagnosticTransfers,
+	};
+}
+
+/**
+ * Paired RSI version delta-transfer analysis: tests whether harness-version improvements
+ * (deltaProxy = candidate - baseline) correlate positively with long-horizon gains (deltaTarget).
+ */
+export function analyzeDeltaTransferCorrelation(
+	baselineCards: readonly Scorecard[],
+	candidateCards: readonly Scorecard[],
+	options: {
+		proxyTaskId: string;
+		targetTaskId: string;
+		armKeyFn?: (card: Scorecard) => string;
+		excludeFaulted?: boolean;
+	},
+): DeltaTransferReport {
+	const armKeyFn = options.armKeyFn ?? defaultArmKey;
+	const excludeFaulted = options.excludeFaulted ?? true;
+	const aggregate = (cards: readonly Scorecard[], taskId: string): Map<string, number> => {
+		const buckets = new Map<string, number[]>();
+		for (const c of cards) {
+			if (excludeFaulted && c.hasHarnessFault) continue;
+			if (c.taskId !== taskId) continue;
+			const arm = armKeyFn(c);
+			if (!buckets.has(arm)) buckets.set(arm, []);
+			buckets.get(arm)!.push(c.deliveredScore);
+		}
+		const out = new Map<string, number>();
+		for (const [arm, vals] of buckets.entries()) {
+			out.set(arm, vals.reduce((a, b) => a + b, 0) / vals.length);
+		}
+		return out;
+	};
+
+	const baseP = aggregate(baselineCards, options.proxyTaskId);
+	const candP = aggregate(candidateCards, options.proxyTaskId);
+	const baseT = aggregate(baselineCards, options.targetTaskId);
+	const candT = aggregate(candidateCards, options.targetTaskId);
+
+	const sharedArms = [...baseP.keys()]
+		.filter((a) => candP.has(a) && baseT.has(a) && candT.has(a))
+		.sort();
+
+	const arms: DeltaTransferArmRow[] = sharedArms.map((arm) => {
+		const bp = baseP.get(arm)!;
+		const cp = candP.get(arm)!;
+		const bt = baseT.get(arm)!;
+		const ct = candT.get(arm)!;
+		return {
+			arm,
+			baselineProxy: round6(bp),
+			candidateProxy: round6(cp),
+			deltaProxy: round6(cp - bp),
+			baselineTarget: round6(bt),
+			candidateTarget: round6(ct),
+			deltaTarget: round6(ct - bt),
+		};
+	});
+
+	const pooledX = arms.flatMap((r) => [r.baselineProxy, r.candidateProxy]);
+	const pooledY = arms.flatMap((r) => [r.baselineTarget, r.candidateTarget]);
+
+	return {
+		proxyTaskId: options.proxyTaskId,
+		targetTaskId: options.targetTaskId,
+		arms,
+		deltaCorrelation: computeCorrelationStats(
+			arms.map((r) => r.deltaProxy),
+			arms.map((r) => r.deltaTarget),
+		),
+		pooledCorrelation: computeCorrelationStats(pooledX, pooledY),
 	};
 }
 
@@ -395,16 +632,26 @@ export function renderCorrelationReport(report: ProxyToTargetReport): string {
 		`- **Harness Arms (${report.armKeys.length}):** ${report.armKeys.map((a) => `\`${a}\``).join(", ") || "(none)"}`,
 		`- **Proxy Benchmarks:** ${report.proxyTaskIds.map((t) => `\`${t}\``).join(", ")}`,
 		`- **Long-Horizon Target Benchmarks:** ${report.targetTaskIds.map((t) => `\`${t}\``).join(", ")}`,
+		`- **Excluded Faulted Runs:** ${report.excludedFaultedRuns}`,
+		...(report.saturatedTaskIds.length
+			? [`- **Saturated (Zero-Variance) Tasks Excluded from Score Composite:** ${report.saturatedTaskIds.map((t) => `\`${t}\``).join(", ")}`]
+			: []),
+		...(report.integrityWarnings.length
+			? ["", "> [!WARNING] **Correlation Integrity Checks**", ...report.integrityWarnings.map((w) => `> - ${w}`)]
+			: []),
 		"",
 		"## Composite Proxy vs Long-Horizon Transfer",
 		"",
-		`- **Score Rank Correlation:** Spearman $\\rho = ${report.composite.scoreCorrelation.spearmanRho.toFixed(3)}$, Kendall $\\tau_b = ${report.composite.scoreCorrelation.kendallTauB.toFixed(3)}$, Pearson $r = ${report.composite.scoreCorrelation.pearsonR.toFixed(3)}$ ($n=${report.composite.scoreCorrelation.n}$, permutation $p=${report.composite.scoreCorrelation.permutationPValue.toFixed(4)}$, direction=\`${report.composite.scoreCorrelation.direction}\`)`,
+		`- **Score Rank Correlation (non-saturated):** Spearman $\\rho = ${report.composite.scoreCorrelation.spearmanRho.toFixed(3)}$, Kendall $\\tau_b = ${report.composite.scoreCorrelation.kendallTauB.toFixed(3)}$, Pearson $r = ${report.composite.scoreCorrelation.pearsonR.toFixed(3)}$ ($n=${report.composite.scoreCorrelation.n}$, permutation $p=${report.composite.scoreCorrelation.permutationPValue.toFixed(4)}$, direction=\`${report.composite.scoreCorrelation.direction}\`)`,
+		`- **Balanced Common-Task Composite (${report.balancedComposite.proxyTaskIds.join("+") || "none"} -> ${report.balancedComposite.targetTaskIds.join("+") || "none"}):** Spearman $\\rho = ${report.balancedComposite.scoreCorrelation.spearmanRho.toFixed(3)}$, Kendall $\\tau_b = ${report.balancedComposite.scoreCorrelation.kendallTauB.toFixed(3)}$, Pearson $r = ${report.balancedComposite.scoreCorrelation.pearsonR.toFixed(3)}$ ($n=${report.balancedComposite.scoreCorrelation.n}$, $p=${report.balancedComposite.scoreCorrelation.permutationPValue.toFixed(4)}$)`,
 		`- **Pass-Rate Rank Correlation:** Spearman $\\rho = ${report.composite.passRateCorrelation.spearmanRho.toFixed(3)}$, Kendall $\\tau_b = ${report.composite.passRateCorrelation.kendallTauB.toFixed(3)}$ ($p=${report.composite.passRateCorrelation.permutationPValue.toFixed(4)}$)`,
+		`- **Cost-Adjusted Efficiency Correlation:** Spearman $\\rho = ${report.composite.efficiencyCorrelation.spearmanRho.toFixed(3)}$, Kendall $\\tau_b = ${report.composite.efficiencyCorrelation.kendallTauB.toFixed(3)}$, Pearson $r = ${report.composite.efficiencyCorrelation.pearsonR.toFixed(3)}$ ($p=${report.composite.efficiencyCorrelation.permutationPValue.toFixed(4)}$)`,
 		"",
-		"| Arm | Normalized Proxy Composite | Normalized Long-Horizon Composite |",
-		"| --- | ---: | ---: |",
+		"| Arm | Normalized Proxy Composite | Proxy Coverage | Normalized Long-Horizon Composite | Target Coverage |",
+		"| --- | ---: | ---: | ---: | ---: |",
 		...report.composite.perArmComposite.map(
-			(row) => `| \`${row.arm}\` | ${row.proxyComposite.toFixed(3)} | ${row.targetComposite.toFixed(3)} |`,
+			(row) =>
+				`| \`${row.arm}\` | ${row.proxyComposite.toFixed(3)} | ${row.proxyTasksCovered} | ${row.targetComposite.toFixed(3)} | ${row.targetTasksCovered} |`,
 		),
 		"",
 		"## Pairwise Proxy -> Long-Horizon Matrix",

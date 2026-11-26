@@ -95,19 +95,21 @@ async function runSilentBestOfN(
 			const subDbPath = join(subDir, "trace.db");
 			const subRunId = `${spec.runId}-seat-${i}`;
 
-			const otherShards = (spec.privateShards ?? []).filter((_, idx) => idx !== i);
+			// Pass full `privateShards` and `soloSeatPrompts` with `seatIndex: i` so `createV2Adapter`
+			// resolves `soloSeatPrompts[i]` accurately AND restricts sibling shards strictly per-worker
+			// (avoiding process-wide `deniedReads` cross-blocking when seats run concurrently in `Promise.all`).
 			const subReceipt = await adapter.run({
 				...spec,
 				runId: subRunId,
 				runDir: subDir,
 				dbPath: subDbPath,
 				workspaceDir: subWorkspace,
-				privateShards: spec.privateShards?.[i] ? [spec.privateShards[i]!] : undefined,
+				privateShards: spec.privateShards,
 				seatPrompts: undefined,
-				soloSeatPrompts: spec.soloSeatPrompts?.[i] ? [spec.soloSeatPrompts[i]!] : undefined,
+				soloSeatPrompts: spec.soloSeatPrompts,
 				seatIndex: i,
 				totalSeats: spec.totalSeats ?? spec.privateShards?.length ?? n,
-				hiddenDenyPaths: [...spec.hiddenDenyPaths, ...otherShards],
+				hiddenDenyPaths: spec.hiddenDenyPaths,
 				controlRung: "solo",
 				topology: "silent_bon_member",
 				swarmSize: 1,

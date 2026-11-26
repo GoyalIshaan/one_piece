@@ -3,20 +3,29 @@
 - **Harness Arms (6):** `silent_bon:silent_bon:n4`, `solo:single:n1`, `swarm:elastic-phase:n4`, `swarm:evolution:n4`, `swarm:pull-refinery:n4`, `swarm:substrate-peers:n4`
 - **Proxy Benchmarks:** `causal-incident-mesh`, `silo-join-micro`, `mini-coop-interp`
 - **Long-Horizon Target Benchmarks:** `adversarial-spec-forge`, `vliw-kernel-opt`, `horizon-repo-migration`
+- **Excluded Faulted Runs:** 0
+- **Saturated (Zero-Variance) Tasks Excluded from Score Composite:** `silo-join-micro`
+
+> [!WARNING] **Correlation Integrity Checks**
+> - Arm "swarm:pull-refinery:n4" on "vliw-kernel-opt" pools 2 distinct harness commits (0e8e5ba, cd7cb79)
+> - Arm "swarm:substrate-peers:n4" on "vliw-kernel-opt" pools 2 distinct harness commits (0e8e5ba, cd7cb79)
+> - Unbalanced composite coverage: silent_bon:silent_bon:n4 (2/2 proxy, 1/3 target); swarm:evolution:n4 (1/2 proxy, 3/3 target); swarm:pull-refinery:n4 (1/2 proxy, 3/3 target) — consult balancedComposite for apples-to-apples comparison.
 
 ## Composite Proxy vs Long-Horizon Transfer
 
-- **Score Rank Correlation:** Spearman $\rho = 0.147$, Kendall $\tau_b = 0.072$, Pearson $r = 0.562$ ($n=6$, permutation $p=0.7778$, direction=`neutral`)
-- **Pass-Rate Rank Correlation:** Spearman $\rho = -0.105$, Kendall $\tau_b = -0.094$ ($p=0.9333$)
+- **Score Rank Correlation (non-saturated):** Spearman $\rho = 0.169$, Kendall $\tau_b = 0.086$, Pearson $r = 0.463$ ($n=6$, permutation $p=0.7333$, direction=`neutral`)
+- **Balanced Common-Task Composite (mini-coop-interp -> vliw-kernel-opt):** Spearman $\rho = 0.393$, Kendall $\tau_b = 0.346$, Pearson $r = 0.223$ ($n=6$, $p=0.6667$)
+- **Pass-Rate Rank Correlation:** Spearman $\rho = 0.051$, Kendall $\tau_b = 0.000$ ($p=0.8667$)
+- **Cost-Adjusted Efficiency Correlation:** Spearman $\rho = 0.657$, Kendall $\tau_b = 0.467$, Pearson $r = 0.533$ ($p=0.1750$)
 
-| Arm | Normalized Proxy Composite | Normalized Long-Horizon Composite |
-| --- | ---: | ---: |
-| `silent_bon:silent_bon:n4` | 0.650 | 1.000 |
-| `solo:single:n1` | 0.167 | 0.304 |
-| `swarm:elastic-phase:n4` | 0.833 | 0.904 |
-| `swarm:evolution:n4` | 0.750 | 0.926 |
-| `swarm:pull-refinery:n4` | 0.750 | 0.333 |
-| `swarm:substrate-peers:n4` | 0.833 | 0.723 |
+| Arm | Normalized Proxy Composite | Proxy Coverage | Normalized Long-Horizon Composite | Target Coverage |
+| --- | ---: | ---: | ---: | ---: |
+| `silent_bon:silent_bon:n4` | 0.650 | 2 | 1.000 | 1 |
+| `solo:single:n1` | 0.000 | 2 | 0.304 | 3 |
+| `swarm:elastic-phase:n4` | 1.000 | 2 | 0.904 | 3 |
+| `swarm:evolution:n4` | 1.000 | 1 | 0.926 | 3 |
+| `swarm:pull-refinery:n4` | 1.000 | 1 | 0.333 | 3 |
+| `swarm:substrate-peers:n4` | 1.000 | 2 | 0.723 | 3 |
 
 ## Pairwise Proxy -> Long-Horizon Matrix
 

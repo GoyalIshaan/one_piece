@@ -204,6 +204,8 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 						// Monotonic green trunk ratchet:
 						// - Keep merges that pass verification OR strictly advance the trunk score from an unaccepted baseline
 						//   (so Ticket 1/N on a multi-feature repo is not falsely rolled back before Tickets 2..N land!).
+						// - For binary pass/fail verifiers that omit numeric `score` (`newScore === undefined`), allow
+						//   intermediate tickets `1..N-1` to accumulate before the final ticket lands.
 						// - Trigger impartial semantic repair / rollback on genuine regressions (accepted -> failed,
 						//   score drop, or non-advancing failing merges).
 						const newScore = typeof finding.score === "number" ? finding.score : undefined;
@@ -211,10 +213,15 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 							!lastTrunkAccepted &&
 							newScore !== undefined &&
 							newScore > (lastTrunkScore ?? 0) + 1e-9;
+						const binaryPartialProgress =
+							!lastTrunkAccepted &&
+							newScore === undefined &&
+							mergedBranches.length + 1 < tasks.length;
 						const isSemanticRegression =
 							Boolean(os.trust.verifier) &&
 							finding.status !== "accepted" &&
-							!strictlyAdvancedFromUnaccepted;
+							!strictlyAdvancedFromUnaccepted &&
+							!binaryPartialProgress;
 
 						if (isSemanticRegression) {
 							const failReason = finding.rounds.at(-1)?.message ?? "Executable verifier rejected merged trunk";
@@ -259,7 +266,7 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 									const repWip = os.worktrees.commitWip(repairer.workspace, `refinery-semantic-repair(${task.id})`);
 									const repHead = os.worktrees.headSha(repairer.workspace);
 									const repChanged = Boolean(repWip) || (Boolean(repHead) && repHead !== merged.commitSha);
-									if (repRes.status === "completed" && repChanged && repairer.branch) {
+									if ((repRes.status === "completed" || repRes.status === "interrupted") && repChanged && repairer.branch) {
 										const repMerge = os.worktrees.mergeIntoTrunk(repairer.branch, {
 											message: `refinery-semantic-repair(${task.id}): ${task.title}`,
 										});
@@ -406,19 +413,11 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 								const resolverWip = os.worktrees.commitWip(resolver.workspace, `refinery-resolve(${task.id}): ${task.title}`);
 								const resolvedHead = os.worktrees.headSha(resolver.workspace);
 								const resolverMadeChanges = Boolean(resolverWip) || (Boolean(resolvedHead) && resolvedHead !== lastTrunkSha);
-								if (resolveRes.status === "completed" && resolverMadeChanges && resolver.branch) {
+								if ((resolveRes.status === "completed" || resolveRes.status === "interrupted") && resolverMadeChanges && resolver.branch) {
 									const resolved = os.worktrees.mergeIntoTrunk(resolver.branch, {
 										message: `refinery-resolve(${task.id}): ${task.title}`,
 									});
 									if (resolved.ok) {
-										lastTrunkSha = resolved.commitSha;
-										mergedBranches.push(resolver.branch);
-										os.bus.emit(
-											os.runId,
-											"refinery.conflict_resolved",
-											{ taskId: task.id, branch, conflictFiles, commitSha: resolved.commitSha },
-											resolver.agent.id,
-										);
 										const resVerifySig = signal.aborted ? new AbortController().signal : signal;
 										const resFinding = await os.trust.submitFinding(
 											{
@@ -431,6 +430,36 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 												level: "empirical",
 											},
 											resVerifySig,
+										);
+										const resRegressedGreenTrunk =
+											Boolean(os.trust.verifier) &&
+											lastTrunkAccepted &&
+											resFinding.status !== "accepted";
+										if (resRegressedGreenTrunk) {
+											const rolledBack = Boolean(os.worktrees.resetTrunk?.(prevTrunkSha));
+											const failReason = resFinding.rounds.at(-1)?.message ?? "Conflict resolution broke previously green trunk";
+											os.bus.emit(
+												os.runId,
+												"refinery.semantic_regression",
+												{ taskId: task.id, branch, reason: failReason.slice(0, 300), repaired: false, rolledBack },
+												"refinery",
+											);
+											os.board.publish({
+												runId: os.runId,
+												authorAgentId: "refinery",
+												topic: "refinery-conflict",
+												summary: `Conflict resolution for ${task.id} regressed green trunk (${failReason.slice(0, 200)})${rolledBack ? " [trunk rolled back]" : ""}`,
+												isOsActor: true,
+											});
+											return;
+										}
+										lastTrunkSha = resolved.commitSha;
+										mergedBranches.push(resolver.branch);
+										os.bus.emit(
+											os.runId,
+											"refinery.conflict_resolved",
+											{ taskId: task.id, branch, conflictFiles, commitSha: resolved.commitSha },
+											resolver.agent.id,
 										);
 										if (resFinding.status === "accepted") lastTrunkAccepted = true;
 										if (typeof resFinding.score === "number") {

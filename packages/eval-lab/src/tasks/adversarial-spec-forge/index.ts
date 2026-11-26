@@ -887,17 +887,131 @@ export const adversarialSpecForgeTask: EvalTask = {
 		};
 	},
 
-	async publicCheck({ artifactDir }): Promise<{ passed: boolean; score: number; details: string }> {
+	async publicCheck({ artifactDir, seed, options }): Promise<{ passed: boolean; score: number; details: string }> {
+		const cfg = configFor(seed, options);
 		const copy = mkdtempSync(join(tmpdir(), "eval-lab-specforge-pub-"));
 		try {
 			cpSync(artifactDir, copy, { recursive: true, filter: (src) => !src.includes("/.git") });
-			execFileSync("python3", ["-B", "-m", "unittest", "discover", "-s", "tests"], {
+			// Anti-tamper: always restore authoritative public smoke test file before running checks.
+			const authStarter = starterFiles(cfg);
+			writeFiles(copy, { "tests/test_public.py": authStarter["tests/test_public.py"]! });
+			const pubProbe = `import json, sys, unittest
+sys.path.insert(0, sys.argv[1])
+from query_engine import QueryEngine
+from query_engine.logic import eval_pred
+from query_engine.planner import plan_query
+
+T, C, CAP = ${JSON.stringify(cfg.tableName)}, ${JSON.stringify(cfg.indexCol)}, ${cfg.cacheCapacity}
+checks = {}
+fails = []
+
+# 0. Authoritative public smoke unittest
+try:
+    suite = unittest.defaultTestLoader.discover("tests", pattern="test_public.py")
+    res = unittest.TextTestRunner(stream=open("/dev/null", "w")).run(suite)
+    assert res.wasSuccessful() and res.testsRun >= 1
+    smoke_ok = True
+except Exception as ex:
+    smoke_ok = False
+    fails.append(f"smoke: {ex}")
+
+# 1. Public MVCC abort/commit surface
+try:
+    e = QueryEngine(cache_capacity=CAP)
+    t1 = e.begin()
+    e.put(t1, T, "k1", {C: 10})
+    e.abort(t1)
+    assert e.query(T) == [], "aborted write visible"
+    t2 = e.begin()
+    e.put(t2, T, "k2", {C: 20})
+    e.commit(t2)
+    assert [k for k, _ in e.query(T)] == ["k2"]
+    checks["mvcc"] = True
+except Exception as ex:
+    checks["mvcc"] = False
+    fails.append(f"mvcc: {ex}")
+
+# 2. Public 3VL surface
+try:
+    assert eval_pred(("is_null", C), {C: None}) is True
+    assert eval_pred(("ne", C, 5), {C: None}) is None
+    assert eval_pred(("and", ("eq", C, 5), ("eq", C, 6)), {C: 5}) is False
+    checks["logic_3vl"] = True
+except Exception as ex:
+    checks["logic_3vl"] = False
+    fails.append(f"logic_3vl: {ex}")
+
+# 3. Public planner pushdown surface
+try:
+    p = plan_query(T, ("eq", C, 10), {C})
+    assert isinstance(p, dict) and p.get("mode") == "index_eq"
+    checks["planner"] = True
+except Exception as ex:
+    checks["planner"] = False
+    fails.append(f"planner: {ex}")
+
+# 4. Public cache surface
+try:
+    e = QueryEngine(cache_capacity=CAP)
+    t = e.begin()
+    e.put(t, T, "k1", {C: 7})
+    e.commit(t)
+    _ = e.query(T, ("eq", C, 7))
+    _ = e.query(T, ("eq", C, 7))
+    assert e.cache.hits >= 1, "cache did not record hit"
+    checks["cache"] = True
+except Exception as ex:
+    checks["cache"] = False
+    fails.append(f"cache: {ex}")
+
+# 5. Public reactive views surface
+try:
+    e = QueryEngine(cache_capacity=CAP)
+    e.create_view("v1", T, ("gt", C, 5))
+    t = e.begin()
+    e.put(t, T, "k1", {C: 10})
+    e.commit(t)
+    assert [k for k, _ in e.query_view("v1")] == ["k1"]
+    checks["views"] = True
+except Exception as ex:
+    checks["views"] = False
+    fails.append(f"views: {ex}")
+
+# 6. Public WAL recovery surface
+try:
+    e = QueryEngine(cache_capacity=CAP)
+    t = e.begin()
+    e.put(t, T, "k1", {C: 12})
+    e.commit(t)
+    rec = QueryEngine.recover(e.export_journal(), cache_capacity=CAP)
+    assert [k for k, _ in rec.query(T)] == ["k1"]
+    checks["journal"] = True
+except Exception as ex:
+    checks["journal"] = False
+    fails.append(f"journal: {ex}")
+
+passed_n = sum(1 for v in checks.values() if v)
+score = round(passed_n / len(checks), 6)
+passed = smoke_ok and passed_n == len(checks)
+print(json.dumps({
+    "passed": passed,
+    "score": score,
+    "details": "public module contract checks passed (6/6)" if passed else f"public checks {passed_n}/{len(checks)}: " + "; ".join(fails[:4]),
+}))
+`;
+			writeFileSync(join(copy, "__pub_check.py"), pubProbe);
+			const out = execFileSync("python3", ["-B", join(copy, "__pub_check.py"), copy], {
 				cwd: copy,
 				encoding: "utf8",
 				timeout: 12_000,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
-			return { passed: true, score: 1, details: "public smoke tests passed" };
+			const parsed = JSON.parse(out.trim().split("\n").at(-1) ?? "{}") as { passed?: boolean; score?: number; details?: string };
+			return {
+				passed: Boolean(parsed.passed),
+				score: Number(parsed.score) || 0,
+				details: String(parsed.details ?? "public checks completed"),
+			};
 		} catch (error) {
 			return { passed: false, score: 0, details: `public tests failed: ${String(error).slice(0, 260)}` };
 		} finally {

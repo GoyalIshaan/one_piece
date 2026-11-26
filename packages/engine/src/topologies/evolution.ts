@@ -102,6 +102,7 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 						});
 
 						try {
+							const baseHeadSha = os.worktrees.headSha(worker.workspace);
 							const eliteSummary = sortedElites.slice(0, 4)
 								.map((e, i) => `${i + 1}. [score=${e.score.toFixed(4)}, gen=${e.generation}, basin=${e.diffSha.slice(0, 8)}] ${e.summary.slice(0, 200)}`)
 								.join("\n");
@@ -137,9 +138,9 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 							const res = await worker.runTurn(prompt, { signal, ...(genTimeoutMs ? { timeoutMs: genTimeoutMs } : {}) });
 							const wipSha = os.worktrees.commitWip(worker.workspace, `evo-gen-${gen}-slot-${slot + 1}`);
 							const headAfter = os.worktrees.headSha(worker.workspace);
-							const hasEdits = Boolean(wipSha) || (Boolean(headAfter) && headAfter !== (parent?.branch ?? os.worktrees.baseSha));
+							const hasEdits = Boolean(wipSha) || (Boolean(headAfter) && Boolean(baseHeadSha) && headAfter !== baseHeadSha);
 							const diffSha = os.worktrees.diffSha(worker.workspace);
-							const diffStat = os.worktrees.diffStat(worker.workspace, parent?.branch ?? os.worktrees.baseSha);
+							const diffStat = os.worktrees.diffStat(worker.workspace, baseHeadSha ?? os.worktrees.baseSha);
 
 							let finding: Finding | undefined = os.store
 								.list("findings", { runId: os.runId })

@@ -17,6 +17,15 @@
     "vliw-kernel-opt",
     "horizon-repo-migration"
   ],
+  "excludedFaultedRuns": 0,
+  "integrityWarnings": [
+    "Arm \"swarm:pull-refinery:n4\" on \"vliw-kernel-opt\" pools 2 distinct harness commits (0e8e5ba, cd7cb79)",
+    "Arm \"swarm:substrate-peers:n4\" on \"vliw-kernel-opt\" pools 2 distinct harness commits (0e8e5ba, cd7cb79)",
+    "Unbalanced composite coverage: silent_bon:silent_bon:n4 (2/2 proxy, 1/3 target); swarm:evolution:n4 (1/2 proxy, 3/3 target); swarm:pull-refinery:n4 (1/2 proxy, 3/3 target) — consult balancedComposite for apples-to-apples comparison."
+  ],
+  "saturatedTaskIds": [
+    "silo-join-micro"
+  ],
   "armTaskTable": {
     "silent_bon:silent_bon:n4": {
       "causal-incident-mesh": {
@@ -27,7 +36,10 @@
         "efficiency": 0.035736,
         "meanNominationLoss": 0.075,
         "meanCoordShare": 0,
-        "meanToolErrorRate": 0.18275
+        "meanToolErrorRate": 0.18275,
+        "gitShas": [
+          "1cf057ed6fe89efe8503c8bc66b6cb437615f6b5"
+        ]
       },
       "mini-coop-interp": {
         "runs": 2,
@@ -37,7 +49,10 @@
         "efficiency": 0.291794,
         "meanNominationLoss": 0,
         "meanCoordShare": 0,
-        "meanToolErrorRate": 0.0147
+        "meanToolErrorRate": 0.0147,
+        "gitShas": [
+          "0e8e5bac6e0ac69c02e64f49b42757228ed667b9"
+        ]
       },
       "vliw-kernel-opt": {
         "runs": 2,
@@ -47,7 +62,10 @@
         "efficiency": 2.453942,
         "meanNominationLoss": 0.01547,
         "meanCoordShare": 0,
-        "meanToolErrorRate": 0
+        "meanToolErrorRate": 0,
+        "gitShas": [
+          "0e8e5bac6e0ac69c02e64f49b42757228ed667b9"
+        ]
       }
     },
     "solo:single:n1": {
@@ -59,7 +77,10 @@
         "efficiency": 0,
         "meanNominationLoss": 0.05,
         "meanCoordShare": 0,
-        "meanToolErrorRate": 0.33335
+        "meanToolErrorRate": 0.33335,
+        "gitShas": [
+          "1cf057ed6fe89efe8503c8bc66b6cb437615f6b5"
+        ]
       },
       "silo-join-micro": {
         "runs": 1,
@@ -69,7 +90,10 @@
         "efficiency": 1.497589,
         "meanNominationLoss": 0,
         "meanCoordShare": 0,
-        "meanToolErrorRate": 0
+        "meanToolErrorRate": 0,
+        "gitShas": [
+          "1cf057ed6fe89efe8503c8bc66b6cb437615f6b5"
+        ]
       },
       "mini-coop-interp": {
         "runs": 2,
@@ -79,7 +103,10 @@
         "efficiency": 0.597482,
         "meanNominationLoss": 0,
         "meanCoordShare": 0,
-        "meanToolErrorRate": 0
+        "meanToolErrorRate": 0,
+        "gitShas": [
+          "200e7d9de8a191148e48c4d9f69f5460ecc23a69"
+        ]
       },
       "adversarial-spec-forge": {
         "runs": 2,
@@ -89,7 +116,10 @@
         "efficiency": 0.278214,
         "meanNominationLoss": 0,
         "meanCoordShare": 0,
-        "meanToolErrorRate": 0.05555
+        "meanToolErrorRate": 0.05555,
+        "gitShas": [
+          "200e7d9de8a191148e48c4d9f69f5460ecc23a69"
+        ]
       },
       "vliw-kernel-opt": {
         "runs": 2,
@@ -99,7 +129,10 @@
         "efficiency": 5.327698,
         "meanNominationLoss": 0,
         "meanCoordShare": 0,
-        "meanToolErrorRate": 0
+        "meanToolErrorRate": 0,
+        "gitShas": [
+          "cd7cb79a1ff03b1164965b0247eb27dfaccec230"
+        ]
       },
       "horizon-repo-migration": {
         "runs": 2,
@@ -109,7 +142,10 @@
         "efficiency": 0.342426,
         "meanNominationLoss": 0,
         "meanCoordShare": 0,
-        "meanToolErrorRate": 0
+        "meanToolErrorRate": 0,
+        "gitShas": [
+          "cd7cb79a1ff03b1164965b0247eb27dfaccec230"
+        ]
       }
     },
     "swarm:elastic-phase:n4": {
@@ -121,7 +157,10 @@
         "efficiency": 0.11437,
         "meanNominationLoss": 0,
         "meanCoordShare": 1,
-        "meanToolErrorRate": 0.0587
+        "meanToolErrorRate": 0.0587,
+        "gitShas": [
+          "1cf057ed6fe89efe8503c8bc66b6cb437615f6b5"
+        ]
       },
       "silo-join-micro": {
         "runs": 1,
@@ -131,7 +170,10 @@
         "efficiency": 0.601034,
         "meanNominationLoss": 0,
         "meanCoordShare": 0,
-        "meanToolErrorRate": 0
+        "meanToolErrorRate": 0,
+        "gitShas": [
+          "1cf057ed6fe89efe8503c8bc66b6cb437615f6b5"
+        ]
       },
       "mini-coop-interp": {
         "runs": 2,
@@ -141,7 +183,10 @@
         "efficiency": 0.172516,
         "meanNominationLoss": 0,
         "meanCoordShare": 0.34105,
-        "meanToolErrorRate": 0
+        "meanToolErrorRate": 0,
+        "gitShas": [
+          "200e7d9de8a191148e48c4d9f69f5460ecc23a69"
+        ]
       },
       "adversarial-spec-forge": {
         "runs": 2,
@@ -151,7 +196,10 @@
         "efficiency": 0.623008,
         "meanNominationLoss": 0,
         "meanCoordShare": 0.3156,
-        "meanToolErrorRate": 0
+        "meanToolErrorRate": 0,
+        "gitShas": [
+          "200e7d9de8a191148e48c4d9f69f5460ecc23a69"
+        ]
       },
       "vliw-kernel-opt": {
         "runs": 2,
@@ -161,7 +209,10 @@
         "efficiency": 32.031131,
         "meanNominationLoss": 0,
         "meanCoordShare": 1,
-        "meanToolErrorRate": 0.05555
+        "meanToolErrorRate": 0.05555,
+        "gitShas": [
+          "cd7cb79a1ff03b1164965b0247eb27dfaccec230"
+        ]
       },
       "horizon-repo-migration": {
         "runs": 2,
@@ -171,7 +222,10 @@
         "efficiency": 0.240136,
         "meanNominationLoss": 0,
         "meanCoordShare": 0.7333,
-        "meanToolErrorRate": 0
+        "meanToolErrorRate": 0,
+        "gitShas": [
+          "cd7cb79a1ff03b1164965b0247eb27dfaccec230"
+        ]
       }
     },
     "swarm:evolution:n4": {
@@ -183,7 +237,10 @@
         "efficiency": 0.182776,
         "meanNominationLoss": 0,
         "meanCoordShare": 0,
-        "meanToolErrorRate": 0
+        "meanToolErrorRate": 0,
+        "gitShas": [
+          "1cf057ed6fe89efe8503c8bc66b6cb437615f6b5"
+        ]
       },
       "mini-coop-interp": {
         "runs": 2,
@@ -193,7 +250,10 @@
         "efficiency": 0.096672,
         "meanNominationLoss": 0,
         "meanCoordShare": 0,
-        "meanToolErrorRate": 0
+        "meanToolErrorRate": 0,
+        "gitShas": [
+          "200e7d9de8a191148e48c4d9f69f5460ecc23a69"
+        ]
       },
       "adversarial-spec-forge": {
         "runs": 2,
@@ -203,7 +263,10 @@
         "efficiency": 0.124314,
         "meanNominationLoss": 0,
         "meanCoordShare": 0,
-        "meanToolErrorRate": 0
+        "meanToolErrorRate": 0,
+        "gitShas": [
+          "200e7d9de8a191148e48c4d9f69f5460ecc23a69"
+        ]
       },
       "vliw-kernel-opt": {
         "runs": 2,
@@ -213,7 +276,10 @@
         "efficiency": 1.607304,
         "meanNominationLoss": 0,
         "meanCoordShare": 0,
-        "meanToolErrorRate": 0.0091
+        "meanToolErrorRate": 0.0091,
+        "gitShas": [
+          "cd7cb79a1ff03b1164965b0247eb27dfaccec230"
+        ]
       },
       "horizon-repo-migration": {
         "runs": 2,
@@ -223,7 +289,10 @@
         "efficiency": 0.119033,
         "meanNominationLoss": 0,
         "meanCoordShare": 0,
-        "meanToolErrorRate": 0.00675
+        "meanToolErrorRate": 0.00675,
+        "gitShas": [
+          "cd7cb79a1ff03b1164965b0247eb27dfaccec230"
+        ]
       }
     },
     "swarm:pull-refinery:n4": {
@@ -235,7 +304,10 @@
         "efficiency": 1.062146,
         "meanNominationLoss": 0,
         "meanCoordShare": 0.2216,
-        "meanToolErrorRate": 0.1667
+        "meanToolErrorRate": 0.1667,
+        "gitShas": [
+          "1cf057ed6fe89efe8503c8bc66b6cb437615f6b5"
+        ]
       },
       "mini-coop-interp": {
         "runs": 2,
@@ -245,7 +317,10 @@
         "efficiency": 0.241494,
         "meanNominationLoss": 0,
         "meanCoordShare": 0.15295,
-        "meanToolErrorRate": 0.01615
+        "meanToolErrorRate": 0.01615,
+        "gitShas": [
+          "200e7d9de8a191148e48c4d9f69f5460ecc23a69"
+        ]
       },
       "adversarial-spec-forge": {
         "runs": 2,
@@ -255,7 +330,10 @@
         "efficiency": 0.052423,
         "meanNominationLoss": 0,
         "meanCoordShare": 0.2019,
-        "meanToolErrorRate": 0.01925
+        "meanToolErrorRate": 0.01925,
+        "gitShas": [
+          "200e7d9de8a191148e48c4d9f69f5460ecc23a69"
+        ]
       },
       "vliw-kernel-opt": {
         "runs": 4,
@@ -265,7 +343,11 @@
         "efficiency": 0.284308,
         "meanNominationLoss": 0,
         "meanCoordShare": 0.08065,
-        "meanToolErrorRate": 0
+        "meanToolErrorRate": 0,
+        "gitShas": [
+          "0e8e5bac6e0ac69c02e64f49b42757228ed667b9",
+          "cd7cb79a1ff03b1164965b0247eb27dfaccec230"
+        ]
       },
       "horizon-repo-migration": {
         "runs": 2,
@@ -275,7 +357,10 @@
         "efficiency": 0.237746,
         "meanNominationLoss": 0,
         "meanCoordShare": 0.1822,
-        "meanToolErrorRate": 0.0111
+        "meanToolErrorRate": 0.0111,
+        "gitShas": [
+          "cd7cb79a1ff03b1164965b0247eb27dfaccec230"
+        ]
       }
     },
     "swarm:substrate-peers:n4": {
@@ -287,7 +372,10 @@
         "efficiency": 0.131269,
         "meanNominationLoss": 0,
         "meanCoordShare": 1,
-        "meanToolErrorRate": 0.0698
+        "meanToolErrorRate": 0.0698,
+        "gitShas": [
+          "1cf057ed6fe89efe8503c8bc66b6cb437615f6b5"
+        ]
       },
       "silo-join-micro": {
         "runs": 1,
@@ -297,7 +385,10 @@
         "efficiency": 0.109869,
         "meanNominationLoss": 0,
         "meanCoordShare": 0.2664,
-        "meanToolErrorRate": 0
+        "meanToolErrorRate": 0,
+        "gitShas": [
+          "1cf057ed6fe89efe8503c8bc66b6cb437615f6b5"
+        ]
       },
       "mini-coop-interp": {
         "runs": 2,
@@ -307,7 +398,10 @@
         "efficiency": 0.058742,
         "meanNominationLoss": 0,
         "meanCoordShare": 0.68805,
-        "meanToolErrorRate": 0.0097
+        "meanToolErrorRate": 0.0097,
+        "gitShas": [
+          "200e7d9de8a191148e48c4d9f69f5460ecc23a69"
+        ]
       },
       "adversarial-spec-forge": {
         "runs": 2,
@@ -317,7 +411,10 @@
         "efficiency": 0.017138,
         "meanNominationLoss": 0.14375,
         "meanCoordShare": 0.3628,
-        "meanToolErrorRate": 0.01265
+        "meanToolErrorRate": 0.01265,
+        "gitShas": [
+          "200e7d9de8a191148e48c4d9f69f5460ecc23a69"
+        ]
       },
       "vliw-kernel-opt": {
         "runs": 4,
@@ -327,7 +424,11 @@
         "efficiency": 1.628158,
         "meanNominationLoss": 0,
         "meanCoordShare": 0.13745,
-        "meanToolErrorRate": 0.013975
+        "meanToolErrorRate": 0.013975,
+        "gitShas": [
+          "0e8e5bac6e0ac69c02e64f49b42757228ed667b9",
+          "cd7cb79a1ff03b1164965b0247eb27dfaccec230"
+        ]
       },
       "horizon-repo-migration": {
         "runs": 2,
@@ -337,7 +438,10 @@
         "efficiency": 0.059648,
         "meanNominationLoss": 0,
         "meanCoordShare": 0.61875,
-        "meanToolErrorRate": 0.0055
+        "meanToolErrorRate": 0.0055,
+        "gitShas": [
+          "cd7cb79a1ff03b1164965b0247eb27dfaccec230"
+        ]
       }
     }
   },
@@ -667,49 +771,137 @@
       {
         "arm": "silent_bon:silent_bon:n4",
         "proxyComposite": 0.65,
-        "targetComposite": 1
+        "targetComposite": 1,
+        "proxyEfficiency": 0.352411,
+        "targetEfficiency": 0.068342,
+        "proxyTasksCovered": 2,
+        "targetTasksCovered": 1
       },
       {
         "arm": "solo:single:n1",
-        "proxyComposite": 0.166667,
-        "targetComposite": 0.304267
+        "proxyComposite": 0,
+        "targetComposite": 0.304267,
+        "proxyEfficiency": 0.666667,
+        "targetEfficiency": 0.529925,
+        "proxyTasksCovered": 2,
+        "targetTasksCovered": 3
       },
       {
         "arm": "swarm:elastic-phase:n4",
-        "proxyComposite": 0.833333,
-        "targetComposite": 0.904431
+        "proxyComposite": 1,
+        "targetComposite": 0.904431,
+        "proxyEfficiency": 0.478795,
+        "targetEfficiency": 0.879422,
+        "proxyTasksCovered": 2,
+        "targetTasksCovered": 3
       },
       {
         "arm": "swarm:evolution:n4",
-        "proxyComposite": 0.75,
-        "targetComposite": 0.925739
+        "proxyComposite": 1,
+        "targetComposite": 0.925739,
+        "proxyEfficiency": 0.061471,
+        "targetEfficiency": 0.142858,
+        "proxyTasksCovered": 1,
+        "targetTasksCovered": 3
       },
       {
         "arm": "swarm:pull-refinery:n4",
-        "proxyComposite": 0.75,
-        "targetComposite": 0.333333
+        "proxyComposite": 1,
+        "targetComposite": 0.333333,
+        "proxyEfficiency": 0.512719,
+        "targetEfficiency": 0.229351,
+        "proxyTasksCovered": 1,
+        "targetTasksCovered": 3
       },
       {
         "arm": "swarm:substrate-peers:n4",
-        "proxyComposite": 0.833333,
-        "targetComposite": 0.723181
+        "proxyComposite": 1,
+        "targetComposite": 0.723181,
+        "proxyEfficiency": 0.333333,
+        "targetEfficiency": 0.01411,
+        "proxyTasksCovered": 2,
+        "targetTasksCovered": 3
       }
     ],
     "scoreCorrelation": {
       "n": 6,
-      "pearsonR": 0.562493,
-      "spearmanRho": 0.147122,
-      "kendallTauB": 0.071611,
-      "permutationPValue": 0.777778,
+      "pearsonR": 0.463265,
+      "spearmanRho": 0.169031,
+      "kendallTauB": 0.086066,
+      "permutationPValue": 0.733333,
       "direction": "neutral"
     },
     "passRateCorrelation": {
       "n": 6,
-      "pearsonR": -0.039715,
-      "spearmanRho": -0.105021,
-      "kendallTauB": -0.094491,
-      "permutationPValue": 0.933333,
+      "pearsonR": 0.146584,
+      "spearmanRho": 0.05145,
+      "kendallTauB": 0,
+      "permutationPValue": 0.866667,
       "direction": "neutral"
+    },
+    "efficiencyCorrelation": {
+      "n": 6,
+      "pearsonR": 0.533057,
+      "spearmanRho": 0.657143,
+      "kendallTauB": 0.466667,
+      "permutationPValue": 0.175,
+      "direction": "positive"
+    }
+  },
+  "balancedComposite": {
+    "sharedArms": [
+      "silent_bon:silent_bon:n4",
+      "solo:single:n1",
+      "swarm:elastic-phase:n4",
+      "swarm:evolution:n4",
+      "swarm:pull-refinery:n4",
+      "swarm:substrate-peers:n4"
+    ],
+    "proxyTaskIds": [
+      "mini-coop-interp"
+    ],
+    "targetTaskIds": [
+      "vliw-kernel-opt"
+    ],
+    "perArmComposite": [
+      {
+        "arm": "silent_bon:silent_bon:n4",
+        "proxyComposite": 1,
+        "targetComposite": 1
+      },
+      {
+        "arm": "solo:single:n1",
+        "proxyComposite": 0,
+        "targetComposite": 0.496742
+      },
+      {
+        "arm": "swarm:elastic-phase:n4",
+        "proxyComposite": 1,
+        "targetComposite": 0.796625
+      },
+      {
+        "arm": "swarm:evolution:n4",
+        "proxyComposite": 1,
+        "targetComposite": 0.943884
+      },
+      {
+        "arm": "swarm:pull-refinery:n4",
+        "proxyComposite": 1,
+        "targetComposite": 0
+      },
+      {
+        "arm": "swarm:substrate-peers:n4",
+        "proxyComposite": 1,
+        "targetComposite": 0.753484
+      }
+    ],
+    "scoreCorrelation": {
+      "n": 6,
+      "pearsonR": 0.22275,
+      "spearmanRho": 0.392792,
+      "kendallTauB": 0.34641,
+      "permutationPValue": 0.666667,
+      "direction": "positive"
     }
   },
   "diagnosticTransfers": [

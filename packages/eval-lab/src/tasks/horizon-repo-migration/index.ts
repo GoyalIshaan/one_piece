@@ -640,17 +640,127 @@ export const horizonRepoMigrationTask: EvalTask = {
 		};
 	},
 
-	async publicCheck({ artifactDir }): Promise<{ passed: boolean; score: number; details: string }> {
+	async publicCheck({ artifactDir, seed }): Promise<{ passed: boolean; score: number; details: string }> {
+		const cfg = configFor(seed);
 		const copy = mkdtempSync(join(tmpdir(), "eval-lab-mig-pub-"));
 		try {
 			cpSync(artifactDir, copy, { recursive: true, filter: (src) => !src.includes("/.git") });
-			execFileSync("python3", ["-B", "-m", "unittest", "discover", "-s", "tests"], {
+			// Anti-tamper: always restore authoritative public smoke test file before running checks.
+			const authStarter = starterFiles(cfg);
+			writeFiles(copy, { "tests/test_public.py": authStarter["tests/test_public.py"]! });
+			const pubProbe = `import json, sys, unittest
+sys.path.insert(0, sys.argv[1])
+from ledger_app import LedgerEngine, convert_to_base
+
+RATES = ${JSON.stringify(cfg.fxRatesBps)}
+checks = {}
+fails = []
+
+# 0. Authoritative public smoke unittest
+try:
+    suite = unittest.defaultTestLoader.discover("tests", pattern="test_public.py")
+    res = unittest.TextTestRunner(stream=open("/dev/null", "w")).run(suite)
+    assert res.wasSuccessful() and res.testsRun >= 1
+    smoke_ok = True
+except Exception as ex:
+    smoke_ok = False
+    fails.append(f"smoke: {ex}")
+
+# 1. Public out-of-order idempotency surface
+try:
+    e = LedgerEngine(fx_rates_bps=RATES)
+    assert e.apply_event({"event_id": "e2", "ts": 20, "from_account": "a", "to_account": "b", "currency": "USD", "amount_cents": 100}) is True
+    assert e.apply_event({"event_id": "e1", "ts": 10, "from_account": "a", "to_account": "b", "currency": "USD", "amount_cents": 100}) is True
+    assert e.apply_event({"event_id": "e1", "ts": 10, "from_account": "a", "to_account": "b", "currency": "USD", "amount_cents": 100}) is False
+    checks["idempotency"] = True
+except Exception as ex:
+    checks["idempotency"] = False
+    fails.append(f"idempotency: {ex}")
+
+# 2. Public exact integer balance surface
+try:
+    e = LedgerEngine(fx_rates_bps=RATES)
+    e.apply_event({"event_id": "i1", "ts": 1, "from_account": "a", "to_account": "b", "currency": "USD", "amount_cents": 250})
+    bal = e.balances_by_currency()["USD"]
+    assert all(isinstance(v, int) and not isinstance(v, bool) for v in bal.values()), "balances must be exact int"
+    assert sum(bal.values()) == 0
+    checks["exact_int"] = True
+except Exception as ex:
+    checks["exact_int"] = False
+    fails.append(f"exact_int: {ex}")
+
+# 3. Public settlement report surface
+try:
+    e = LedgerEngine(fx_rates_bps=RATES)
+    e.apply_event({"event_id": "s1", "ts": 1, "from_account": "b", "to_account": "a", "currency": "USD", "amount_cents": 100})
+    rep = e.settlement_report()
+    assert isinstance(rep, dict) and rep.get("accepted_count") == 1
+    checks["settlement"] = True
+except Exception as ex:
+    checks["settlement"] = False
+    fails.append(f"settlement: {ex}")
+
+# 4. Public FX netting surface
+try:
+    assert isinstance(convert_to_base(100, "EUR", RATES), int)
+    e = LedgerEngine(fx_rates_bps=RATES)
+    e.apply_event({"event_id": "f1", "ts": 1, "from_account": "a", "to_account": "b", "currency": "EUR", "amount_cents": 100})
+    nb = e.net_base_balances()
+    assert isinstance(nb, dict) and sum(nb.values()) == 0 and nb.get("b", 0) > 0
+    checks["fx_netting"] = True
+except Exception as ex:
+    checks["fx_netting"] = False
+    fails.append(f"fx_netting: {ex}")
+
+# 5. Public atomic batch rollback surface
+try:
+    e = LedgerEngine(fx_rates_bps=RATES)
+    ok = e.apply_batch([
+        {"event_id": "b1", "ts": 1, "from_account": "a", "to_account": "b", "currency": "USD", "amount_cents": 100},
+        {"event_id": "b2", "ts": 2, "from_account": "a", "to_account": "a", "currency": "USD", "amount_cents": 50},
+    ])
+    assert ok is False, "invalid batch must return False"
+    assert e.balances_by_currency() == {}, "failed batch leaked balances"
+    checks["atomic_batch"] = True
+except Exception as ex:
+    checks["atomic_batch"] = False
+    fails.append(f"atomic_batch: {ex}")
+
+# 6. Public checkpoint & resume surface
+try:
+    e = LedgerEngine(fx_rates_bps=RATES)
+    e.apply_event({"event_id": "c1", "ts": 1, "from_account": "a", "to_account": "b", "currency": "USD", "amount_cents": 100})
+    snap = e.dump_checkpoint()
+    r = LedgerEngine.load_checkpoint(snap, fx_rates_bps=RATES)
+    assert r.balances_by_currency() == e.balances_by_currency()
+    assert r.apply_event({"event_id": "c1", "ts": 1, "from_account": "a", "to_account": "b", "currency": "USD", "amount_cents": 100}) is False
+    checks["checkpoint"] = True
+except Exception as ex:
+    checks["checkpoint"] = False
+    fails.append(f"checkpoint: {ex}")
+
+passed_n = sum(1 for v in checks.values() if v)
+score = round(passed_n / len(checks), 6)
+passed = smoke_ok and passed_n == len(checks)
+print(json.dumps({
+    "passed": passed,
+    "score": score,
+    "details": "public migration contract checks passed (6/6)" if passed else f"public checks {passed_n}/{len(checks)}: " + "; ".join(fails[:4]),
+}))
+`;
+			writeFileSync(join(copy, "__pub_check.py"), pubProbe);
+			const out = execFileSync("python3", ["-B", join(copy, "__pub_check.py"), copy], {
 				cwd: copy,
 				encoding: "utf8",
 				timeout: 12_000,
 				stdio: ["ignore", "pipe", "pipe"],
 			});
-			return { passed: true, score: 1, details: "public smoke tests passed" };
+			const parsed = JSON.parse(out.trim().split("\n").at(-1) ?? "{}") as { passed?: boolean; score?: number; details?: string };
+			return {
+				passed: Boolean(parsed.passed),
+				score: Number(parsed.score) || 0,
+				details: String(parsed.details ?? "public checks completed"),
+			};
 		} catch (error) {
 			return { passed: false, score: 0, details: `public tests failed: ${String(error).slice(0, 260)}` };
 		} finally {

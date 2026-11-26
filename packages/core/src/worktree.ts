@@ -172,10 +172,17 @@ export class GitWorktreeManager implements WorktreeManager {
 
 	diffSha(worktreePath: string): string {
 		try {
-			const head = git(worktreePath, ["rev-parse", "HEAD"]);
+			// Hash the git TREE object (`HEAD^{tree}`) rather than the commit SHA so byte-identical
+			// workspace states across different commit messages/timestamps yield the exact same digest.
+			let tree = "";
+			try {
+				tree = git(worktreePath, ["rev-parse", "HEAD^{tree}"]);
+			} catch {
+				tree = git(worktreePath, ["rev-parse", "HEAD"]);
+			}
 			const status = git(worktreePath, ["status", "--porcelain"]);
 			const diff = git(worktreePath, ["diff"]);
-			return createHash("sha256").update(head).update("\0").update(status).update("\0").update(diff).digest("hex").slice(0, 16);
+			return createHash("sha256").update(tree).update("\0").update(status).update("\0").update(diff).digest("hex").slice(0, 16);
 		} catch {
 			return "unknown";
 		}

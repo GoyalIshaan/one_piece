@@ -2,16 +2,20 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import type {
-	DriverCapabilities,
-	FindingVerifier,
-	WorkerDriver,
-	WorkerSession,
-	WorkerSpawnSpec,
-	WorkerTurnResult,
+import {
+	allowSandboxReads,
+	denySandboxReads,
+	isSandboxReadBlocked,
+	type DriverCapabilities,
+	type FindingVerifier,
+	type WorkerDriver,
+	type WorkerSession,
+	type WorkerSpawnSpec,
+	type WorkerTurnResult,
 } from "@one-piece/core";
 import { DriverQuotaRouter } from "@one-piece/drivers";
 import {
+	classifyAdaptiveRegime,
 	createTopology,
 	enforceLineBudget,
 	probeWorkspaceEnvironment,
@@ -863,6 +867,247 @@ describe("RSI Harness Upgrades: Field Guide, Semantic Auto-Repair, Fail-Closed T
 				await os.dispose();
 				store.close();
 			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves previously accepted trunkFinding in SQLite when elastic-phase Phase-4 completion fails and rolls back", async () => {
+		const root = mkdtempSync(join(tmpdir(), "rsi-elastic-rollback-"));
+		try {
+			const seed = join(root, "seed");
+			mkdirSync(seed, { recursive: true });
+			writeFileSync(join(seed, "lane1.txt"), "todo\n");
+			writeFileSync(join(seed, "lane2.txt"), "todo\n");
+
+			const drv = new MockDriver("rb-drv", async (spec, prompt) => {
+				if (spec.role === "planner") {
+					return {
+						status: "completed",
+						finalText: JSON.stringify({
+							lanes: [
+								{ title: "Lane 1", description: "Write L1", owned_paths: ["lane1.txt"], cross_contracts: [] },
+								{ title: "Lane 2", description: "Write L2", owned_paths: ["lane2.txt"], cross_contracts: [] },
+							],
+						}),
+					};
+				}
+				if (spec.role === "integrator") {
+					// Speculative Phase-4 completion accidentally breaks lane1.txt!
+					writeFileSync(join(spec.workspace, "lane1.txt"), "BROKEN\n");
+					return { status: "completed", finalText: "attempted lane 2 but broke lane 1" };
+				}
+				if (prompt.includes("Lane 1/2")) {
+					writeFileSync(join(spec.workspace, "lane1.txt"), "L1\n");
+					return { status: "completed", finalText: "done L1" };
+				}
+				return { status: "interrupted", finalText: "" };
+			});
+
+			const store = new SqliteStore(join(root, "rb.db"));
+			const os = await SwarmOS.create({
+				runDir: join(root, "run"),
+				workspace: seed,
+				topology: "elastic-phase",
+				goal: { title: "Rollback preserves accepted finding", text: "Write L1 and L2" },
+				verifier: {
+					name: "l1-check",
+					version: "1.0.0",
+					scopes: ["deliverable"],
+					defaultScope: "deliverable",
+					async check({ workspace }) {
+						const ok = readFileSync(join(workspace, "lane1.txt"), "utf8").trim() === "L1";
+						return { status: ok ? "passed" : "failed", score: ok ? 1 : 0, message: ok ? "ok" : "broken" };
+					},
+				},
+				store,
+				router: new DriverQuotaRouter({
+					drivers: [{ driver: drv, config: { id: "rb-drv", kind: "codex-exec", maxConcurrent: 4 } }],
+					roles: { default: ["rb-drv"] },
+				}),
+			});
+			try {
+				const out = await os.execute(createTopology("elastic-phase", { peers: 2, enableSemanticRepair: true }));
+				// Trunk must roll back to L1, AND the original accepted finding MUST remain accepted in SQLite!
+				expect(readFileSync(join(os.worktrees.trunkPath, "lane1.txt"), "utf8").trim()).toBe("L1");
+				expect(out.nominatedFindingId).toBeTruthy();
+				const best = os.trust.bestVerifiedFinding(os.runId);
+				expect(best).toBeDefined();
+				expect(best!.finding.id).toBe(out.nominatedFindingId);
+				expect(best!.finding.status).toBe("accepted");
+			} finally {
+				await os.dispose();
+				store.close();
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("hashes git tree content in diffSha so evolution deduplicates identical clones and ignores Gen-2 zero-edit interrupts", async () => {
+		const root = mkdtempSync(join(tmpdir(), "rsi-evo-dedup-"));
+		try {
+			const seed = join(root, "seed");
+			mkdirSync(seed, { recursive: true });
+			writeFileSync(join(seed, "val.txt"), "0\n");
+
+			let gen2Slot0SeenCrossover = false;
+			let call = 0;
+			const drv = new MockDriver("evo-dedup", async (spec, prompt) => {
+				call += 1;
+				if (prompt.includes("[CROSSOVER]")) gen2Slot0SeenCrossover = true;
+				if (prompt.includes("Generation 1/2")) {
+					// Both Gen-1 slots write the EXACT same file contents -> MUST deduplicate into 1 basin!
+					writeFileSync(join(spec.workspace, "val.txt"), "SAME\n");
+					return { status: "completed", finalText: `clone-${call}` };
+				}
+				// Gen 2: interrupted with ZERO edits -> MUST NOT submit duplicate findings!
+				return { status: "interrupted", finalText: "" };
+			});
+
+			const store = new SqliteStore(join(root, "evo.db"));
+			const os = await SwarmOS.create({
+				runDir: join(root, "run"),
+				workspace: seed,
+				topology: "evolution",
+				goal: { title: "Dedup test", text: "Optimize val.txt" },
+				verifier: {
+					name: "val-check",
+					version: "1.0.0",
+					scopes: ["deliverable"],
+					defaultScope: "deliverable",
+					async check({ workspace }) {
+						const ok = readFileSync(join(workspace, "val.txt"), "utf8").trim() === "SAME";
+						return { status: ok ? "passed" : "failed", score: ok ? 1 : 0, message: ok ? "ok" : "no" };
+					},
+				},
+				store,
+				router: new DriverQuotaRouter({
+					drivers: [{ driver: drv, config: { id: "evo-dedup", kind: "codex-exec", maxConcurrent: 4 } }],
+					roles: { default: ["evo-dedup"] },
+				}),
+			});
+			try {
+				await os.execute(createTopology("evolution", { generations: 2, populationPerGen: 2 }));
+				// Because both Gen-1 clones had identical tree hashes, uniqueByBasin has length 1 -> NO bogus crossover!
+				expect(gen2Slot0SeenCrossover).toBe(false);
+				// Only the 2 Gen-1 workers submitted findings; Gen-2 zero-edit interrupted workers did NOT re-submit!
+				const findings = store.list("findings", { runId: os.runId });
+				expect(findings.length).toBe(2);
+			} finally {
+				await os.dispose();
+				store.close();
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves partial progress under binary verifiers and rolls back regressive conflict resolutions in pull-refinery", async () => {
+		const root = mkdtempSync(join(tmpdir(), "rsi-refinery-binary-"));
+		try {
+			const seed = join(root, "seed");
+			mkdirSync(seed, { recursive: true });
+			writeFileSync(join(seed, "a.txt"), "todo\n");
+			writeFileSync(join(seed, "b.txt"), "todo\n");
+
+			const drv = new MockDriver("bin-drv", async (spec, prompt) => {
+				if (spec.role === "planner") {
+					return {
+						status: "completed",
+						finalText: JSON.stringify({
+							tasks: [
+								{ key: "t1", title: "Alpha ticket", description: "TASK_ALPHA", depends_on: [] },
+								{ key: "t2", title: "Beta ticket", description: "TASK_BETA", depends_on: ["t1"] },
+							],
+						}),
+					};
+				}
+				if (prompt.includes("TASK_ALPHA")) writeFileSync(join(spec.workspace, "a.txt"), "A\n");
+				else if (prompt.includes("TASK_BETA")) writeFileSync(join(spec.workspace, "b.txt"), "B\n");
+				return { status: "completed", finalText: "done" };
+			});
+
+			const store = new SqliteStore(join(root, "bin.db"));
+			const os = await SwarmOS.create({
+				runDir: join(root, "run"),
+				workspace: seed,
+				topology: "pull-refinery",
+				goal: { title: "Binary verifier multi-ticket", text: "Write A and B" },
+				// Pure binary verifier with NO numeric score!
+				verifier: {
+					name: "binary-ab",
+					version: "1.0.0",
+					scopes: ["deliverable"],
+					defaultScope: "deliverable",
+					async check({ workspace }) {
+						const a = readFileSync(join(workspace, "a.txt"), "utf8").trim() === "A";
+						const b = readFileSync(join(workspace, "b.txt"), "utf8").trim() === "B";
+						return { status: a && b ? "passed" : "failed", message: `a=${a} b=${b}` };
+					},
+				},
+				store,
+				router: new DriverQuotaRouter({
+					drivers: [{ driver: drv, config: { id: "bin-drv", kind: "codex-exec", maxConcurrent: 4 } }],
+					roles: { default: ["bin-drv"] },
+				}),
+			});
+			try {
+				const out = await os.execute(createTopology("pull-refinery", { concurrency: 2, enableSemanticRepair: false }));
+				expect(readFileSync(join(os.worktrees.trunkPath, "a.txt"), "utf8").trim()).toBe("A");
+				expect(readFileSync(join(os.worktrees.trunkPath, "b.txt"), "utf8").trim()).toBe("B");
+				expect(out.nominatedFindingId).toBeTruthy();
+			} finally {
+				await os.dispose();
+				store.close();
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("classifies regimes accurately in adaptive topology and reference-counts concurrent sandbox read denies", () => {
+		const root = mkdtempSync(join(tmpdir(), "rsi-adaptive-sandbox-"));
+		try {
+			// 1. Sandbox refcounting: two concurrent denies require two allows before path becomes readable!
+			const secretDir = join(root, "hidden-secret");
+			mkdirSync(secretDir, { recursive: true });
+			denySandboxReads([secretDir]);
+			denySandboxReads([secretDir]);
+			expect(isSandboxReadBlocked(secretDir)).toBe(true);
+			allowSandboxReads([secretDir]);
+			expect(isSandboxReadBlocked(secretDir)).toBe(true); // still blocked for seat 2!
+			allowSandboxReads([secretDir]);
+			expect(isSandboxReadBlocked(secretDir)).toBe(false);
+
+			// 2. Adaptive regime classification across all 4 benchmark regimes
+			const optDir = join(root, "opt");
+			mkdirSync(optDir, { recursive: true });
+			writeFileSync(join(optDir, "kernel.py"), "def build_kernel(): pass\n");
+			writeFileSync(join(optDir, "vliw_sim.py"), "def run_vliw(): pass\n");
+
+			expect(classifyAdaptiveRegime({ workspaceDir: optDir, goal: "RCA shards", hasSeatConfigs: true }).delegate).toBe("elastic-phase");
+			expect(
+				classifyAdaptiveRegime({
+					workspaceDir: optDir,
+					goal: "Optimize build_kernel for minimum VLIW cycles and maximum speedup",
+					hasSeatConfigs: false,
+				}).delegate,
+			).toBe("evolution");
+			expect(
+				classifyAdaptiveRegime({
+					workspaceDir: optDir,
+					goal: "Implement 6 interacting modules (MVCC, SQL 3VL, cache, views) preserving cross-module semantic invariants",
+					hasSeatConfigs: false,
+				}).delegate,
+			).toBe("evolution");
+			expect(
+				classifyAdaptiveRegime({
+					workspaceDir: optDir,
+					goal: "Complete all 3 phases: Phase A forensics + Phase B FX migration + Phase C throughput bar",
+					hasSeatConfigs: false,
+				}).delegate,
+			).toBe("elastic-phase");
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

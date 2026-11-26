@@ -280,7 +280,7 @@ export const causalIncidentMeshTask: EvalTask = {
 			const shardFile = join(shardDir, "shard.json");
 			return [
 				`Seat assignment: You are Seat ${seatIdx} of ${inst.n}. Your private shard is at ${shardFile}.`,
-				"Other seats' shards and hidden directories are kernel-denied. Write `submissions/seat_0.json` using only accessible data.",
+				`Other seats' shards and hidden directories are kernel-denied. Write \`submissions/seat_${seatIdx}.json\` using only accessible data.`,
 			].join("\n");
 		});
 
