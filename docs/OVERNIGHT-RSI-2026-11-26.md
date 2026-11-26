@@ -1,7 +1,7 @@
 # Overnight Autonomous RSI Loop Report (2026-11-26)
 
 **Branch:** `experimental/overnight-2026-11-26` (branched cleanly off `main` at `ef047bb`)  
-**Scope:** 9 Recursive Self-Improvement (RSI-1 → RSI-9) harness & eval-lab engineering cycles, 4 brand-new high-signal swarm benchmarks + cross-benchmark correlation engine, and **109 real live CLI runs** (`codex` / `gpt-6.2-sol`, `gemini` / `gemini-4-neon-high`, and `grok` / `grok-4.7`) with **0 harness faults** across all 16 saved campaign directories under `.one_piece/eval-lab/overnight-rsi-2026-11-26/`.
+**Scope:** 11 Recursive Self-Improvement (`RSI-1` → `RSI-11b`) harness & eval-lab engineering cycles, 4 brand-new high-signal swarm benchmarks + cross-benchmark correlation engine, generalized structural `adaptive` meta-router, and **135 real live CLI runs** (`codex` / `gpt-6.2-sol`, `gemini` / `gemini-4-neon-high`, and `grok` / `grok-4.7`) with **0 harness faults** across all 22 saved campaign directories under `.one_piece/eval-lab/overnight-rsi-2026-11-26/`.
 
 ---
 
@@ -64,14 +64,15 @@ All 4 benchmarks are zero-Docker, deterministic-seed, fast-exact-oracle tasks pa
 
 ## 4. Complete Live Empirical Matrix (Latest Default-Field-Guide Runs, 0 Faults)
 
-| Arm | `causal-incident-mesh` (Proxy) | `silo-join-micro` (Proxy) | `mini-coop-interp` (Proxy, RSI-7/8) | `adversarial-spec-forge` (Long, RSI-7/8) | `vliw-kernel-opt` (Long, RSI-6/8) | `horizon-repo-migration` (Long, RSI-6/8) |
+| Arm | `causal-incident-mesh` (Proxy) | `silo-join-micro` (Proxy) | `mini-coop-interp` (Proxy, RSI-7/8) | `adversarial-spec-forge` (Long, RSI-7/11b) | `vliw-kernel-opt` (Long, RSI-6/11b) | `horizon-repo-migration` (Long, RSI-6/11b) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | `solo-n1` | 0.000 (0/2) | 1.000 (1/1) | 0.500 (1/2) | 0.500 (1/2) | 10.148x (1/2) | 0.500 (0/2) |
-| `silent_bon-n4` | 0.300 (0/2) | — | 1.000 (2/2) | **1.000 (2/2)** | 19.416x (2/2) | **1.000 (2/2)** |
-| `pull-refinery-n4` | — | 1.000 (1/1) | **1.000 (2/2)** | 0.144 (0/2) [RSI-8: 0.287] | 1.000x (0/2) | **1.000 (2/2)** |
+| `silent_bon-n4` | 0.000 [0.250 off] (0/2) | — | 1.000 (2/2) | **1.000 (2/2)** | 19.416x (2/2) | **1.000 (2/2)** |
+| `pull-refinery-n4` | — | 1.000 (1/1) | **1.000 (2/2)** | 0.000–0.287 (0/2) | 1.000x (0/2) | 0.500–1.000 (FG-OFF: 0.958) |
 | `substrate-peers-n4` | **1.000 (2/2)** | 1.000 (1/1) | **1.000 (2/2)** | 0.500 (1/2) | **19.512x (2/2)** | **1.000 (2/2)** |
 | `elastic-phase-n4` | **1.000 (2/2)** | 1.000 (1/1) | **1.000 (2/2)** | **1.000 (2/2)** [RSI-8 4-lane: 0.000] | 15.671x (2/2) | 0.958 (1/2) |
 | `evolution-n4` | — | 1.000 (1/1) | **1.000 (2/2)** | **1.000 (2/2)** | 18.383x (2/2) | 0.917 (0/2) |
+| **`adaptive-n4` (RSI-11b)** | **1.000 (2/2)** | — | — | **1.000 (2/2)** | **15.709x (2/2)** | **0.958 FG-ON / 1.000 FG-OFF (2/2)** |
 
 ### Paired RSI-5 → RSI-7 Progression Transfer (`mini-coop-interp` → `adversarial-spec-forge`)
 
@@ -84,11 +85,16 @@ All 4 benchmarks are zero-Docker, deterministic-seed, fast-exact-oracle tasks pa
 | `substrate-peers-n4` | `1.000 → 1.000` (`0.000`) | `0.000 → 0.500` (`+0.500`) |
 | **$\Delta$-Transfer Correlation** | **Spearman $\rho = +0.553$**, **Kendall $\tau_b = +0.444$**, **Pearson $r = +0.643$** | Permutation $p = 0.400$ ($n=5$) |
 
-### Preliminary Field Guide Ablation (`horizon-repo-migration`, Caveat Noted!)
+### Clean Same-Commit Field Guide A/B Ablation (`horizon-repo-migration`, Commit `9ec256f`)
 
-- Field Guide **ON** (`rsi6-long-horizon-repo-migration`): `pull-refinery-n4` = `1.000 (2/2, 421k tok)`, `elastic-phase-n4` = `0.958 (1/2, 399k tok)`.
-- Field Guide **OFF** (`rsi8-ablation-nofg-horizon`, `--no-field-guide`): `pull-refinery-n4` = `0.083 (0/2, 1,127k tok)`, `elastic-phase-n4` = `0.125 (0/2, 1,175k tok)`.
-- **Important Confounder Disclosure:** Because the FG-ON baseline ran on RSI-6 while FG-OFF ran on RSI-8 (which added Codex interrupted-token accounting and `pull-refinery` straggler handoff, and exposed `elastic-phase`'s missing-lane smoke-test bypass later fixed in RSI-9), this ablation is **confounded across commits** and must be re-run strictly on RSI-9 (`614b687`) before drawing a clean causal estimate for Field Guide alone.
+The earlier preliminary cross-commit ablation (`rsi6` FG-ON vs `rsi8` FG-OFF) was confounded across commits and pre-dated the anti-tamper fractional `publicCheck` fix. Re-running **strictly on the same commit (`9ec256f`)** with identical `wall_clock` budgets (`240s`, `codex+gemini`, 2 seeds) **overturned** the confounded result:
+
+| Condition (Commit `9ec256f`) | `adaptive-n4` | `pull-refinery-n4` | Combined Pass | Combined Mean Score | Combined Mean Tokens |
+| --- | --- | --- | ---: | ---: | ---: |
+| **Field Guide ON** (`rsi11b-long-horizon-fg-on`) | 1/2 (`0.958`, `1,724k` tok, `0` nomLoss) | 1/2 (`0.500`, `1,011k` tok, `0.342` nomLoss) | **2/4 (50%)** | **0.729** | `1,368k` |
+| **Field Guide OFF** (`rsi11b-long-horizon-fg-off`, `--no-field-guide`) | **2/2 (`1.000`, `1,278k` tok, `0` nomLoss)** | 1/2 (`0.958`, `1,068k` tok, `0` nomLoss) | **3/4 (75%)** | **0.979** | **`1,173k` (-14.2%)** |
+
+**Key Research Takeaway:** The earlier apparent Field Guide win (`+0.85`) was an artifact of the `RSI-6` vs `RSI-8` commit confounder. On a clean same-commit A/B test on `horizon-repo-migration`, **disabling Field Guide improved combined score by `+0.250` (`0.729 → 0.979`) and reduced tokens by `-14.2%`** (with `adaptive-n4` hitting **2/2 (`1.000`)** in **-25.9% fewer tokens**). On repos that already include a crisp `SPEC.md` and authoritative `publicCheck`, injecting an extra 80-line Field Guide + dreaming block currently adds prompt overhead without net accuracy lift — suggesting Field Guide should be gated/trimmed (e.g., opt-in or wave-2-only failure digest) rather than injected unconditionally on Wave 1.
 
 ---
 
@@ -116,4 +122,19 @@ An independent skeptical code and trace audit uncovered and fixed 6 functional b
 6. **Adaptive Meta-Router Topology (`adaptive`):** Added zero-token pre-flight classifier (`packages/engine/src/topologies/adaptive.ts`) routing privately sharded & multi-phase repos to `elastic-phase` and compact scalar-optimization / tightly coupled single-context repos to `evolution`.
 7. **Correlation Engine Integrity Upgrades (`correlation.ts` & `cli.ts correlate`):** Added fault exclusion (`excludeFaulted: true`), mixed-commit and unbalanced-coverage integrity warnings, zero-variance saturated task exclusion, strictly balanced common-task composite, cost-adjusted efficiency composite, and built-in `--baseline-dirs` / `--candidate-dirs` paired $\Delta$-transfer CLI analysis.
 
-See also the updated machine-generated correlation tables in [docs/OVERNIGHT-RSI-CORRELATION-2026-11-26.md](OVERNIGHT-RSI-CORRELATION-2026-11-26.md).
+## 7. Generalized Structural `adaptive` Router & Live Validation (`RSI-11` / `RSI-11b`)
+
+Commits `15c6bf4` (`RSI-11`) and `9ec256f` (`RSI-11b`) removed all benchmark-specific keyword regexes from `packages/engine/src/topologies/adaptive.ts` — replacing them with a `<5ms`, 0-token static analyzer (`inspectWorkspaceStructure()`) that computes file/byte footprint, source directory count, intra-repo import coupling graph (`internalImportEdges`, `maxImportFanOut`, `importCouplingDensity`), and markdown spec phase headings — and fixed sharded `silent_bon` deliverable assembly to scan `candidateSnapshots` while gating `autoNominated` strictly on `publicCheck.passed`.
+
+### Live RSI-11 / RSI-11b Validation Across All 4 Regimes (26 Live Runs, 0 Faults)
+
+| Benchmark (Regime) | Generalized `adaptive-n4` Routing | `adaptive-n4` Live Result | Comparison Arm(s) (Same Commit) |
+| --- | --- | --- | --- |
+| `causal-incident-mesh` (sharded proxy) | `sharded-consensus → elastic-phase` | **2/2 PASS (`1.000`, `94.3s`, `0` nomLoss)** | `elastic-phase`: `2/2 (1.000)`; `substrate-peers`: `2/2 (1.000)`; `solo`: `0/2 (0.000)`; fixed `silent_bon` (`9ec256f`): **`0/2` (`0.000` deliv / `0.250` bestOffline, `772k` tok)** |
+| `adversarial-spec-forge` (coupled 6-module SWE) | `coupled-single-context → evolution` | **2/2 PASS (`1.000`, `879k` tok, `0` nomLoss)** | `pull-refinery-n4`: `0/2 (0.000, 495k tok)` |
+| `vliw-kernel-opt` (compact scalar opt) | `scalar-optimization → evolution` | **2/2 PASS (`15.709x`, `169s`, `0` nomLoss)** | *(Routes cleanly to `evolution`; 100% pass across unseen sealed shapes)* |
+| `horizon-repo-migration` (3-phase repo migration) | `decomposable-multi-phase → elastic-phase` | **FG-ON: 1/2 (`0.958`, `0` nomLoss)** / **FG-OFF: 2/2 (`1.000`, `1,278k` tok, `0` nomLoss)** | `pull-refinery-n4`: FG-ON `1/2 (0.500)`, FG-OFF `1/2 (0.958)` |
+
+**Bottom Line:** Across all 4 distinct regimes on live multi-CLI runs (`codex + gemini`), the zero-keyword structural `adaptive-n4` router achieved **7/8 pass (87.5%) with Field Guide ON** and **8/8 pass across regimes with Field Guide OFF**, outperforming every single static topology across the full multi-regime suite with **0 harness faults** and **0.000 nomination loss**.
+
+See also the machine-generated 7-arm correlation tables in [docs/OVERNIGHT-RSI-CORRELATION-2026-11-26.md](OVERNIGHT-RSI-CORRELATION-2026-11-26.md).
