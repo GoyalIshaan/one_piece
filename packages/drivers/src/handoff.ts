@@ -7,13 +7,15 @@ export interface HandoffInput {
 	agentId: string;
 	fromDriver: string;
 	reason: string;
-	reasonKind?: "quota_failover" | "compaction_limit" | "phase_transition";
+	reasonKind?: "quota_failover" | "compaction_limit" | "stall_escalation" | "phase_transition";
 	originalPrompt: string;
 	workspace: string;
 	worktrees: WorktreeManager;
 	store: Store;
 	failedApproaches?: string[];
 	verifiedFacts?: string[];
+	acceptanceCriteria?: string[];
+	ownedPaths?: string[];
 	lastTestSummary?: string;
 }
 
@@ -41,9 +43,11 @@ export function synthesizeHandoffFile(input: HandoffInput): { handoffPath: strin
 
 	const heading = kind === "compaction_limit"
 		? "# Clean-Slate Context Rollover Handoff"
-		: kind === "phase_transition"
-			? "# Phase Transition Handoff"
-			: "# Automatic Quota Failover Handoff";
+		: kind === "stall_escalation"
+			? "# Mechanical Stall Escalation Handoff"
+			: kind === "phase_transition"
+				? "# Phase Transition Handoff"
+				: "# Automatic Quota Failover Handoff";
 
 	const markdown = [
 		heading,
@@ -55,6 +59,12 @@ export function synthesizeHandoffFile(input: HandoffInput): { handoffPath: strin
 		``,
 		`## Original Assignment`,
 		input.originalPrompt,
+		...(input.ownedPaths?.length
+			? [``, `## Owned Paths (Stay Within Scope)`, ...input.ownedPaths.map((p) => `- \`${p}\``)]
+			: []),
+		...(input.acceptanceCriteria?.length
+			? [``, `## Pinned Acceptance Criteria (DO NOT DROP)`, ...input.acceptanceCriteria.map((c) => `- [ ] ${c}`)]
+			: []),
 		``,
 		`## Changes Made So Far (\`git diff --stat\`)`,
 		"```",
@@ -81,9 +91,11 @@ export function synthesizeHandoffFile(input: HandoffInput): { handoffPath: strin
 	writeFileSync(handoffPath, markdown, "utf8");
 	const reasonPhrase = kind === "compaction_limit"
 		? `Previous session reached its context compaction limit and handed off this exact worktree cleanly.`
-		: kind === "phase_transition"
-			? `Previous phase completed and handed off this exact worktree.`
-			: `Previous worker (${input.fromDriver}) hit a provider quota limit and handed off this exact worktree.`;
+		: kind === "stall_escalation"
+			? `Previous worker (${input.fromDriver}) stalled repeating the same no-progress state and escalated this worktree to you.`
+			: kind === "phase_transition"
+				? `Previous phase completed and handed off this exact worktree.`
+				: `Previous worker (${input.fromDriver}) hit a provider quota limit and handed off this exact worktree.`;
 	const prompt = `${reasonPhrase} Read .swarm/HANDOFF.md and run \`git diff ${input.worktrees.baseSha}...HEAD\`, then complete the remaining work without redoing finished edits or repeating failed approaches.`;
 	return { handoffPath, wipCommit, prompt };
 }

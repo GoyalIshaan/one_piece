@@ -3,14 +3,15 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import type {
-	DriverCapabilities,
-	DriverConfig,
-	DriverHealth,
-	WorkerDriver,
-	WorkerSession,
-	WorkerSpawnSpec,
-	WorkerTurnResult,
+import {
+	type DriverCapabilities,
+	type DriverConfig,
+	type DriverHealth,
+	seatbeltReadDenyCommand,
+	type WorkerDriver,
+	type WorkerSession,
+	type WorkerSpawnSpec,
+	type WorkerTurnResult,
 } from "@one-piece/core";
 import { buildCliEnv, classifyQuotaError, probeCliBinary } from "./classify.ts";
 
@@ -70,7 +71,8 @@ export class AgyAcpDriver implements WorkerDriver {
 			...(this.config.extraArgs ?? []),
 		];
 
-		const child = spawn(binary, args, {
+		const [spawnBin, ...spawnArgs] = seatbeltReadDenyCommand([binary, ...args], spec.deniedReadPaths ?? []);
+		const child = spawn(spawnBin!, spawnArgs, {
 			cwd: spec.workspace,
 			env,
 			stdio: ["pipe", "pipe", "pipe"],

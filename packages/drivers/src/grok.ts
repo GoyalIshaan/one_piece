@@ -3,14 +3,15 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import type {
-	DriverCapabilities,
-	DriverConfig,
-	DriverHealth,
-	WorkerDriver,
-	WorkerSession,
-	WorkerSpawnSpec,
-	WorkerTurnResult,
+import {
+	type DriverCapabilities,
+	type DriverConfig,
+	type DriverHealth,
+	seatbeltReadDenyCommand,
+	type WorkerDriver,
+	type WorkerSession,
+	type WorkerSpawnSpec,
+	type WorkerTurnResult,
 } from "@one-piece/core";
 import { buildCliEnv, classifyQuotaError, probeCliBinary } from "./classify.ts";
 import { prepareCleanGrokHome } from "./cli-home.ts";
@@ -91,7 +92,14 @@ export class GrokCliDriver implements WorkerDriver {
 			? buildCliEnv([], extraEnv)
 			: buildCliEnv(["XAI_API_KEY", "GROK_CODE_XAI_API_KEY"], extraEnv);
 		let currentSessionId = spec.resumeSessionId;
-		let activeChild: ChildProcess | undefined;
+		type CliSessionState =
+			| { readonly kind: "idle" }
+			| { readonly kind: "running"; readonly child: ChildProcess }
+			| { readonly kind: "closed" };
+		let sessionState: CliSessionState = { kind: "idle" };
+		const resetToIdle = (): void => {
+			if (sessionState.kind !== "closed") sessionState = { kind: "idle" };
+		};
 		const driverId = this.id;
 		const config = this.config;
 
@@ -101,6 +109,12 @@ export class GrokCliDriver implements WorkerDriver {
 				return currentSessionId;
 			},
 			async runTurn(prompt: string, opts = {}): Promise<WorkerTurnResult> {
+				if (sessionState.kind === "closed") {
+					throw new Error("GrokCliDriver session is closed");
+				}
+				if (sessionState.kind === "running") {
+					throw new Error("GrokCliDriver session already has an active turn in flight");
+				}
 				const startedAt = Date.now();
 				const model = spec.model ?? config.model;
 				const args = [
@@ -121,13 +135,14 @@ export class GrokCliDriver implements WorkerDriver {
 				];
 
 				return new Promise<WorkerTurnResult>((resolve) => {
-					const child = spawn(binary, args, {
+					const [spawnBin, ...spawnArgs] = seatbeltReadDenyCommand([binary, ...args], spec.deniedReadPaths ?? []);
+					const child = spawn(spawnBin!, spawnArgs, {
 						cwd: spec.workspace,
 						env,
 						stdio: ["ignore", "pipe", "pipe"],
 						detached: true,
 					});
-					activeChild = child;
+					sessionState = { kind: "running", child };
 
 					const textChunks: string[] = [];
 					let stderr = "";
@@ -213,7 +228,7 @@ export class GrokCliDriver implements WorkerDriver {
 					});
 
 					child.on("close", (code) => {
-						activeChild = undefined;
+						resetToIdle();
 						rl.close();
 						if (timer) clearTimeout(timer);
 						opts.signal?.removeEventListener("abort", onAbort);
@@ -241,10 +256,12 @@ export class GrokCliDriver implements WorkerDriver {
 				});
 			},
 			async interrupt(): Promise<void> {
-				if (activeChild) killTree(activeChild);
+				if (sessionState.kind === "running") killTree(sessionState.child);
 			},
 			async close(): Promise<void> {
-				if (activeChild) killTree(activeChild);
+				const prev = sessionState;
+				sessionState = { kind: "closed" };
+				if (prev.kind === "running") killTree(prev.child);
 			},
 		};
 	}
@@ -321,7 +338,8 @@ export class GrokAcpDriver implements WorkerDriver {
 			"stdio",
 		];
 
-		const child = spawn(binary, args, {
+		const [spawnBin, ...spawnArgs] = seatbeltReadDenyCommand([binary, ...args], spec.deniedReadPaths ?? []);
+		const child = spawn(spawnBin!, spawnArgs, {
 			cwd: spec.workspace,
 			env,
 			stdio: ["pipe", "pipe", "pipe"],

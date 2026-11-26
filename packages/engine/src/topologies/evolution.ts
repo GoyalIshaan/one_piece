@@ -158,11 +158,15 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 			}
 
 			const best = [...archive].sort((a, b) => b.score - a.score)[0];
-			if (best) os.nominate(best.findingId);
+			const bestRev = best ? (os.store.get("findings", best.findingId)?.submissions.at(-1)?.revision ?? 1) : undefined;
+			if (best && bestRev !== undefined) os.nominate(best.findingId, bestRev);
+			const nomination = best && bestRev !== undefined
+				? { nominatedFindingId: best.findingId, nominatedRevision: bestRev }
+				: {};
 			return {
 				status: signal.aborted ? "stopped" : "done",
 				summary: `Evolution completed: ${archive.length} verified archive entries, ${negativeMemory.length} negative records${best ? `, best=${best.findingId} (score=${best.score.toFixed(4)})` : ""}.`,
-				nominatedFindingId: best?.findingId,
+				...nomination,
 			};
 		},
 	};

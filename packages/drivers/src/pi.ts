@@ -155,10 +155,25 @@ export class PiInProcessDriver implements WorkerDriver {
 
 		const driverId = this.id;
 		const resolvedModel = `${model.provider}/${model.id}`;
+		type PiSessionState =
+			| { readonly kind: "idle" }
+			| { readonly kind: "running" }
+			| { readonly kind: "closed" };
+		let sessionState: PiSessionState = { kind: "idle" };
+		const resetToIdle = (): void => {
+			if (sessionState.kind !== "closed") sessionState = { kind: "idle" };
+		};
 		return {
 			driverId,
 			sessionId: spec.agentId,
 			async runTurn(prompt: string, opts = {}): Promise<WorkerTurnResult> {
+				if (sessionState.kind === "closed") {
+					throw new Error("PiInProcessDriver session is closed");
+				}
+				if (sessionState.kind === "running") {
+					throw new Error("PiInProcessDriver session already has an active turn in flight");
+				}
+				sessionState = { kind: "running" };
 				const startedAt = Date.now();
 				turnUsage = { inputTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0, usd: 0 };
 				needsHandoff = false;
@@ -220,15 +235,18 @@ export class PiInProcessDriver implements WorkerDriver {
 				} finally {
 					if (timer) clearTimeout(timer);
 					opts.signal?.removeEventListener("abort", onAbort);
+					resetToIdle();
 				}
 			},
 			async steer(message: string): Promise<void> {
+				if (sessionState.kind === "closed") return;
 				agent.steer({ role: "user", content: [{ type: "text", text: message }], timestamp: Date.now() } as any);
 			},
 			async interrupt(): Promise<void> {
-				agent.abort();
+				if (sessionState.kind === "running") agent.abort();
 			},
 			async close(): Promise<void> {
+				sessionState = { kind: "closed" };
 				agent.abort();
 			},
 		};

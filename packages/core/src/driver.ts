@@ -31,6 +31,8 @@ export interface DriverCapabilities {
 	supportsMcpHttp: boolean;
 }
 
+export type DriverTier = "sidekick" | "standard" | "frontier";
+
 export interface CompactionEvent {
 	strategy: "micro" | "anchor";
 	beforeTokens: number;
@@ -48,6 +50,8 @@ export interface WorkerCompactionPolicy {
 	minPruneBytes?: number;
 	/** After this many compactions in one session, signal Tier 2 Clean-Slate Handoff (default 2). */
 	maxCompactionsBeforeHandoff?: number;
+	/** Acceptance criteria & owned paths pinned verbatim into structured compaction anchors. */
+	pinnedChecklist?: string[];
 	/** Artifact store hook used to spill pruned tool outputs losslessly. */
 	spillArtifact?: (label: string, content: string) => { id: string; sha256: string };
 	/** Callback invoked whenever Tier 1 compaction runs. */
@@ -71,6 +75,8 @@ export interface WorkerSpawnSpec {
 	mcp?: McpConnectionInfo;
 	/** Direct tool definitions for in-process drivers (PiInProcessDriver). */
 	tools?: ToolDefinition[];
+	/** Paths this worker process (and any child commands) must be kernel-blocked from reading (e.g. hidden grader / sibling private shards). */
+	deniedReadPaths?: readonly string[];
 	/** Resume an existing vendor CLI session id if supported. */
 	resumeSessionId?: string;
 	/** Optional event hook for streaming tool/text activity into TriggerEngine. */
@@ -145,6 +151,8 @@ export interface WorkerDriver {
 export interface DriverConfig {
 	id: string;
 	kind: DriverKind;
+	/** Capability/cost tier used for cache-free escalation & sidekick delegation (default "standard"). */
+	tier?: DriverTier;
 	/** Executable override (defaults to `codex`, `grok`, `gemini`). */
 	binary?: string;
 	/** Default model ID for this driver (optional; uses CLI default if omitted). */
@@ -174,11 +182,19 @@ export interface QuotaPoolRouter {
 	attachBus?(bus: EventBus, runId: string): void;
 	drivers(): WorkerDriver[];
 	getDriver(id: string): WorkerDriver | undefined;
+	getDriverTier?(driverId: string): DriverTier;
+	getDriverConfig?(driverId: string): DriverConfig | undefined;
 	healthCheckAll(): Promise<DriverHealth[]>;
-	/** Acquire a healthy driver for a role, respecting concurrency permits, cooldowns, and cross-provider avoidance. */
+	/** Acquire a healthy driver for a role, respecting concurrency permits, tiers, cooldowns, and cross-provider avoidance. */
 	acquireForRole(
 		role: Role,
-		opts?: { preferredDriverId?: string; avoidDrivers?: readonly string[]; signal?: AbortSignal },
+		opts?: {
+			preferredDriverId?: string;
+			avoidDrivers?: readonly string[];
+			minTier?: DriverTier;
+			maxTier?: DriverTier;
+			signal?: AbortSignal;
+		},
 	): Promise<DriverPoolSelection>;
 	/** Record a classified rate-limit or auth error against a driver. */
 	reportQuotaError(driverId: string, error: QuotaErrorClass): void;

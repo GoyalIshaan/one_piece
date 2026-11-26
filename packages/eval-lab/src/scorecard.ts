@@ -29,6 +29,7 @@ const COORDINATION_TOOLS = new Set([
 	"board_search",
 	"board_publish",
 	"board_visit",
+	"board_wait",
 	"spawn_children",
 	"spawn_agent",
 	"spawn_task",

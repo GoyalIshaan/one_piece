@@ -1,11 +1,19 @@
 import type { QuotaErrorClass } from "./driver.ts";
 import {
+	type AgentRecord,
+	type AgentStatus,
 	assertNever,
+	type BoardPost,
 	type ClaimedTaskRecord,
+	type EvidenceLevel,
+	type Finding,
+	type FindingSubmission,
 	type ProviderQuotaRecord,
+	type ReviewRound,
 	type Run,
 	type TaskRecord,
 	type TaskStatus,
+	TERMINAL_AGENT_STATUSES,
 } from "./types.ts";
 
 const DEFAULT_COOLDOWN_MS = 15 * 60_000;
@@ -209,4 +217,131 @@ export function transitionRun(current: Run, event: RunTransitionEvent): { readon
 		default:
 			return assertNever(event, "Unhandled RunTransitionEvent");
 	}
+}
+
+// --- 4. Agent Lifecycle State Machine ---
+// Invariant: Terminal agent states (`done | stalled | failed | stopped`) are absorbing;
+// `stalled` and `failed` ALWAYS carry a non-empty `statusReason`, and `pending | running` never carry one.
+
+export type AgentTransitionEvent =
+	| { readonly type: "set_status"; readonly status: AgentStatus; readonly reason?: string; readonly now: number };
+
+const TERMINAL_AGENT_SET = new Set<string>(TERMINAL_AGENT_STATUSES);
+
+export function transitionAgentRecord(
+	current: AgentRecord,
+	event: AgentTransitionEvent,
+): { readonly next: AgentRecord; readonly changed: boolean } {
+	if (TERMINAL_AGENT_SET.has(current.status)) {
+		return { next: current, changed: false };
+	}
+	const { status: _s, statusReason: _r, ...base } = current;
+	switch (event.status) {
+		case "pending":
+		case "running":
+			return {
+				next: { ...base, status: event.status, updatedAt: event.now },
+				changed: current.status !== event.status,
+			};
+		case "parked":
+		case "done":
+		case "stopped":
+			return {
+				next: {
+					...base,
+					status: event.status,
+					...(event.reason ? { statusReason: event.reason } : {}),
+					updatedAt: event.now,
+				},
+				changed: true,
+			};
+		case "stalled":
+		case "failed":
+			return {
+				next: {
+					...base,
+					status: event.status,
+					statusReason: event.reason?.trim() || `Agent ${event.status}`,
+					updatedAt: event.now,
+				},
+				changed: true,
+			};
+		default:
+			return assertNever(event.status, "Unhandled AgentStatus");
+	}
+}
+
+// --- 5. Finding Review Lifecycle State Machine ---
+// Invariant: `unreviewed` ALWAYS carries `reviewError` (never silently accepted);
+// `accepted | rejected | needs_work` NEVER retain stale `reviewError` or `retryAfter`.
+
+export type FindingTransitionEvent =
+	| {
+		readonly type: "new_submission";
+		readonly claim: string;
+		readonly summary: string;
+		readonly evidence?: string[];
+		readonly level: EvidenceLevel;
+		readonly score?: number;
+		readonly submission: FindingSubmission;
+		readonly now: number;
+	}
+	| { readonly type: "verdict"; readonly round: ReviewRound; readonly now: number }
+	| { readonly type: "review_error"; readonly error: string; readonly retryAfter?: number; readonly now: number }
+	| { readonly type: "challenge_failed"; readonly now: number };
+
+export function transitionFinding(current: Finding, event: FindingTransitionEvent): Finding {
+	const { status: _s, confidence: _c, reviewError: _re, retryAfter: _ra, ...base } = current;
+	switch (event.type) {
+		case "new_submission":
+			return {
+				...base,
+				claim: event.claim,
+				summary: event.summary,
+				evidence: event.evidence ?? base.evidence,
+				level: event.level,
+				score: event.score ?? base.score,
+				submissions: [...base.submissions, event.submission],
+				status: "pending_review",
+				updatedAt: event.now,
+			};
+		case "verdict":
+			return {
+				...base,
+				status: event.round.verdict,
+				confidence: event.round.confidence ?? current.confidence,
+				rounds: [...base.rounds, event.round],
+				updatedAt: event.now,
+			};
+		case "review_error":
+			return {
+				...base,
+				status: "unreviewed",
+				reviewError: event.error.trim() || "Review lens failed",
+				...(event.retryAfter !== undefined ? { retryAfter: event.retryAfter } : {}),
+				updatedAt: event.now,
+			};
+		case "challenge_failed":
+			return {
+				...base,
+				status: "needs_work",
+				confidence: current.confidence,
+				updatedAt: event.now,
+			};
+		default:
+			return assertNever(event, "Unhandled FindingTransitionEvent");
+	}
+}
+
+// --- 6. BoardPost Supersede Transition ---
+// Invariant: A post can never supersede itself, and an already-superseded post cannot be superseded again.
+
+export type SupersedePostOutcome =
+	| { readonly ok: true; readonly updated: BoardPost; readonly reason?: never }
+	| { readonly ok: false; readonly reason: "self_supersede" | "already_superseded"; readonly updated?: never };
+
+export function transitionSupersedePost(target: BoardPost, replacementId: string): SupersedePostOutcome {
+	if (target.id === replacementId) return { ok: false, reason: "self_supersede" };
+	if (target.supersededBy) return { ok: false, reason: "already_superseded" };
+	return { ok: true, updated: { ...target, supersededBy: replacementId } };
 }

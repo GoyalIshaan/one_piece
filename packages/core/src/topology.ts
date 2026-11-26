@@ -1,16 +1,18 @@
-import type { DriverPoolSelection, McpConnectionInfo, QuotaPoolRouter, WorkerSession, WorkerTurnResult } from "./driver.ts";
+import type { DriverPoolSelection, DriverTier, McpConnectionInfo, QuotaPoolRouter, WorkerSession, WorkerTurnResult } from "./driver.ts";
 import type { EventBus } from "./events.ts";
 import type { FindingVerifier, ResourceScheduler, SecretBroker } from "./services.ts";
-import type { Store } from "./store.ts";
+import type { BoardPostLabelResult, Store } from "./store.ts";
 import type {
 	AgentRecord,
 	ArtifactRecord,
 	BoardPost,
 	EvidenceLevel,
+	Exclusive,
 	Finding,
 	JsonSchema,
 	Role,
 	Run,
+	RunNomination,
 	TaskRecord,
 	ToolDefinition,
 } from "./types.ts";
@@ -20,6 +22,10 @@ export interface WorktreeHandle {
 	branch: string;
 	baseSha: string;
 }
+
+export type MergeTrunkResult =
+	| { readonly ok: true; readonly commitSha: string; readonly conflictFiles?: never; readonly error?: never }
+	| { readonly ok: false; readonly conflictFiles: string[]; readonly error: string; readonly commitSha?: never };
 
 export interface WorktreeManager {
 	readonly repoRoot: string;
@@ -31,7 +37,8 @@ export interface WorktreeManager {
 	diffStat(worktreePath: string, baseRef?: string): string;
 	diffSha(worktreePath: string): string;
 	writeGitExclude(worktreePath: string, patterns: readonly string[]): void;
-	mergeIntoTrunk(branch: string, opts?: { message?: string }): { ok: boolean; commitSha?: string; error?: string };
+	mergeIntoTrunk(branch: string, opts?: { message?: string }): MergeTrunkResult;
+	mergePreviewDiff(branch: string): { baseSha: string; trunkDiff: string; branchDiff: string };
 	remove(worktreePath: string): void;
 }
 
@@ -95,20 +102,111 @@ export interface TrustService {
 	drainPending(): Promise<void>;
 }
 
+export interface BoardPublishInput {
+	runId: string;
+	authorAgentId: string;
+	authorHandle?: string;
+	topic: string;
+	summary: string;
+	body?: string;
+	board?: string;
+	references?: Array<{ postId: string; reason: string }>;
+	artifactIds?: string[];
+	parentPostId?: string;
+	threadId?: string;
+	labels?: Record<string, string>;
+	supersedes?: string;
+	ifLatestId?: string;
+	idempotencyKey?: string;
+	/** Only OS subsystems (TrustLayer, Refinery, SwarmOS) may set reserved `os:*` / `verified` labels. */
+	isOsActor?: boolean;
+}
+
+export interface BoardQueryOptions {
+	query?: string;
+	k?: number;
+	offset?: number;
+	board?: string;
+	topic?: string;
+	threadId?: string;
+	labels?: readonly string[];
+	afterSeq?: number;
+	includeSuperseded?: boolean;
+}
+
+export interface BoardTopicSummary {
+	topic: string;
+	count: number;
+	latestSeq: number;
+}
+
+export interface BoardSearchHit {
+	post: BoardPost;
+	score: number;
+	citations: number;
+}
+
+export interface BoardQueryResult {
+	hits: BoardSearchHit[];
+	totalMatches: number;
+	cursor: number;
+	topics: BoardTopicSummary[];
+}
+
+export interface BoardThreadView {
+	root: BoardPost;
+	replies: BoardPost[];
+	earlierReplies: number;
+	newestId: string;
+	cursor: number;
+}
+
+export interface BoardLabelInput {
+	set?: Record<string, string>;
+	unset?: readonly string[];
+	ifMatch?: Record<string, string | null>;
+	actorId: string;
+	isOsActor?: boolean;
+}
+
+export interface BoardWaitOptions {
+	afterSeq?: number;
+	board?: string;
+	topic?: string;
+	threadId?: string;
+	labels?: readonly string[];
+	minPosts?: number;
+	timeoutMs?: number;
+	signal?: AbortSignal;
+}
+
+export type BoardWaitResult = Exclusive<
+	| {
+		readonly status: "matched";
+		readonly timedOut: false;
+		readonly posts: [BoardPost, ...BoardPost[]];
+		readonly cursor: number;
+		readonly topics: BoardTopicSummary[];
+	}
+	| {
+		readonly status: "timed_out" | "aborted";
+		readonly timedOut: true;
+		readonly posts: BoardPost[];
+		readonly cursor: number;
+		readonly topics: BoardTopicSummary[];
+	}
+>;
+
 export interface BoardService {
-	publish(input: {
-		runId: string;
-		authorAgentId: string;
-		topic: string;
-		summary: string;
-		body?: string;
-		board?: string;
-		references?: Array<{ postId: string; reason: string }>;
-		artifactIds?: string[];
-		parentPostId?: string;
-	}): BoardPost;
-	search(runId: string, query: string, opts?: { k?: number; board?: string }): Array<{ post: BoardPost; score: number; citations: number }>;
-	visit(postId: string): { post: BoardPost; citedBy: BoardPost[] } | undefined;
+	publish(input: BoardPublishInput): BoardPost;
+	search(runId: string, query: string, opts?: { k?: number; board?: string }): BoardSearchHit[];
+	query(runId: string, opts?: BoardQueryOptions): BoardQueryResult;
+	topics(runId: string, board?: string): BoardTopicSummary[];
+	visit(postId: string): { post: BoardPost; citedBy: BoardPost[]; replies?: BoardPost[]; newestId?: string; cursor?: number } | undefined;
+	thread(postId: string, opts?: { latest?: number }): BoardThreadView | undefined;
+	label(postId: string, input: BoardLabelInput): BoardPostLabelResult;
+	digest(runId: string, board?: string): string;
+	wait(runId: string, opts?: BoardWaitOptions): Promise<BoardWaitResult>;
 	recent(runId: string, limit?: number): BoardPost[];
 }
 
@@ -135,6 +233,8 @@ export interface ToolScope {
 	excludeSkills?: readonly string[];
 	/** Expose sandboxed coordinator Code Mode (`run_swarm_script`, default false). */
 	codeMode?: boolean;
+	/** Expose disposable read-only `delegate_explore` sidekick tool (default true for planner/integrator/root). */
+	sidekick?: boolean;
 	/** Optional extended/overflow tools exposed via `.swarm/tools/` + frozen `call_tool` dispatcher. */
 	extendedTools?: ToolDefinition[];
 	/** Include local workspace tools (automatically true for `pi-in-process`). */
@@ -143,14 +243,22 @@ export interface ToolScope {
 
 export interface SpawnWorkerRequest {
 	role: Role;
+	/** Optional OS-assigned readable handle (e.g. "peer-1", "integrator") shown on board posts. */
+	handle?: string;
 	taskId?: string;
 	parentAgentId?: string;
 	preferredDriverId?: string;
 	avoidDrivers?: readonly string[];
+	/** Minimum capability tier for driver selection (e.g. "frontier"). */
+	minTier?: DriverTier;
+	/** Maximum capability tier for driver selection (e.g. "sidekick"). */
+	maxTier?: DriverTier;
 	/** Reuse an existing workspace path instead of creating a new git worktree. */
 	workspace?: string;
 	/** Base git ref to branch the new worktree from (defaults to trunk baseSha). */
 	baseRef?: string;
+	/** Paths this worker process must be kernel-blocked from reading (Seatbelt). */
+	deniedReadPaths?: readonly string[];
 	readOnly?: boolean;
 	systemPrompt?: string;
 	model?: string;
@@ -180,12 +288,10 @@ export interface WorkerHandle {
 	close(): Promise<void>;
 }
 
-export interface TopologyOutcome {
-	status: "done" | "stopped" | "failed";
-	summary: string;
-	nominatedFindingId?: string;
-	nominatedRevision?: number;
-}
+export type TopologyOutcome = {
+	readonly status: "done" | "stopped" | "failed";
+	readonly summary: string;
+} & RunNomination;
 
 export interface SwarmOsApi {
 	readonly runId: string;
@@ -204,7 +310,16 @@ export interface SwarmOsApi {
 	/** Check remaining wall-clock/token/USD fraction (0..1); returns true once reserve threshold is reached. */
 	isInCloseoutReserve(): boolean;
 	/** Create a new task on the shared task table. */
-	createTask(input: { title: string; description: string; role?: Role; dependsOn?: string[]; priority?: number; createdBy: string }): TaskRecord;
+	createTask(input: {
+		title: string;
+		description: string;
+		role?: Role;
+		dependsOn?: string[];
+		ownedPaths?: string[];
+		acceptanceCriteria?: string[];
+		priority?: number;
+		createdBy: string;
+	}): TaskRecord;
 	/** Return open tasks whose dependencies are all `done`. */
 	readyTasks(): TaskRecord[];
 	/** Default role-scoped OS tools (board, artifacts, tasks, findings, jobs, optional spawn/skills/codeMode). */

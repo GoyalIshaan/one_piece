@@ -109,7 +109,7 @@ export function microCompactMessages<T extends GenericMessage>(
  */
 export function buildStructuredAnchorMessages<T extends GenericMessage>(
 	messages: readonly T[],
-	opts: { keepRecentTurns?: number; failedApproaches?: string[] } = {},
+	opts: { keepRecentTurns?: number; failedApproaches?: string[]; pinnedChecklist?: string[] } = {},
 ): { messages: T[]; prunedCount: number; failedApproaches: string[] } {
 	const keepRecent = Math.max(4, opts.keepRecentTurns ?? 6);
 	if (messages.length <= keepRecent + 1) {
@@ -137,11 +137,15 @@ export function buildStructuredAnchorMessages<T extends GenericMessage>(
 		.slice(-4)
 		.map((s) => `- ${s.slice(0, 200)}`);
 
+	const checklist = (opts.pinnedChecklist ?? []).map((item) => item.trim()).filter(Boolean);
 	const anchorText = [
 		`[STRUCTURED COMPACTION ANCHOR — ${older.length} earlier messages compressed]`,
 		``,
 		`## Goal`,
 		goalSnippet,
+		...(checklist.length
+			? [``, `## Pinned Acceptance Checklist (DO NOT DROP)`, ...checklist.map((item) => `- [ ] ${item}`)]
+			: []),
 		``,
 		`## Recent Verified Progress`,
 		assistantNotes.length ? assistantNotes.join("\n") : "- (inspect git diff in workspace)",
@@ -248,6 +252,7 @@ export function maybeCompactSession<T extends GenericMessage>(input: {
 	const anchor = buildStructuredAnchorMessages(micro.messages, {
 		keepRecentTurns: input.policy?.keepRecentTurns ?? 6,
 		failedApproaches,
+		pinnedChecklist: input.policy?.pinnedChecklist,
 	});
 	if (anchor.prunedCount === 0 && micro.prunedCount === 0) {
 		return {

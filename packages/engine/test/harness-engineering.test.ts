@@ -285,4 +285,334 @@ describe("v2 Harness Engineering: Static KV Prefixes, Scoped Tools, Skills, Code
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("delegates read-only exploration to sidekick tier and escalates stalled/compacted workers to frontier tier", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "op-he-tier-"));
+		const seed = join(dir, "seed");
+		mkdirSync(seed, { recursive: true });
+		writeFileSync(join(seed, "auth.ts"), "export const AUTH_MODE = 'oauth2';\n", "utf8");
+
+		try {
+			const store = new SqliteStore(":memory:");
+			const sidekickCalls: string[] = [];
+			const frontierCalls: string[] = [];
+
+			const sidekickSpy = new SpyWorkerDriver("fast-sidekick", async (spec, prompt) => {
+				sidekickCalls.push(`${spec.role}:${prompt.slice(0, 40)}`);
+				// Emit identical tool activity so 2 repeated turns trigger mechanical stall -> escalate to frontier!
+				if (spec.role === "worker") {
+					spec.onActivity?.({ type: "tool_call", name: "bash", argsPreview: "npm test" });
+					return { status: "completed", finalText: "stuck on bug" };
+				}
+				return { status: "completed", finalText: "auth.ts:1 defines AUTH_MODE = 'oauth2'" };
+			});
+			const frontierSpy = new SpyWorkerDriver("smart-frontier", async (spec, prompt) => {
+				frontierCalls.push(`${spec.role}:${prompt.slice(0, 40)}`);
+				writeFileSync(join(spec.workspace, "fixed.txt"), "resolved by frontier\n", "utf8");
+				return { status: "completed", finalText: "Fixed cleanly after escalation" };
+			});
+
+			const router = new DriverQuotaRouter({
+				drivers: [
+					{ driver: sidekickSpy, config: { id: "fast-sidekick", kind: "codex-exec", tier: "sidekick", maxConcurrent: 4 } },
+					{ driver: frontierSpy, config: { id: "smart-frontier", kind: "codex-exec", tier: "frontier", maxConcurrent: 4 } },
+				],
+				roles: {
+					default: ["fast-sidekick", "smart-frontier"],
+					explorer: ["fast-sidekick", "smart-frontier"],
+					worker: ["fast-sidekick", "smart-frontier"],
+				},
+			});
+
+			const os = await SwarmOS.create({
+				runDir: join(dir, "run"),
+				workspace: seed,
+				topology: "hierarchy",
+				goal: { title: "Escalation & Sidekick", text: "Test sidekick delegation and stall escalation" },
+				maxRepeatedTurns: 2,
+				store,
+				router,
+			});
+
+			try {
+				// 1. Planner exposes delegate_explore -> runs on sidekick tier and returns concise distilled answer
+				const planner = await os.spawnWorker({ role: "planner", preferredDriverId: "smart-frontier" });
+				const exploreTool = os.mcp.toolsFor(planner.agent.id).find((t) => t.name === "delegate_explore")!;
+				expect(exploreTool).toBeDefined();
+				const exploreRes = await exploreTool.execute(
+					{ query: "Where is AUTH_MODE defined?", paths: ["auth.ts"] },
+					{ runId: os.runId, agentId: planner.agent.id, role: "planner", workspace: planner.workspace, signal: new AbortController().signal },
+				);
+				expect(exploreRes.isError).toBe(false);
+				expect(exploreRes.text).toContain("AUTH_MODE");
+				expect((exploreRes.data as any)?.driverId).toBe("fast-sidekick");
+				await planner.close();
+
+				// 2. Sidekick worker hitting 2x identical state escalates via HANDOFF.md to frontier tier!
+				const task = os.createTask({
+					title: "Fix auth edge case",
+					description: "Fix token refresh",
+					ownedPaths: ["auth.ts"],
+					acceptanceCriteria: ["OAuth refresh passes unit test"],
+					createdBy: "planner",
+				});
+				const worker = await os.spawnWorker({ role: "worker", taskId: task.id, maxTier: "sidekick" });
+				expect(worker.agent.driverId).toBe("fast-sidekick");
+
+				// Turn 1 records sig once; Turn 2 repeats sig -> TriggerEngine arms escalation -> immediately hands off to smart-frontier!
+				await worker.runTurn("Attempt fix");
+				const escalatedRes = await worker.runTurn("Try again");
+				expect(escalatedRes.finalText).toBe("Fixed cleanly after escalation");
+				expect(worker.agent.driverId).toBe("smart-frontier");
+
+				const escEvents = store.events(os.runId, { types: ["agent.escalated"] });
+				expect(escEvents).toHaveLength(1);
+				expect(escEvents[0]!.data.fromTier).toBe("sidekick");
+				expect(escEvents[0]!.data.toTier).toBe("frontier");
+
+				const handoffMd = readFileSync(join(worker.workspace, ".swarm", "HANDOFF.md"), "utf8");
+				expect(handoffMd).toContain("OAuth refresh passes unit test");
+				expect(handoffMd).toContain("auth.ts");
+				await worker.close();
+			} finally {
+				await os.dispose();
+				store.close();
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("runs stacked decorrelated reviewLenses (blind-diff + transcript-audit) with veto semantics", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "op-he-lenses-"));
+		const seed = join(dir, "seed");
+		mkdirSync(seed, { recursive: true });
+		writeFileSync(join(seed, "app.ts"), "export const ok = true;\n", "utf8");
+
+		try {
+			const store = new SqliteStore(":memory:");
+			const reviewCalls: Array<{ driverId: string; prompt: string }> = [];
+			const mkReviewer = (id: string, verdict: "accepted" | "needs_work", msg: string) =>
+				new SpyWorkerDriver(id, async (_spec, prompt) => {
+					reviewCalls.push({ driverId: id, prompt });
+					return { status: "completed", finalText: JSON.stringify({ verdict, confidence: 0.9, message: msg }) };
+				});
+
+			const router = new DriverQuotaRouter({
+				drivers: [
+					{ driver: mkReviewer("author-drv", "accepted", "n/a"), config: { id: "author-drv", kind: "codex-exec" } },
+					{ driver: mkReviewer("rev-a", "accepted", "Diff looks clean"), config: { id: "rev-a", kind: "codex-exec" } },
+					{ driver: mkReviewer("rev-b", "needs_work", "Author skipped tests in transcript"), config: { id: "rev-b", kind: "codex-exec" } },
+				],
+				roles: {
+					default: ["author-drv", "rev-a", "rev-b"],
+					reviewer: ["rev-a", "rev-b"],
+				},
+			});
+
+			const os = await SwarmOS.create({
+				runDir: join(dir, "run"),
+				workspace: seed,
+				topology: "single",
+				goal: { title: "Stacked Lenses", text: "Test decorrelated review lenses" },
+				reviewLenses: ["blind-diff", "transcript-audit"],
+				store,
+				router,
+			});
+
+			try {
+				os.bus.emit(os.runId, "driver.tool_call", { tool: "bash", argsPreview: "echo skipped" }, "agt-author");
+				const finding = await os.trust.submitFinding({
+					agentId: "agt-author",
+					driverId: "author-drv",
+					workspace: seed,
+					claim: "All checks pass",
+					summary: "Implemented feature",
+					level: "empirical",
+				});
+
+				// Both lenses ran on distinct drivers; rev-b (transcript-audit) vetoed acceptance!
+				expect(reviewCalls.length).toBeGreaterThanOrEqual(1);
+				expect(finding.status).toBe("needs_work");
+				expect(finding.rounds.some((r) => r.lens === "blind-diff" || r.lens === "transcript-audit")).toBe(true);
+				const transcriptPrompt = reviewCalls.find((c) => c.prompt.includes("Review lens: transcript-audit"))?.prompt;
+				if (transcriptPrompt) {
+					expect(transcriptPrompt).toContain("echo skipped");
+				}
+			} finally {
+				await os.dispose();
+				store.close();
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("resolves pull-refinery merge conflicts via an impartial resolver and flags hotspot files", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "op-he-conflict-"));
+		const seed = join(dir, "seed");
+		mkdirSync(seed, { recursive: true });
+		// >800 lines triggers megafile-hotspot advisory on first conflict
+		writeFileSync(join(seed, "shared.txt"), ["HEADER", ...Array.from({ length: 805 }, (_, i) => `line-${i + 1}`)].join("\n") + "\n", "utf8");
+
+		try {
+			const store = new SqliteStore(":memory:");
+			const spy = new SpyWorkerDriver("refinery-spy", async (spec, prompt) => {
+				if (spec.role === "planner") {
+					return {
+						status: "completed",
+						finalText: JSON.stringify({
+							tasks: [
+								{ key: "t1", title: "Update header A", description: "Change header to A", owned_paths: ["shared.txt"], acceptance_criteria: ["Header includes A"] },
+								{ key: "t2", title: "Update header B", description: "Change header to B", owned_paths: ["shared.txt"], acceptance_criteria: ["Header includes B"] },
+							],
+						}),
+					};
+				}
+				if (spec.role === "integrator") {
+					// Impartial resolver sees both diffs and reconciles them cleanly on top of trunk!
+					expect(prompt).toContain("Conflicting files: shared.txt");
+					const current = readFileSync(join(spec.workspace, "shared.txt"), "utf8");
+					writeFileSync(join(spec.workspace, "shared.txt"), current.replace(/^HEADER.*\n/, "HEADER_A_AND_B\n"), "utf8");
+					return { status: "completed", finalText: "Resolved shared.txt cleanly keeping both A and B" };
+				}
+				// Both workers branch from the same initial trunk and edit line 1 of shared.txt -> guaranteed git conflict!
+				const current = readFileSync(join(spec.workspace, "shared.txt"), "utf8");
+				const tag = prompt.includes("Update header A") ? "HEADER_A" : "HEADER_B";
+				writeFileSync(join(spec.workspace, "shared.txt"), current.replace(/^HEADER\n/, `${tag}\n`), "utf8");
+				return { status: "completed", finalText: `Wrote ${tag}` };
+			});
+
+			const router = new DriverQuotaRouter({
+				drivers: [{ driver: spy, config: { id: "refinery-spy", kind: "codex-exec", maxConcurrent: 4 } }],
+				roles: { default: ["refinery-spy"] },
+			});
+			const os = await SwarmOS.create({
+				runDir: join(dir, "run"),
+				workspace: seed,
+				topology: "pull-refinery",
+				goal: { title: "Conflict resolution test", text: "Merge two conflicting branches cleanly" },
+				store,
+				router,
+			});
+
+			try {
+				const outcome = await os.execute(createTopology("pull-refinery", { concurrency: 2 }));
+				expect(outcome.status).toBe("done");
+
+				const resolvedEvents = store.events(os.runId, { types: ["refinery.conflict_resolved"] });
+				expect(resolvedEvents).toHaveLength(1);
+				expect(resolvedEvents[0]!.data.conflictFiles).toEqual(["shared.txt"]);
+
+				const trunkHead = readFileSync(join(os.worktrees.trunkPath, "shared.txt"), "utf8").split("\n")[0];
+				expect(trunkHead).toBe("HEADER_A_AND_B");
+
+				const hotspotPosts = store.list("posts", { runId: os.runId }).filter((p) => p.topic === "megafile-hotspot");
+				expect(hotspotPosts.length).toBeGreaterThanOrEqual(1);
+			} finally {
+				await os.dispose();
+				store.close();
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("never silently accepts a finding when a configured review lens fails, and never marks a no-op conflict resolver as resolved", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "op-he-regress-"));
+		const seed = join(dir, "seed");
+		mkdirSync(seed, { recursive: true });
+		writeFileSync(join(seed, "shared.txt"), "HEADER\nbody\n", "utf8");
+
+		try {
+			const store = new SqliteStore(":memory:");
+			// Lens 1 accepts, Lens 2 crashes -> finding MUST become "unreviewed" (NEVER "accepted")!
+			const okRev = new SpyWorkerDriver("ok-rev", async () => ({
+				status: "completed",
+				finalText: JSON.stringify({ verdict: "accepted", confidence: 0.9, message: "ok" }),
+			}));
+			const brokenRev = new SpyWorkerDriver("broken-rev", async () => ({
+				status: "failed",
+				finalText: "",
+				error: "reviewer provider crashed",
+			}));
+			const lensRouter = new DriverQuotaRouter({
+				drivers: [
+					{ driver: okRev, config: { id: "ok-rev", kind: "codex-exec" } },
+					{ driver: brokenRev, config: { id: "broken-rev", kind: "codex-exec" } },
+				],
+				roles: { default: ["ok-rev", "broken-rev"], reviewer: ["ok-rev", "broken-rev"] },
+			});
+			const os1 = await SwarmOS.create({
+				runDir: join(dir, "run1"),
+				workspace: seed,
+				topology: "single",
+				goal: { title: "Lens error safety", text: "Ensure broken lens never auto-accepts" },
+				reviewLenses: ["blind-diff", "transcript-audit"],
+				store,
+				router: lensRouter,
+			});
+			try {
+				const f = await os1.trust.submitFinding({
+					agentId: "agt-x",
+					driverId: "author-x",
+					workspace: seed,
+					claim: "Looks fine",
+					summary: "Test",
+					level: "empirical",
+				});
+				expect(f.status).toBe("unreviewed");
+				if (f.status === "unreviewed") expect(f.reviewError).toContain("failed");
+				expect(store.get("findings", f.id)?.status).toBe("unreviewed");
+			} finally {
+				await os1.dispose();
+			}
+
+			// Pull-refinery with a no-op integrator MUST NOT falsely emit refinery.conflict_resolved
+			const noopSpy = new SpyWorkerDriver("noop-ref", async (spec, prompt) => {
+				if (spec.role === "planner") {
+					return {
+						status: "completed",
+						finalText: JSON.stringify({
+							tasks: [
+								{ key: "t1", title: "Edit A", description: "Change header to A" },
+								{ key: "t2", title: "Edit B", description: "Change header to B" },
+							],
+						}),
+					};
+				}
+				if (spec.role === "integrator") {
+					// Resolver exits without changing any files!
+					return { status: "completed", finalText: "did nothing" };
+				}
+				const current = readFileSync(join(spec.workspace, "shared.txt"), "utf8");
+				const tag = prompt.includes("Edit A") ? "A" : "B";
+				writeFileSync(join(spec.workspace, "shared.txt"), current.replace("HEADER", tag), "utf8");
+				return { status: "completed", finalText: `wrote ${tag}` };
+			});
+			const noopRouter = new DriverQuotaRouter({
+				drivers: [{ driver: noopSpy, config: { id: "noop-ref", kind: "codex-exec", maxConcurrent: 4 } }],
+				roles: { default: ["noop-ref"] },
+			});
+			const os2 = await SwarmOS.create({
+				runDir: join(dir, "run2"),
+				workspace: seed,
+				topology: "pull-refinery",
+				goal: { title: "No-op resolver guard", text: "Reject empty conflict resolution" },
+				store,
+				router: noopRouter,
+			});
+			try {
+				await os2.execute(createTopology("pull-refinery", { concurrency: 2 }));
+				expect(store.events(os2.runId, { types: ["refinery.conflict_resolved"] })).toHaveLength(0);
+				const conflictPosts = store.list("posts", { runId: os2.runId }).filter((p) => p.topic === "refinery-conflict");
+				expect(conflictPosts.length).toBeGreaterThanOrEqual(1);
+			} finally {
+				await os2.dispose();
+				store.close();
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });

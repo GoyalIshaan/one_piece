@@ -2,6 +2,9 @@ import type { SwarmOsApi, TopologyOutcome, TopologyPlugin } from "@one-piece/cor
 
 export interface SingleTopologyOptions {
 	maxTurns?: number;
+	handle?: string;
+	seatPrompt?: string;
+	deniedReadPaths?: readonly string[];
 }
 
 /**
@@ -15,8 +18,10 @@ export function singleTopology(opts: SingleTopologyOptions = {}): TopologyPlugin
 		async run(os: SwarmOsApi, { goal, rubric, signal }): Promise<TopologyOutcome> {
 			const worker = await os.spawnWorker({
 				role: "worker",
+				handle: opts.handle ?? "solo",
 				canSpawn: false,
 				maxTurns: opts.maxTurns,
+				deniedReadPaths: opts.deniedReadPaths,
 				cacheKeyPrefix: `${os.runId}:single-worker`,
 				toolScope: {
 					board: "none",
@@ -37,6 +42,7 @@ export function singleTopology(opts: SingleTopologyOptions = {}): TopologyPlugin
 					[
 						`Goal: ${goal}`,
 						rubric ? `Rubric: ${rubric}` : "",
+						opts.seatPrompt ?? "",
 						"Work directly in your workspace, verify your changes, and call `report_finding` (or return a clear summary of your verified changes).",
 					].filter(Boolean).join("\n\n"),
 					{ signal },

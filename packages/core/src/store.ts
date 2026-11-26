@@ -53,6 +53,41 @@ export interface EventQuery {
 
 export type LeaseClaimResult = TaskLeaseClaimOutcome;
 
+export interface BoardPostLabelUpdate {
+	set?: Record<string, string>;
+	unset?: readonly string[];
+	ifMatch?: Record<string, string | null>;
+}
+
+export type BoardPostLabelResult =
+	| { readonly ok: true; readonly post: BoardPost; readonly reason?: never; readonly currentLabels?: never }
+	| { readonly ok: false; readonly reason: "not_found"; readonly post?: never; readonly currentLabels?: never }
+	| { readonly ok: false; readonly reason: "conflict"; readonly currentLabels: Record<string, string>; readonly post?: never };
+
+export function applyBoardPostLabels(post: BoardPost | undefined, update: BoardPostLabelUpdate): BoardPostLabelResult {
+	if (!post) return { ok: false, reason: "not_found" };
+	const current = { ...(post.labels ?? {}) };
+	if (update.ifMatch) {
+		for (const [k, expected] of Object.entries(update.ifMatch)) {
+			const actual = Object.prototype.hasOwnProperty.call(current, k) ? current[k]! : null;
+			if (actual !== expected) {
+				return { ok: false, reason: "conflict", currentLabels: current };
+			}
+		}
+	}
+	if (update.unset) {
+		for (const k of update.unset) delete current[k];
+	}
+	if (update.set) {
+		for (const [k, v] of Object.entries(update.set)) current[k] = v;
+	}
+	const next: BoardPost = {
+		...post,
+		labels: Object.keys(current).length ? current : undefined,
+	};
+	return { ok: true, post: next };
+}
+
 export interface Store {
 	appendEvent(event: Omit<HarnessEvent, "seq">): number;
 	events(runId: string, query?: EventQuery): HarnessEvent[];
@@ -60,6 +95,8 @@ export interface Store {
 	get<K extends Collection>(collection: K, id: string): Documents[K] | undefined;
 	list<K extends Collection>(collection: K, filter?: { runId?: string }): Documents[K][];
 	listBoardPosts?(runId: string, board?: string, cites?: string): BoardPost[];
+	findBoardPostByIdempotencyKey?(runId: string, idempotencyKey: string): BoardPost | undefined;
+	updateBoardPostLabels?(postId: string, update: BoardPostLabelUpdate): BoardPostLabelResult;
 	/** Atomically acquire or reclaim an expired lease on a task, bumping its fencingToken. */
 	claimTaskLease(runId: string, taskId: string, agentId: string, ttlMs: number, now?: number): LeaseClaimResult;
 	renewTaskLease(taskId: string, agentId: string, fencingToken: number, ttlMs: number, now?: number): boolean;
@@ -130,6 +167,16 @@ export class MemoryStore implements Store {
 			if (cites && !post.references?.some((ref) => ref.postId === cites)) return false;
 			return true;
 		});
+	}
+
+	findBoardPostByIdempotencyKey(runId: string, idempotencyKey: string): BoardPost | undefined {
+		return this.list("posts", { runId }).find((post) => post.idempotencyKey === idempotencyKey);
+	}
+
+	updateBoardPostLabels(postId: string, update: BoardPostLabelUpdate): BoardPostLabelResult {
+		const res = applyBoardPostLabels(this.get("posts", postId), update);
+		if (res.ok) this.put("posts", res.post);
+		return res;
 	}
 
 	claimTaskLease(runId: string, taskId: string, agentId: string, ttlMs: number, now = Date.now()): LeaseClaimResult {

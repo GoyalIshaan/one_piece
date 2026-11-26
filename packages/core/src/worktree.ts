@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import type { WorktreeHandle, WorktreeManager } from "./topology.ts";
+import type { MergeTrunkResult, WorktreeHandle, WorktreeManager } from "./topology.ts";
 
 function git(cwd: string, args: string[]): string {
 	return execFileSync("git", args, {
@@ -160,7 +160,7 @@ export class GitWorktreeManager implements WorktreeManager {
 		}
 	}
 
-	mergeIntoTrunk(branch: string, opts: { message?: string } = {}): { ok: boolean; commitSha?: string; error?: string } {
+	mergeIntoTrunk(branch: string, opts: { message?: string } = {}): MergeTrunkResult {
 		const trunk = this.trunkPath;
 		try {
 			git(trunk, [
@@ -170,13 +170,45 @@ export class GitWorktreeManager implements WorktreeManager {
 			]);
 			return { ok: true, commitSha: git(trunk, ["rev-parse", "HEAD"]) };
 		} catch (error) {
+			let conflictFiles: string[] = [];
+			try {
+				const unmerged = git(trunk, ["diff", "--name-only", "--diff-filter=U"]);
+				conflictFiles = unmerged ? unmerged.split(/\r?\n/).filter(Boolean) : [];
+			} catch {
+				// Ignore unmerged file inspection failure.
+			}
 			try {
 				git(trunk, ["merge", "--abort"]);
 			} catch {
 				// No merge in progress.
 			}
-			return { ok: false, error: error instanceof Error ? error.message : String(error) };
+			return { ok: false, conflictFiles, error: error instanceof Error ? error.message : String(error) };
 		}
+	}
+
+	mergePreviewDiff(branch: string): { baseSha: string; trunkDiff: string; branchDiff: string } {
+		const trunk = this.trunkPath;
+		const maxChars = 16_384;
+		let baseSha = this.baseSha;
+		try {
+			baseSha = git(trunk, ["merge-base", "HEAD", branch]) || this.baseSha;
+		} catch {
+			// Fall back to run baseSha.
+		}
+		const clip = (raw: string) => (raw.length > maxChars ? `${raw.slice(0, maxChars)}\n... [truncated]` : raw);
+		let trunkDiff = "";
+		let branchDiff = "";
+		try {
+			trunkDiff = clip(git(trunk, ["diff", `${baseSha}..HEAD`]));
+		} catch {
+			trunkDiff = "(trunk diff unavailable)";
+		}
+		try {
+			branchDiff = clip(git(trunk, ["diff", `${baseSha}..${branch}`]));
+		} catch {
+			branchDiff = "(branch diff unavailable)";
+		}
+		return { baseSha, trunkDiff, branchDiff };
 	}
 
 	remove(worktreePath: string): void {

@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { type JsonSchema, newId, type SwarmOsApi, type TaskRecord, type TopologyOutcome, type TopologyPlugin } from "@one-piece/core";
 
 export interface PullRefineryOptions {
@@ -17,6 +19,8 @@ const BACKLOG_SCHEMA: JsonSchema = {
 					title: { type: "string" },
 					description: { type: "string" },
 					depends_on: { type: "array", items: { type: "string" } },
+					owned_paths: { type: "array", items: { type: "string" } },
+					acceptance_criteria: { type: "array", items: { type: "string" } },
 				},
 				required: ["key", "title", "description"],
 			},
@@ -30,6 +34,8 @@ interface BacklogItem {
 	title: string;
 	description: string;
 	depends_on?: string[];
+	owned_paths?: string[];
+	acceptance_criteria?: string[];
 }
 
 function tryExtractBacklog(candidate: string): BacklogItem[] | undefined {
@@ -43,6 +49,10 @@ function tryExtractBacklog(candidate: string): BacklogItem[] | undefined {
 					title: t.title,
 					description: t.description,
 					depends_on: Array.isArray(t.depends_on) ? t.depends_on.filter((d): d is string => typeof d === "string") : [],
+					owned_paths: Array.isArray(t.owned_paths) ? t.owned_paths.filter((p): p is string => typeof p === "string") : undefined,
+					acceptance_criteria: Array.isArray(t.acceptance_criteria)
+						? t.acceptance_criteria.filter((c): c is string => typeof c === "string")
+						: undefined,
 				}));
 			if (items.length) return items;
 		}
@@ -125,8 +135,8 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 					skills: false,
 				},
 				systemPrompt: [
-					"You are a backlog sharder. Split the goal into atomic, cleanly mergeable tickets with optional depends_on keys.",
-					'Respond ONLY with JSON: {"tasks":[{"key":"t1","title":"...","description":"...","depends_on":[]}]}',
+					"You are a backlog sharder. Split the goal into atomic, cleanly mergeable tickets with disjoint owned_paths and concrete acceptance_criteria so parallel workers do not collide.",
+					'Respond ONLY with JSON: {"tasks":[{"key":"t1","title":"...","description":"...","depends_on":[],"owned_paths":["src/a.ts"],"acceptance_criteria":["..."]}]}',
 				].join("\n"),
 			});
 			let items: BacklogItem[];
@@ -144,20 +154,28 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 			const tasks: TaskRecord[] = [];
 			for (const item of items) {
 				const deps = (item.depends_on ?? []).map((k) => keyToTaskId.get(k)).filter((id): id is string => Boolean(id));
-				const created = os.createTask({ title: item.title, description: item.description, dependsOn: deps, createdBy: "planner" });
+				const created = os.createTask({
+					title: item.title,
+					description: item.description,
+					dependsOn: deps,
+					ownedPaths: item.owned_paths,
+					acceptanceCriteria: item.acceptance_criteria,
+					createdBy: "planner",
+				});
 				keyToTaskId.set(item.key, created.id);
 				tasks.push(created);
 			}
 
-			// 2. Serialized Refinery merge queue (single-threaded trunk writer)
+			// 2. Serialized Refinery merge queue (single-threaded trunk writer + neutral conflict resolver + megafile guard)
 			let mergeChain: Promise<void> = Promise.resolve();
 			const mergedBranches: string[] = [];
+			const conflictCounts = new Map<string, number>();
 			let lastTrunkSha = os.worktrees.baseSha;
 
 			const enqueueRefinery = (task: TaskRecord, branch: string, authorAgentId: string, authorDriverId: string) => {
 				const job = mergeChain.then(async () => {
 					const merged = os.worktrees.mergeIntoTrunk(branch, { message: `refinery(${task.id}): ${task.title}` });
-					if (merged.ok && merged.commitSha) {
+					if (merged.ok) {
 						lastTrunkSha = merged.commitSha;
 						mergedBranches.push(branch);
 						await os.trust.submitFinding(
@@ -179,11 +197,121 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 							summary: `Merged ${task.id} (${branch}) -> trunk ${merged.commitSha.slice(0, 8)}`,
 						});
 					} else {
+						const conflictFiles = merged.conflictFiles;
+						for (const relFile of conflictFiles) {
+							const nextCount = (conflictCounts.get(relFile) ?? 0) + 1;
+							conflictCounts.set(relFile, nextCount);
+							let lineCount = 0;
+							const absFile = join(os.worktrees.trunkPath, relFile);
+							if (existsSync(absFile)) {
+								try {
+									lineCount = readFileSync(absFile, "utf8").split("\n").length;
+								} catch {
+									// Ignore unreadable file.
+								}
+							}
+							if (nextCount >= 2 || lineCount > 800) {
+								os.board.publish({
+									runId: os.runId,
+									authorAgentId: "refinery",
+									topic: "megafile-hotspot",
+									summary: `Hotspot file ${relFile} (${lineCount} lines, ${nextCount} merge conflicts) — consider decomposing into smaller modules.`,
+								});
+							}
+						}
+
+						// Impartial third-party conflict resolver (neutral to both branches)
+						if (conflictFiles.length > 0 && !signal.aborted && !os.isInCloseoutReserve()) {
+							const preview = os.worktrees.mergePreviewDiff(branch);
+							const resolver = await os.spawnWorker({
+								role: "integrator",
+								baseRef: lastTrunkSha,
+								canSpawn: false,
+								cacheKeyPrefix: `${os.runId}:refinery-resolver`,
+								toolScope: {
+									board: "read",
+									artifacts: true,
+									findings: false,
+									tasks: false,
+									nominate: false,
+									scheduler: "never",
+									sidekick: false,
+									codeMode: false,
+								},
+								systemPrompt: [
+									"You are an impartial merge-conflict resolver for the Refinery merge queue.",
+									"Your workspace starts at current trunk HEAD. Apply the incoming branch's intended changes cleanly alongside trunk's changes in the conflicting files without dropping either side's functionality.",
+								].join("\n"),
+							});
+							try {
+								const resolvePrompt = [
+									`Resolve merge conflict for ticket ${task.id}: ${task.title}`,
+									`Ticket description: ${task.description}`,
+									...(task.acceptanceCriteria?.length
+										? [`Acceptance criteria:\n${task.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}`]
+										: []),
+									`Conflicting files: ${conflictFiles.join(", ")}`,
+									``,
+									`## Trunk diff since merge-base (${preview.baseSha.slice(0, 8)}..HEAD)`,
+									"```diff",
+									preview.trunkDiff,
+									"```",
+									``,
+									`## Incoming branch diff since merge-base (${preview.baseSha.slice(0, 8)}..${branch})`,
+									"```diff",
+									preview.branchDiff,
+									"```",
+									``,
+									`Edit the workspace files cleanly so both trunk and incoming changes work together, then exit.`,
+								].join("\n");
+								const resolveRes = await resolver.runTurn(resolvePrompt, { signal });
+								const resolverWip = os.worktrees.commitWip(resolver.workspace, `refinery-resolve(${task.id}): ${task.title}`);
+								const resolvedHead = os.worktrees.headSha(resolver.workspace);
+								const resolverMadeChanges = Boolean(resolverWip) || (Boolean(resolvedHead) && resolvedHead !== lastTrunkSha);
+								if (resolveRes.status === "completed" && resolverMadeChanges && resolver.branch) {
+									const resolved = os.worktrees.mergeIntoTrunk(resolver.branch, {
+										message: `refinery-resolve(${task.id}): ${task.title}`,
+									});
+									if (resolved.ok) {
+										lastTrunkSha = resolved.commitSha;
+										mergedBranches.push(resolver.branch);
+										os.bus.emit(
+											os.runId,
+											"refinery.conflict_resolved",
+											{ taskId: task.id, branch, conflictFiles, commitSha: resolved.commitSha },
+											resolver.agent.id,
+										);
+										await os.trust.submitFinding(
+											{
+												agentId: resolver.agent.id,
+												driverId: resolver.agent.driverId,
+												taskId: task.id,
+												workspace: os.worktrees.trunkPath,
+												claim: `Refinery resolved conflict & merged ${task.title} (${resolved.commitSha.slice(0, 8)})`,
+												summary: `Neutral resolver reconciled conflicts in ${conflictFiles.join(", ")} cleanly on trunk.`,
+												level: "empirical",
+											},
+											signal,
+										);
+										os.board.publish({
+											runId: os.runId,
+											authorAgentId: "refinery",
+											topic: "refinery",
+											summary: `Resolved conflict & merged ${task.id} (${conflictFiles.join(", ")}) -> trunk ${resolved.commitSha.slice(0, 8)}`,
+										});
+										return;
+									}
+								}
+							} finally {
+								await resolver.close();
+							}
+						}
+
 						os.board.publish({
 							runId: os.runId,
 							authorAgentId: "refinery",
 							topic: "refinery-conflict",
-							summary: `Merge conflict on ${task.id} (${branch}): ${merged.error ?? "unknown"}`,
+							summary: `Merge conflict on ${task.id} (${branch}; files: ${conflictFiles.join(", ") || "unknown"}): ${merged.error}`,
 						});
 					}
 				});
@@ -267,8 +395,14 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 					renewTimer.unref?.();
 
 					try {
+						const ownershipBlock = target.ownedPaths?.length
+							? `\nOwned paths (stay within scope): ${target.ownedPaths.join(", ")}`
+							: "";
+						const criteriaBlock = target.acceptanceCriteria?.length
+							? `\nAcceptance criteria:\n${target.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}`
+							: "";
 						const res = await worker.runTurn(
-							`Worker slot #${slotIdx + 1} — Ticket ${target.id}: ${target.title}\n\n${target.description}\n\nGlobal goal: ${goal}`,
+							`Worker slot #${slotIdx + 1} — Ticket ${target.id}: ${target.title}\n\n${target.description}${ownershipBlock}${criteriaBlock}\n\nGlobal goal: ${goal}`,
 							{ signal },
 						);
 						const wip = os.worktrees.commitWip(worker.workspace, `ticket(${target.id}): ${target.title}`);

@@ -2,6 +2,7 @@ import {
 	type DriverConfig,
 	type DriverHealth,
 	type DriverPoolSelection,
+	type DriverTier,
 	type EventBus,
 	PermitActor,
 	type ProviderQuotaRecord,
@@ -11,6 +12,12 @@ import {
 	transitionQuotaRecord,
 	type WorkerDriver,
 } from "@one-piece/core";
+
+const TIER_RANK: Record<DriverTier, number> = {
+	sidekick: 0,
+	standard: 1,
+	frontier: 2,
+};
 
 export interface QuotaRouterOptions {
 	drivers: Array<{ driver: WorkerDriver; config: DriverConfig }>;
@@ -76,6 +83,14 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 		return this.driverMap.get(id)?.driver;
 	}
 
+	getDriverTier(id: string): DriverTier {
+		return this.driverMap.get(id)?.config.tier ?? "standard";
+	}
+
+	getDriverConfig(id: string): DriverConfig | undefined {
+		return this.driverMap.get(id)?.config;
+	}
+
 	async healthCheckAll(): Promise<DriverHealth[]> {
 		return Promise.all(this.drivers().map((d) => d.healthCheck()));
 	}
@@ -93,12 +108,39 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 
 	async acquireForRole(
 		role: Role,
-		opts: { preferredDriverId?: string; avoidDrivers?: readonly string[]; signal?: AbortSignal } = {},
+		opts: {
+			preferredDriverId?: string;
+			avoidDrivers?: readonly string[];
+			minTier?: DriverTier;
+			maxTier?: DriverTier;
+			signal?: AbortSignal;
+		} = {},
 	): Promise<DriverPoolSelection> {
 		const configuredIds = this.roles[role] ?? this.roles.default ?? [...this.driverMap.keys()];
-		const eligible = configuredIds.filter((id) => this.driverMap.has(id) && this.isHealthy(id));
-		if (!eligible.length) {
+		const healthy = configuredIds.filter((id) => this.driverMap.has(id) && this.isHealthy(id));
+		if (!healthy.length) {
 			throw new Error(`No healthy drivers available for role "${role}" (configured: ${configuredIds.join(", ")})`);
+		}
+
+		let eligible = healthy;
+		if (opts.minTier !== undefined || opts.maxTier !== undefined) {
+			const minRank = opts.minTier ? TIER_RANK[opts.minTier] : 0;
+			const maxRank = opts.maxTier ? TIER_RANK[opts.maxTier] : 2;
+			const inBand = healthy.filter((id) => {
+				const r = TIER_RANK[this.getDriverTier(id)];
+				return r >= minRank && r <= maxRank;
+			});
+			if (inBand.length) {
+				eligible = inBand;
+			} else if (opts.minTier !== undefined) {
+				// Graceful fallback: pick the highest-tier healthy driver(s) available
+				const bestRank = Math.max(...healthy.map((id) => TIER_RANK[this.getDriverTier(id)]));
+				eligible = healthy.filter((id) => TIER_RANK[this.getDriverTier(id)] === bestRank);
+			} else if (opts.maxTier !== undefined) {
+				// Graceful fallback: pick the lowest-tier healthy driver(s) available
+				const lowestRank = Math.min(...healthy.map((id) => TIER_RANK[this.getDriverTier(id)]));
+				eligible = healthy.filter((id) => TIER_RANK[this.getDriverTier(id)] === lowestRank);
+			}
 		}
 
 		let chosenId: string | undefined;

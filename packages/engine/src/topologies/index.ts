@@ -9,7 +9,7 @@ export { evolutionTopology, type EvolutionTopologyOptions } from "./evolution.ts
 export { hierarchyTopology, type HierarchyTopologyOptions } from "./hierarchy.ts";
 export { pullRefineryTopology, type PullRefineryOptions } from "./pull-refinery.ts";
 export { singleTopology, type SingleTopologyOptions } from "./single.ts";
-export { substratePeersTopology, type SubstratePeersOptions } from "./substrate-peers.ts";
+export { substratePeersTopology, type SubstratePeersOptions, type SubstrateSeatConfig } from "./substrate-peers.ts";
 
 export type TopologyName = "single" | "hierarchy" | "pull-refinery" | "substrate-peers" | "evolution";
 

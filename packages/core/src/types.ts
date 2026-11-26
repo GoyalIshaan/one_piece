@@ -80,7 +80,7 @@ export type RunNomination =
 
 export type Run = RunFields & RunPhase & RunNomination;
 
-export interface AgentRecord {
+interface AgentFields {
 	id: string;
 	runId: string;
 	handle: string;
@@ -92,14 +92,20 @@ export interface AgentRecord {
 	taskId?: string;
 	workspace?: string;
 	branch?: string;
-	status: AgentStatus;
-	statusReason?: string;
 	turns: number;
 	spent: BudgetVector;
 	summary?: string;
 	createdAt: number;
 	updatedAt: number;
 }
+
+export type AgentPhase = Exclusive<
+	| { readonly status: "pending" | "running" }
+	| { readonly status: "parked" | "done" | "stopped"; readonly statusReason?: string }
+	| { readonly status: "stalled" | "failed"; readonly statusReason: string }
+>;
+
+export type AgentRecord = AgentFields & AgentPhase;
 
 export type TaskStatus = "open" | "claimed" | "done" | "blocked" | "failed" | "cancelled";
 
@@ -112,6 +118,10 @@ interface TaskFields {
 	dependsOn: string[];
 	/** Monotonic fencing token (incremented on every lease acquisition; prevents split-brain merges). */
 	fencingToken: number;
+	/** Disjoint workspace file/directory prefixes owned by this ticket (prevents split-brain edits). */
+	ownedPaths?: string[];
+	/** Concrete acceptance criteria pinned across compaction & handoffs. */
+	acceptanceCriteria?: string[];
 	result?: string;
 	artifactIds?: string[];
 	findingId?: string;
@@ -141,11 +151,18 @@ export interface BoardPost {
 	board?: string;
 	topic: string;
 	authorAgentId: string;
+	authorHandle?: string;
 	summary: string;
 	body: string;
 	references?: BoardReference[];
 	artifactIds?: string[];
 	parentPostId?: string;
+	threadId?: string;
+	labels?: Record<string, string>;
+	supersedes?: string;
+	supersededBy?: string;
+	seq?: number;
+	idempotencyKey?: string;
 	createdAt: number;
 }
 
@@ -191,11 +208,14 @@ export type FindingSubmission = {
 	at: number;
 } & SnapshotState;
 
+export type ReviewLens = "executable" | "blind-diff" | "transcript-audit";
+
 export interface ReviewRound {
 	round: number;
 	revision: number;
 	reviewerAgentId: string;
 	reviewerDriverId?: string;
+	lens?: ReviewLens;
 	verdict: "accepted" | "rejected" | "needs_work";
 	message: string;
 	confidence?: number;
@@ -205,7 +225,7 @@ export interface ReviewRound {
 
 export type FindingStatus = "pending_review" | "accepted" | "rejected" | "needs_work" | "unreviewed";
 
-export interface Finding {
+interface FindingFields {
 	id: string;
 	runId: string;
 	authorAgentId: string;
@@ -215,17 +235,21 @@ export interface Finding {
 	summary: string;
 	evidence: string[];
 	level: EvidenceLevel;
-	status: FindingStatus;
-	confidence?: number;
 	score?: number;
 	submissions: FindingSubmission[];
 	rounds: ReviewRound[];
 	buildsOn: string[];
-	reviewError?: string;
-	retryAfter?: number;
 	createdAt: number;
 	updatedAt: number;
 }
+
+export type FindingPhase = Exclusive<
+	| { readonly status: "pending_review" }
+	| { readonly status: "accepted" | "rejected" | "needs_work"; readonly confidence?: number }
+	| { readonly status: "unreviewed"; readonly reviewError: string; readonly retryAfter?: number }
+>;
+
+export type Finding = FindingFields & FindingPhase;
 
 export type Report = {
 	id: string;

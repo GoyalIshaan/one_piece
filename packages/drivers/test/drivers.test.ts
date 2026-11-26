@@ -349,7 +349,7 @@ describe("drivers & 3-class quota classification", () => {
 		expect(first.needsHandoff).toBe(false);
 		expect(spilled.length).toBeGreaterThan(0);
 
-		// Second watermark -> escalates to structured anchor preserving failed approaches and signals Tier 2 handoff
+		// Second watermark -> escalates to structured anchor preserving failed approaches, pinned checklist, and signals Tier 2 handoff
 		const second = maybeCompactSession({
 			messages: first.messages,
 			systemPrompt: "static",
@@ -359,6 +359,7 @@ describe("drivers & 3-class quota classification", () => {
 				watermarkFraction: 0.7,
 				keepRecentTurns: 4,
 				maxCompactionsBeforeHandoff: 2,
+				pinnedChecklist: ["Pass all parser edge tests", "Keep changes inside src/parser.ts"],
 			},
 		});
 		expect(second.compacted?.strategy).toBe("anchor");
@@ -367,7 +368,53 @@ describe("drivers & 3-class quota classification", () => {
 		const anchorText = (second.messages[0] as any).content[0].text;
 		expect(anchorText).toContain("Failed Approaches");
 		expect(anchorText).toContain("AssertionError");
+		expect(anchorText).toContain("Pinned Acceptance Checklist (DO NOT DROP)");
+		expect(anchorText).toContain("Pass all parser edge tests");
+		expect(anchorText).toContain("Keep changes inside src/parser.ts");
 		// Never split leaving an orphaned toolResult at recent[0] (would cause HTTP 400 on LLM APIs)
 		expect((second.messages[1] as any).role).not.toBe("toolResult");
+	});
+
+	it("routes by minTier/maxTier cleanly and falls back gracefully on single-tier pools", async () => {
+		const mkFake = (id: string) => ({
+			id,
+			kind: "codex-exec" as const,
+			capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema: false, supportsMcpHttp: false },
+			async healthCheck() {
+				return { ok: true, driverId: id, kind: "codex-exec" as const };
+			},
+			async spawn() {
+				return { driverId: id, async runTurn() { return { status: "completed" as const, finalText: "ok" }; }, async close() {} };
+			},
+		});
+
+		const router = new DriverQuotaRouter({
+			drivers: [
+				{ driver: mkFake("fast"), config: { id: "fast", kind: "codex-exec", tier: "sidekick" } },
+				{ driver: mkFake("std"), config: { id: "std", kind: "codex-exec", tier: "standard" } },
+				{ driver: mkFake("big"), config: { id: "big", kind: "codex-exec", tier: "frontier" } },
+			],
+			roles: { default: ["fast", "std", "big"] },
+		});
+
+		expect(router.getDriverTier("fast")).toBe("sidekick");
+		expect(router.getDriverTier("big")).toBe("frontier");
+
+		const selSidekick = await router.acquireForRole("explorer", { maxTier: "sidekick" });
+		expect(selSidekick.driver.id).toBe("fast");
+		selSidekick.release();
+
+		const selFrontier = await router.acquireForRole("worker", { minTier: "frontier" });
+		expect(selFrontier.driver.id).toBe("big");
+		selFrontier.release();
+
+		// Single-tier pool gracefully falls back when frontier is requested
+		const singleRouter = new DriverQuotaRouter({
+			drivers: [{ driver: mkFake("only"), config: { id: "only", kind: "codex-exec", tier: "sidekick" } }],
+			roles: { default: ["only"] },
+		});
+		const fallback = await singleRouter.acquireForRole("worker", { minTier: "frontier" });
+		expect(fallback.driver.id).toBe("only");
+		fallback.release();
 	});
 });

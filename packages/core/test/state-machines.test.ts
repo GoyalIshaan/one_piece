@@ -1,15 +1,25 @@
 import { describe, expect, it } from "vitest";
 import {
+	type AgentRecord,
+	type BoardPost,
+	type BoardPostLabelResult,
+	type BoardWaitResult,
+	type Finding,
 	type FindingSubmission,
+	type MergeTrunkResult,
 	type ProviderQuotaRecord,
 	type Report,
 	type Run,
 	type TaskRecord,
+	type TopologyOutcome,
+	transitionAgentRecord,
 	transitionClaimTask,
+	transitionFinding,
 	transitionQuotaRecord,
 	transitionReleaseTask,
 	transitionRenewTask,
 	transitionRun,
+	transitionSupersedePost,
 	type VerificationReceipt,
 	type WorkerTurnResult,
 } from "../src/index.ts";
@@ -172,6 +182,82 @@ describe("core state machines (runtime invariants + compile-time proofs)", () =>
 		expect(transitionRun(finished.next, { type: "finish", status: "failed", reason: "late", now: 500 }).changed).toBe(false);
 	});
 
+	it("enforces AgentRecord absorbing terminals, Finding review transitions, and BoardPost supersede guards", () => {
+		const agent: AgentRecord = {
+			id: "agt-1",
+			runId: "run-1",
+			handle: "peer-1",
+			role: "worker",
+			driverId: "codex",
+			status: "running",
+			turns: 0,
+			spent: {},
+			createdAt: 100,
+			updatedAt: 100,
+		};
+		const stalled = transitionAgentRecord(agent, { type: "set_status", status: "stalled", reason: "looping", now: 200 });
+		expect(stalled.changed).toBe(true);
+		expect(stalled.next.status).toBe("stalled");
+		if (stalled.next.status === "stalled") expect(stalled.next.statusReason).toBe("looping");
+
+		// Absorbing terminal: stalled agent CANNOT revert to running or be overwritten by done
+		expect(transitionAgentRecord(stalled.next, { type: "set_status", status: "running", now: 300 }).changed).toBe(false);
+		expect(transitionAgentRecord(stalled.next, { type: "set_status", status: "done", now: 300 }).changed).toBe(false);
+
+		const pending: Finding = {
+			id: "fnd-1",
+			runId: "run-1",
+			authorAgentId: "agt-1",
+			claim: "c",
+			summary: "s",
+			evidence: [],
+			level: "empirical",
+			status: "pending_review",
+			submissions: [],
+			rounds: [],
+			buildsOn: [],
+			createdAt: 100,
+			updatedAt: 100,
+		};
+		const unreviewed = transitionFinding(pending, { type: "review_error", error: "lens crashed", now: 200 });
+		expect(unreviewed.status).toBe("unreviewed");
+		if (unreviewed.status === "unreviewed") expect(unreviewed.reviewError).toBe("lens crashed");
+
+		const accepted = transitionFinding(unreviewed, {
+			type: "verdict",
+			round: {
+				round: 1,
+				revision: 1,
+				reviewerAgentId: "verifier",
+				verdict: "accepted",
+				message: "passed",
+				confidence: 0.95,
+				checksRun: ["suite:passed"],
+				at: 300,
+			},
+			now: 300,
+		});
+		expect(accepted.status).toBe("accepted");
+		expect("reviewError" in accepted).toBe(false);
+
+		const post: BoardPost = {
+			id: "post-1",
+			runId: "run-1",
+			topic: "plan",
+			authorAgentId: "agt-1",
+			summary: "v1",
+			body: "v1",
+			createdAt: 100,
+		};
+		expect(transitionSupersedePost(post, "post-1")).toEqual({ ok: false, reason: "self_supersede" });
+		const sup1 = transitionSupersedePost(post, "post-2");
+		expect(sup1.ok).toBe(true);
+		if (sup1.ok) {
+			expect(sup1.updated.supersededBy).toBe("post-2");
+			expect(transitionSupersedePost(sup1.updated, "post-3")).toEqual({ ok: false, reason: "already_superseded" });
+		}
+	});
+
 	it("proves illegal states are unrepresentable at compile time", () => {
 		// 1. ProviderQuotaRecord illegal states
 		// @ts-expect-error cooldown requires cooldownUntil and reason
@@ -323,6 +409,100 @@ describe("core state machines (runtime invariants + compile-time proofs)", () =>
 			createdAt: 0,
 		};
 
+		// 7. MergeTrunkResult discriminated union invariants
+		// @ts-expect-error successful merge forbids conflictFiles
+		const _badMergeOkWithConflicts: MergeTrunkResult = {
+			ok: true,
+			commitSha: "abc123",
+			conflictFiles: ["src/a.ts"],
+		};
+		// @ts-expect-error failed merge requires conflictFiles
+		const _badMergeFailMissingConflicts: MergeTrunkResult = {
+			ok: false,
+			error: "merge failed",
+		};
+		// @ts-expect-error failed merge forbids commitSha
+		const _badMergeFailWithSha: MergeTrunkResult = {
+			ok: false,
+			conflictFiles: ["src/a.ts"],
+			error: "conflict",
+			commitSha: "abc123",
+		};
+
+		// 8. AgentRecord illegal states
+		// @ts-expect-error stalled requires statusReason
+		const _badAgentStalled: AgentRecord = {
+			id: "a1",
+			runId: "r1",
+			handle: "peer-1",
+			role: "worker",
+			driverId: "codex",
+			status: "stalled",
+			turns: 1,
+			spent: {},
+			createdAt: 0,
+			updatedAt: 0,
+		};
+		// @ts-expect-error running forbids statusReason
+		const _badAgentRunning: AgentRecord = {
+			id: "a2",
+			runId: "r1",
+			handle: "peer-2",
+			role: "worker",
+			driverId: "codex",
+			status: "running",
+			statusReason: "should not exist",
+			turns: 1,
+			spent: {},
+			createdAt: 0,
+			updatedAt: 0,
+		};
+
+		// 9. Finding illegal states
+		// @ts-expect-error unreviewed requires reviewError
+		const _badFindingUnreviewed: Finding = {
+			id: "f1",
+			runId: "r1",
+			authorAgentId: "a1",
+			claim: "c",
+			summary: "s",
+			evidence: [],
+			level: "empirical",
+			status: "unreviewed",
+			submissions: [],
+			rounds: [],
+			buildsOn: [],
+			createdAt: 0,
+			updatedAt: 0,
+		};
+		// @ts-expect-error accepted forbids reviewError
+		const _badFindingAccepted: Finding = {
+			id: "f2",
+			runId: "r1",
+			authorAgentId: "a1",
+			claim: "c",
+			summary: "s",
+			evidence: [],
+			level: "empirical",
+			status: "accepted",
+			reviewError: "stale error",
+			submissions: [],
+			rounds: [],
+			buildsOn: [],
+			createdAt: 0,
+			updatedAt: 0,
+		};
+
+		// 10. BoardPostLabelResult, BoardWaitResult, and TopologyOutcome invariants
+		// @ts-expect-error conflict requires currentLabels
+		const _badLabelConflict: BoardPostLabelResult = { ok: false, reason: "conflict" };
+		// @ts-expect-error not_found forbids currentLabels
+		const _badLabelNotFound: BoardPostLabelResult = { ok: false, reason: "not_found", currentLabels: {} };
+		// @ts-expect-error matched wait result forbids empty posts tuple
+		const _badWaitMatchedEmpty: BoardWaitResult = { status: "matched", timedOut: false, posts: [], cursor: 0, topics: [] };
+		// @ts-expect-error TopologyOutcome nomination requires both nominatedFindingId and nominatedRevision
+		const _badTopoHalfNom: TopologyOutcome = { status: "done", summary: "ok", nominatedFindingId: "fnd-1" };
+
 		// Silence unused-variable warnings while proving every type assertion compiled
 		expect([
 			_badQuotaCooldown,
@@ -339,6 +519,17 @@ describe("core state machines (runtime invariants + compile-time proofs)", () =>
 			_badRunDone,
 			_badRunHalfNom,
 			_badReportHalfNom,
+			_badMergeOkWithConflicts,
+			_badMergeFailMissingConflicts,
+			_badMergeFailWithSha,
+			_badAgentStalled,
+			_badAgentRunning,
+			_badFindingUnreviewed,
+			_badFindingAccepted,
+			_badLabelConflict,
+			_badLabelNotFound,
+			_badWaitMatchedEmpty,
+			_badTopoHalfNom,
 		]).toBeDefined();
 	});
 });

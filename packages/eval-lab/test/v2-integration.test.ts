@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,10 +11,14 @@ import type {
 	WorkerTurnResult,
 } from "@one-piece/core";
 import { DriverQuotaRouter } from "@one-piece/drivers";
+import type { HarnessRunReceipt } from "../src/contracts.ts";
 import { createV2Adapter } from "../src/adapters/v2.ts";
 import { runCampaign } from "../src/runner.ts";
 import { miniCoopInterpTask } from "../src/tasks/mini-coop-interp/index.ts";
 import { miniOptPackTask } from "../src/tasks/mini-opt-pack/index.ts";
+import { siloJoinMicroTask } from "../src/tasks/silo-join-micro/index.ts";
+import { SwarmOS, substratePeersTopology } from "@one-piece/engine";
+import { SqliteStore } from "@one-piece/store";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
@@ -301,6 +305,173 @@ describe("eval-lab <-> one_piece v2 SwarmOS end-to-end integration", () => {
 			expect(outageRes.scorecards[0]?.harnessFaults.some((f) => f.code === "PROVIDER_AUTH_FAILURE")).toBe(true);
 			expect(outageRes.scorecards[0]?.reproducibility.dirtyDiffSha).not.toBe("unknown");
 		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("solves silo-join-micro (N=4) via Board v2 (board_publish + board_wait) + substrate-peers disjoint trunk assembly with +1.0 communication lift", async () => {
+		const root = mkdtempSync(join(tmpdir(), "eval-v2-silo-"));
+		try {
+			const driver = new ScriptedV2Driver("v2-silo-sim", async (spec, prompt) => {
+				spec.onActivity?.({ type: "session", sessionId: `sess-${spec.agentId}`, model: "v2-silo-model" });
+				const shardMatch = /Your private shard file is at:\s*(\S+)/.exec(prompt);
+				const seatMatch = /You are Seat (\d+) of (\d+)/.exec(prompt);
+				if (!shardMatch || !seatMatch) {
+					return { status: "completed", model: "v2-silo-model", finalText: "No shard assigned", usage: { inputTokens: 50, outputTokens: 20, totalTokens: 70, durationMs: 5 } };
+				}
+				const seat = Number(seatMatch[1]);
+				const totalSeats = Number(seatMatch[2]);
+				const shard = JSON.parse(readFileSync(shardMatch[1]!, "utf8")) as { seat: number; values: number[] };
+				const subtotal = shard.values.reduce((a, b) => a + b, 0);
+
+				const publishTool = spec.tools?.find((t) => t.name === "board_publish");
+				const waitTool = spec.tools?.find((t) => t.name === "board_wait");
+				const ctx = { runId: spec.runId, agentId: spec.agentId, role: spec.role, workspace: spec.workspace, signal: new AbortController().signal };
+
+				let offset = 0;
+				if (publishTool && waitTool) {
+					// Swarm peer: publish subtotal and wait reactively for all N seats
+					await publishTool.execute(
+						{
+							topic: "shard-subtotal",
+							summary: `seat=${seat} subtotal=${subtotal}`,
+							body: JSON.stringify({ seat, subtotal }),
+							labels: { seat: String(seat) },
+						},
+						ctx,
+					);
+					const waited = await waitTool.execute(
+						{ topic: "shard-subtotal", min_posts: totalSeats, timeout_seconds: 5 },
+						ctx,
+					);
+					const matches = [...waited.text.matchAll(/\{"seat":(\d+),"subtotal":(\d+)\}/g)];
+					const bySeat = new Map<number, number>();
+					for (const m of matches) bySeat.set(Number(m[1]), Number(m[2]));
+					for (let s = 0; s < seat; s++) offset += bySeat.get(s) ?? 0;
+				}
+				// Solo / silent_bon has no board tools, so offset stays 0 (only seat 0 can be right, and 3/4 files are missing)
+				let acc = offset;
+				const prefix = shard.values.map((v) => {
+					acc += v;
+					return acc;
+				});
+				mkdirSync(join(spec.workspace, "submissions"), { recursive: true });
+				writeFileSync(
+					join(spec.workspace, "submissions", `seat_${seat}.json`),
+					JSON.stringify({ seat, prefix }, null, 2) + "\n",
+				);
+				return {
+					status: "completed",
+					model: "v2-silo-model",
+					finalText: `Wrote submissions/seat_${seat}.json`,
+					usage: { inputTokens: 150, outputTokens: 60, totalTokens: 210, durationMs: 10 },
+				};
+			});
+
+			const router = new DriverQuotaRouter({
+				drivers: [{ driver, config: { id: "v2-silo-sim", kind: "codex-exec", maxConcurrent: 4 } }],
+				roles: { default: ["v2-silo-sim"], worker: ["v2-silo-sim"] },
+			});
+			const adapter = createV2Adapter({ router, task: siloJoinMicroTask });
+			const outDir = join(root, "campaign-silo");
+			const result = await runCampaign({
+				task: siloJoinMicroTask,
+				adapter,
+				arms: [
+					{ id: "solo-n1", controlRung: "solo", topology: "single", swarmSize: 1 },
+					{ id: "silent-n4", controlRung: "silent_bon", topology: "silent_bon", swarmSize: 4 },
+					{ id: "peers-n4", controlRung: "swarm", topology: "substrate-peers", swarmSize: 4 },
+				],
+				seeds: [1],
+				budget: { tokens: 80_000 },
+				taskOptions: { mode: "prefix" },
+				outDir,
+				repoRoot: REPO_ROOT,
+				candidateArmId: "peers-n4",
+			});
+
+			const solo = result.scorecards.find((c) => c.reproducibility.controlRung === "solo")!;
+			const silent = result.scorecards.find((c) => c.reproducibility.controlRung === "silent_bon")!;
+			const swarm = result.scorecards.find((c) => c.reproducibility.controlRung === "swarm")!;
+			expect(solo.hasHarnessFault).toBe(false);
+			expect(silent.hasHarnessFault).toBe(false);
+			expect(swarm.hasHarnessFault).toBe(false);
+			expect(solo.deliveredPass).toBe(false);
+			expect(silent.deliveredPass).toBe(false);
+			expect(silent.autoNominated).toBe(false);
+			expect(swarm.deliveredPass).toBe(true);
+			expect(swarm.deliveredScore).toBe(1);
+			expect(swarm.losses.nominationLoss).toBe(0);
+
+			// Compile-time proofs for HarnessRunReceipt nomination invariants
+			// @ts-expect-error autoNominated cannot be true when no artifact was nominated
+			const _badReceiptAutoWithoutArtifact: HarnessRunReceipt = {
+				runId: "r1",
+				status: "done",
+				autoNominated: true,
+				candidateSnapshots: [],
+				harnessFaults: [],
+			};
+			// @ts-expect-error nominatedArtifactDir requires nominatedSha256
+			const _badReceiptHalfNom: HarnessRunReceipt = {
+				runId: "r2",
+				status: "done",
+				nominatedArtifactDir: "/tmp/out",
+				autoNominated: false,
+				candidateSnapshots: [],
+				harnessFaults: [],
+			};
+			expect([_badReceiptAutoWithoutArtifact, _badReceiptHalfNom]).toBeDefined();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("invokes Option A impartial integrator fallback when substrate-peers hit a git merge conflict", async () => {
+		const root = mkdtempSync(join(tmpdir(), "eval-v2-conflict-"));
+		const workDir = join(root, "ws");
+		const runDir = join(root, "run");
+		mkdirSync(workDir, { recursive: true });
+		writeFileSync(join(workDir, "shared.txt"), "base-line\n");
+		const store = new SqliteStore(join(runDir, "trace.db"));
+		try {
+			const driver = new ScriptedV2Driver("v2-conflict-sim", async (spec, prompt) => {
+				if (spec.role === "integrator") {
+					expect(prompt).toContain("shared.txt");
+					writeFileSync(join(spec.workspace, "shared.txt"), "base-line\npeer-1-feature\npeer-2-feature\n");
+					return { status: "completed", finalText: "Merged both peer features cleanly", usage: { totalTokens: 100, durationMs: 5 } };
+				}
+				const isPeer1 = prompt.includes("peer-1");
+				writeFileSync(join(spec.workspace, "shared.txt"), isPeer1 ? "peer-1-feature\n" : "peer-2-feature\n");
+				return { status: "completed", finalText: `Edited shared.txt (${isPeer1 ? "peer-1" : "peer-2"})`, usage: { totalTokens: 80, durationMs: 5 } };
+			});
+			const router = new DriverQuotaRouter({
+				drivers: [{ driver, config: { id: "v2-conflict-sim", kind: "codex-exec", maxConcurrent: 4 } }],
+				roles: { default: ["v2-conflict-sim"], worker: ["v2-conflict-sim"], integrator: ["v2-conflict-sim"] },
+			});
+			const os = await SwarmOS.create({
+				runId: "run-conflict-opt-a",
+				runDir,
+				workspace: workDir,
+				topology: "substrate-peers",
+				goal: { title: "Conflict test", text: "Add both features to shared.txt" },
+				store,
+				router,
+			});
+			try {
+				const outcome = await os.execute(substratePeersTopology({ peers: 2, rounds: 1 }));
+				expect(outcome.status).toBe("done");
+				const trunkContent = readFileSync(join(os.worktrees.trunkPath, "shared.txt"), "utf8");
+				expect(trunkContent).toContain("peer-1-feature");
+				expect(trunkContent).toContain("peer-2-feature");
+				const evs = store.events("run-conflict-opt-a");
+				expect(evs.some((e) => e.type === "peer.conflict_detected")).toBe(true);
+				expect(evs.some((e) => e.type === "peer.conflict_resolved")).toBe(true);
+			} finally {
+				await os.dispose();
+			}
+		} finally {
+			store.close();
 			rmSync(root, { recursive: true, force: true });
 		}
 	});

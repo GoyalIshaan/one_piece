@@ -39,13 +39,20 @@ export function createV1BridgeAdapter(config: V1BridgeConfig): HarnessAdapter {
 				}
 			}
 
+			const validNomDir = nominatedDir && existsSync(nominatedDir) ? nominatedDir : undefined;
+			const nomination = validNomDir
+				? {
+					nominatedArtifactDir: validNomDir,
+					nominatedSha256: sha256Dir(validNomDir),
+					nominatedAtWallMs: Date.now() - began,
+					autoNominated,
+				}
+				: { autoNominated: false as const };
+
 			return {
 				runId: outcome.runId,
 				status: outcome.status,
-				nominatedArtifactDir: nominatedDir,
-				nominatedSha256: nominatedDir && existsSync(nominatedDir) ? sha256Dir(nominatedDir) : undefined,
-				nominatedAtWallMs: nominatedDir ? Date.now() - began : undefined,
-				autoNominated,
+				...nomination,
 				candidateSnapshots: outcome.candidates,
 				harnessFaults: [],
 			};

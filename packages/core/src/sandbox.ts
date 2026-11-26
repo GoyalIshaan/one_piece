@@ -160,6 +160,31 @@ function seatbeltProfile(profile: SandboxProfile, roots: string[], archive: stri
 	].join("");
 }
 
+/**
+ * Wrap an external CLI worker command in a thin macOS Seatbelt read-deny profile
+ * so the worker (and any child commands it spawns) can access its cloud API and MCP bus
+ * while being kernel-blocked from reading hidden graders or sibling private shards.
+ */
+export function seatbeltReadDenyCommand(command: string[], deniedPaths: readonly string[]): string[] {
+	if (process.platform !== "darwin" || !deniedPaths.length || process.env.ONE_PIECE_NO_SANDBOX) {
+		return command;
+	}
+	const unique = new Set<string>();
+	for (const raw of deniedPaths) {
+		if (!raw) continue;
+		unique.add(raw);
+		unique.add(real(raw));
+	}
+	if (!unique.size) return command;
+	const quote = (r: string) => `(subpath "${r.replace(/"/g, '\\"')}")`;
+	const rules = [
+		"(version 1)",
+		"(allow default)",
+		`(deny file-read* ${[...unique].map(quote).join(" ")})`,
+	].join("\n");
+	return ["/usr/bin/sandbox-exec", "-p", rules, ...command];
+}
+
 /** Apply the same OS restrictions to shell tools and native subprocesses such as workspace Git. */
 export function sandboxCommand(command: string[], options: Pick<CommandOptions, "cwd" | "profile" | "isolatedWrites" | "writeRoots" | "networkOff"> & Admission): string[] {
 	if (options.leasedMacGpu && (!options.commandPrefix?.length || !Number.isFinite(options.readyTimeoutMs) ||

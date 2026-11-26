@@ -6,6 +6,7 @@ import {
 	assertNever,
 	type BoardService,
 	type BudgetVector,
+	type DriverTier,
 	EventBus,
 	FileArtifactStore,
 	type FindingVerifier,
@@ -15,6 +16,7 @@ import {
 	newId,
 	type QuotaPoolRouter,
 	Redactor,
+	type ReviewLens,
 	type Role,
 	type Run,
 	shortHandle,
@@ -27,6 +29,7 @@ import {
 	type ToolScope,
 	type TopologyOutcome,
 	type TopologyPlugin,
+	transitionAgentRecord,
 	transitionRun,
 	type UsageRecord,
 	type WorkerActivityEvent,
@@ -38,7 +41,7 @@ import { synthesizeHandoffFile } from "@one-piece/drivers";
 import { createFrozenDispatcherTool, materializeToolSchemas, McpBusServer } from "@one-piece/mcp-bus";
 import { boardTools, SwarmBoardService } from "@one-piece/module-board";
 import { LocalSecretBroker, type SecretSpec } from "@one-piece/module-secrets";
-import { workspaceTools } from "@one-piece/module-workspace";
+import { spillLargeOutput, workspaceTools } from "@one-piece/module-workspace";
 import { type PoolConfig, Scheduler, schedulerTools } from "@one-piece/scheduler";
 import { CloseoutController } from "./closeout.ts";
 import { createCodeModeTool } from "./codemode.ts";
@@ -59,6 +62,8 @@ export interface SwarmOsConfig {
 	secrets?: SecretSpec[];
 	verifier?: FindingVerifier;
 	enableBlindReview?: boolean;
+	/** Composable decorrelated review lenses (e.g. ["blind-diff", "transcript-audit"]). */
+	reviewLenses?: ReviewLens[];
 	maxRepeatedTurns?: number;
 	networkOffWorkers?: boolean;
 	/** Additional directories to scan for curated SKILL.md folders. */
@@ -71,6 +76,16 @@ export interface SwarmOsConfig {
 }
 
 const DEFAULT_LEASE_MS = 180_000;
+const TIER_ORDER: readonly DriverTier[] = ["sidekick", "standard", "frontier"];
+
+function nextHigherTier(tier: DriverTier): DriverTier | undefined {
+	const idx = TIER_ORDER.indexOf(tier);
+	return idx >= 0 && idx + 1 < TIER_ORDER.length ? TIER_ORDER[idx + 1] : undefined;
+}
+
+function isOpenAiEditModel(model?: string): boolean {
+	return Boolean(model && /(?:^|[/_-])(gpt|codex|o[134])(?:[^a-z]|$)/i.test(model));
+}
 
 /**
  * Layer B — Thin Shared Swarm OS.
@@ -101,9 +116,16 @@ export class SwarmOS implements SwarmOsApi {
 	private readonly autoHandoffOnSecondCompaction: boolean;
 	private readonly triggers: TriggerEngine;
 	private readonly closeout: CloseoutController;
-	private readonly activeHandles = new Map<string, { handle: WorkerHandle; abort: AbortController; workspace: string }>();
+	private readonly activeHandles = new Map<
+		string,
+		{ handle: WorkerHandle; abort: AbortController; workspace: string; armEscalation: (reason: string) => boolean }
+	>();
 	private readonly runAbort = new AbortController();
 	private wallReserveTimer?: ReturnType<typeof setTimeout>;
+	private lifecycle:
+		| { readonly kind: "ready" }
+		| { readonly kind: "executing"; readonly topology: string }
+		| { readonly kind: "disposed" } = { kind: "ready" };
 
 	private constructor(
 		cfg: SwarmOsConfig,
@@ -172,6 +194,7 @@ export class SwarmOS implements SwarmOsApi {
 			bus: this.bus,
 			verifier: cfg.verifier,
 			enableBlindReview: cfg.enableBlindReview ?? false,
+			reviewLenses: cfg.reviewLenses,
 			spawnReviewer: (req) => this.spawnWorker(req),
 		});
 
@@ -185,6 +208,10 @@ export class SwarmOS implements SwarmOsApi {
 			onStall: (agentId, reason) => {
 				const active = this.activeHandles.get(agentId);
 				if (active) {
+					if (active.armEscalation(reason)) {
+						void active.handle.interrupt?.().catch(() => {});
+						return;
+					}
 					this.updateAgentStatus(agentId, "stalled", reason);
 					active.abort.abort(new Error(reason));
 					void active.handle.interrupt?.().catch(() => {});
@@ -249,6 +276,8 @@ export class SwarmOS implements SwarmOsApi {
 		description: string;
 		role?: Role;
 		dependsOn?: string[];
+		ownedPaths?: string[];
+		acceptanceCriteria?: string[];
 		priority?: number;
 		createdBy: string;
 	}): TaskRecord {
@@ -262,6 +291,8 @@ export class SwarmOS implements SwarmOsApi {
 			status: "open",
 			dependsOn: input.dependsOn ?? [],
 			fencingToken: 0,
+			ownedPaths: input.ownedPaths?.length ? input.ownedPaths : undefined,
+			acceptanceCriteria: input.acceptanceCriteria?.length ? input.acceptanceCriteria : undefined,
 			priority: input.priority ?? 0,
 			createdBy: input.createdBy,
 			createdAt: now,
@@ -311,10 +342,11 @@ export class SwarmOS implements SwarmOsApi {
 	defaultToolsFor(role: Role, opts: ToolScope = {}): ToolDefinition[] {
 		const tools: ToolDefinition[] = [];
 		const boardMode = opts.board ?? "read-write";
+		const boardToolOpts = { resolveHandle: (id: string) => this.store.get("agents", id)?.handle };
 		if (boardMode === "read-write") {
-			tools.push(...boardTools(this.board));
+			tools.push(...boardTools(this.board, boardToolOpts));
 		} else if (boardMode === "read") {
-			tools.push(...boardTools(this.board).filter((t) => t.name === "board_search" || t.name === "board_visit"));
+			tools.push(...boardTools(this.board, boardToolOpts).filter((t) => t.name === "board_search" || t.name === "board_visit"));
 		}
 
 		if (opts.artifacts !== false) {
@@ -423,6 +455,7 @@ export class SwarmOS implements SwarmOsApi {
 							level: { type: "string", enum: ["formal_proof", "exact_check", "empirical", "conditional", "hypothesis", "external_acceptance"] },
 							scope: { type: "string" },
 							score: { type: "number" },
+							board_post_id: { type: "string", description: "Optional board post ID to stamp with OS verification badge when accepted" },
 						},
 						required: ["claim", "summary"],
 					},
@@ -445,6 +478,21 @@ export class SwarmOS implements SwarmOsApi {
 							},
 							ctx.signal,
 						);
+						if (finding.status === "accepted" && typeof args.board_post_id === "string" && args.board_post_id.trim()) {
+							try {
+								this.board.label(args.board_post_id.trim(), {
+									set: {
+										"os:verified": "true",
+										"os:finding": finding.id,
+										...(finding.score !== undefined ? { "os:score": String(finding.score) } : {}),
+									},
+									actorId: "trust-layer",
+									isOsActor: true,
+								});
+							} catch {
+								// Non-fatal: finding verification succeeded even if optional post ID was invalid.
+							}
+						}
 						const lastRound = finding.rounds.at(-1);
 						const sub = finding.submissions.at(-1);
 						return {
@@ -519,6 +567,70 @@ export class SwarmOS implements SwarmOsApi {
 			);
 		}
 
+		const enableSidekick = opts.sidekick ?? (role === "planner" || role === "integrator" || role === "root");
+		if (enableSidekick) {
+			tools.push({
+				name: "delegate_explore",
+				description: "Offload a noisy read-only codebase search or targeted inspection to a disposable sidekick worker and receive only the concise answer.",
+				inputSchema: {
+					type: "object",
+					properties: {
+						query: { type: "string", description: "Concrete read-only question or lookup to answer from the workspace" },
+						paths: { type: "array", items: { type: "string" }, description: "Optional file/directory hints to inspect first" },
+						max_turns: { type: "number", minimum: 1, maximum: 6 },
+					},
+					required: ["query"],
+				},
+				execute: async (args, ctx) => {
+					const query = String(args.query ?? "").trim();
+					if (!query) return { text: "query is required", isError: true };
+					const paths = Array.isArray(args.paths) ? args.paths.filter((p): p is string => typeof p === "string") : [];
+					const maxTurns = Math.min(6, Math.max(1, typeof args.max_turns === "number" ? Math.floor(args.max_turns) : 4));
+					const explorer = await this.spawnWorker({
+						role: "explorer",
+						parentAgentId: ctx.agentId,
+						workspace: ctx.workspace ?? this.worktrees.trunkPath,
+						readOnly: true,
+						canSpawn: false,
+						maxTier: "sidekick",
+						maxTurns,
+						toolScope: {
+							board: "read",
+							artifacts: true,
+							findings: false,
+							tasks: false,
+							nominate: false,
+							scheduler: "never",
+							skills: false,
+							sidekick: false,
+							codeMode: false,
+						},
+						systemPrompt: "You are a disposable read-only codebase explorer. Answer the query concisely with exact file:line references. Never modify files.",
+					});
+					try {
+						const prompt = [
+							`Query: ${query}`,
+							...(paths.length ? [`Focus paths: ${paths.join(", ")}`] : []),
+							`Return a concise, factual answer with exact file:line citations.`,
+						].join("\n");
+						const res = await explorer.runTurn(prompt, { signal: ctx.signal });
+						const raw = res.finalText || (res.status === "failed" || res.status === "rate_limited" ? res.error : "(no findings)");
+						const spilled = spillLargeOutput("delegate_explore", raw, {
+							artifacts: this.artifacts,
+							createdBy: ctx.agentId,
+						});
+						return {
+							text: spilled.text,
+							isError: res.status === "failed" || res.status === "rate_limited",
+							data: { explorerAgentId: explorer.agent.id, driverId: explorer.agent.driverId, artifactId: spilled.artifactId },
+						};
+					} finally {
+						await explorer.close();
+					}
+				},
+			});
+		}
+
 		if (opts.extendedTools?.length) {
 			tools.push(createFrozenDispatcherTool(opts.extendedTools));
 		}
@@ -531,6 +643,7 @@ export class SwarmOS implements SwarmOsApi {
 					artifacts: this.artifacts,
 					readOnly: opts.readOnly,
 					networkOff: this.networkOffWorkers,
+					editFormat: (opts as ToolScope & { editFormat?: "search_replace" | "apply_patch" }).editFormat,
 				}),
 			);
 		}
@@ -539,10 +652,15 @@ export class SwarmOS implements SwarmOsApi {
 	}
 
 	async spawnWorker(req: SpawnWorkerRequest): Promise<WorkerHandle> {
+		if (this.lifecycle.kind === "disposed") {
+			throw new Error(`Cannot spawn worker (${req.role}) after SwarmOS has been disposed`);
+		}
 		const agentId = newId("agt");
 		let selection = await this.router.acquireForRole(req.role, {
 			preferredDriverId: req.preferredDriverId,
 			avoidDrivers: req.avoidDrivers,
+			minTier: req.minTier,
+			maxTier: req.maxTier,
 			signal: this.runAbort.signal,
 		});
 
@@ -552,15 +670,26 @@ export class SwarmOS implements SwarmOsApi {
 		const workspace = req.workspace ?? worktreeHandle!.path;
 		const branch = worktreeHandle?.branch;
 
-		const buildTools = (driverKind: string) =>
-			req.tools ??
-			this.defaultToolsFor(req.role, {
-				...(req.toolScope ?? {}),
-				canSpawn: req.canSpawn ?? req.toolScope?.canSpawn ?? false,
-				readOnly: req.readOnly ?? req.toolScope?.readOnly ?? false,
-				excludeSkills: req.skills,
-				includeWorkspaceTools: req.toolScope?.includeWorkspaceTools ?? driverKind === "pi-in-process",
-			});
+		const assignedTask = req.taskId ? this.store.get("tasks", req.taskId) : undefined;
+		const pinnedChecklist = [
+			...(this.currentRun.goal.deliverable ? [`Deliverable: ${this.currentRun.goal.deliverable}`] : []),
+			...(this.currentRun.goal.rubric ? [`Rubric: ${this.currentRun.goal.rubric}`] : []),
+			...(assignedTask?.acceptanceCriteria ?? []),
+			...(assignedTask?.ownedPaths?.length ? [`Stay within owned paths: ${assignedTask.ownedPaths.join(", ")}`] : []),
+		];
+
+		const buildTools = (driverKind: string, driverId: string) => {
+			const modelHint = req.model ?? this.router.getDriverConfig?.(driverId)?.model;
+			return req.tools ??
+				this.defaultToolsFor(req.role, {
+					...(req.toolScope ?? {}),
+					canSpawn: req.canSpawn ?? req.toolScope?.canSpawn ?? false,
+					readOnly: req.readOnly ?? req.toolScope?.readOnly ?? false,
+					excludeSkills: req.skills,
+					includeWorkspaceTools: req.toolScope?.includeWorkspaceTools ?? driverKind === "pi-in-process",
+					...(driverKind === "pi-in-process" && isOpenAiEditModel(modelHint) ? { editFormat: "apply_patch" as const } : {}),
+				} as ToolScope);
+		};
 
 		if (req.toolScope?.extendedTools?.length) {
 			materializeToolSchemas(workspace, req.toolScope.extendedTools);
@@ -583,6 +712,7 @@ export class SwarmOS implements SwarmOsApi {
 			keepRecentTurns: 6,
 			minPruneBytes: 1024,
 			maxCompactionsBeforeHandoff: 2,
+			pinnedChecklist: pinnedChecklist.length ? pinnedChecklist : undefined,
 			spillArtifact: (label: string, content: string) => {
 				const rec = this.artifacts.put(label, content, { mimeType: "text/plain", createdBy: agentId });
 				return { id: rec.id, sha256: rec.sha256 };
@@ -592,7 +722,7 @@ export class SwarmOS implements SwarmOsApi {
 			},
 		};
 
-		let tools = buildTools(selection.driver.kind);
+		let tools = buildTools(selection.driver.kind, selection.driver.id);
 		let mcpReg = this.mcp.registerWorker({
 			runId: this.runId,
 			agentId,
@@ -605,7 +735,7 @@ export class SwarmOS implements SwarmOsApi {
 		let agent: AgentRecord = {
 			id: agentId,
 			runId: this.runId,
-			handle: shortHandle(agentId),
+			handle: req.handle?.trim() || shortHandle(agentId),
 			role: req.role,
 			driverId: selection.driver.id,
 			model: req.model,
@@ -716,6 +846,7 @@ export class SwarmOS implements SwarmOsApi {
 				model: req.model,
 				maxTurns: req.maxTurns,
 				readOnly: req.readOnly,
+				deniedReadPaths: req.deniedReadPaths,
 				cacheKeyPrefix,
 				compaction: compactionPolicy,
 				mcp: mcpReg.connection,
@@ -732,6 +863,10 @@ export class SwarmOS implements SwarmOsApi {
 		const abort = new AbortController();
 		type LastTurnOutcome = { readonly status: WorkerTurnResult["status"]; readonly error?: string };
 		type PendingRollover = { readonly reason: string; readonly failedApproaches?: string[] };
+		type EscalationState =
+			| { readonly status: "ready"; readonly used: number }
+			| { readonly status: "armed"; readonly used: number; readonly reason: string; readonly targetMinTier: DriverTier }
+			| { readonly status: "exhausted"; readonly used: number };
 		type WorkerHandleState =
 			| {
 				readonly kind: "idle";
@@ -743,18 +878,167 @@ export class SwarmOS implements SwarmOsApi {
 				readonly lastOutcome?: LastTurnOutcome;
 			}
 			| {
+				readonly kind: "broken";
+				readonly error: string;
+			}
+			| {
 				readonly kind: "closed";
 				readonly finalStatus: TerminalAgentStatus;
 				readonly reason?: string;
 			};
 		let handleState: WorkerHandleState = { kind: "idle" };
+		let escalationState: EscalationState = { status: "ready", used: 0 };
 		const transitionToIdle = (lastOutcome: LastTurnOutcome, pendingRollover?: PendingRollover): void => {
-			if (handleState.kind !== "closed") {
+			if (handleState.kind !== "closed" && handleState.kind !== "broken") {
 				handleState = { kind: "idle", lastOutcome, pendingRollover };
 			}
 		};
 		const attemptedDrivers = new Set<string>([selection.driver.id]);
 		let pendingPermitWaitMs = selection.waitedMs ?? 0;
+
+		const findHigherHealthyTier = (): DriverTier | undefined => {
+			if (!this.router.getDriverTier) return undefined;
+			const currentTier = this.router.getDriverTier(selection.driver.id);
+			const target = nextHigherTier(currentTier);
+			if (!target) return undefined;
+			const targetRank = TIER_ORDER.indexOf(target);
+			const hasHigher = this.router.status().some(
+				(s) =>
+					s.state === "healthy" &&
+					s.driverId !== selection.driver.id &&
+					!attemptedDrivers.has(s.driverId) &&
+					TIER_ORDER.indexOf(this.router.getDriverTier!(s.driverId)) >= targetRank,
+			);
+			return hasHigher ? target : undefined;
+		};
+
+		const armEscalation = (reason: string): boolean => {
+			if (handleState.kind === "closed" || handleState.kind === "broken") return false;
+			if (escalationState.status !== "ready") return false;
+			const target = findHigherHealthyTier();
+			if (!target) return false;
+			escalationState = { status: "armed", used: escalationState.used, reason, targetMinTier: target };
+			return true;
+		};
+
+		const consumeEscalation = (): { reason: string; targetMinTier: DriverTier } | undefined => {
+			if (escalationState.status !== "armed") return undefined;
+			const armed = escalationState;
+			escalationState = armed.used >= 2 ? { status: "exhausted", used: armed.used } : { status: "ready", used: armed.used };
+			return { reason: armed.reason, targetMinTier: armed.targetMinTier };
+		};
+
+		const recordEscalationUsed = (): void => {
+			const nextUsed = escalationState.used + 1;
+			escalationState = nextUsed >= 2 ? { status: "exhausted", used: nextUsed } : { status: "ready", used: nextUsed };
+		};
+
+		const switchSessionWithHandoff = async (params: {
+			reason: string;
+			reasonKind: "compaction_limit" | "stall_escalation";
+			originalPrompt: string;
+			failedApproaches?: string[];
+			escalateToTier?: DriverTier;
+			signal: AbortSignal;
+		}): Promise<{ prompt: string; escalated: boolean }> => {
+			const fromDriver = selection.driver.id;
+			const fromTier: DriverTier = this.router.getDriverTier?.(fromDriver) ?? "standard";
+			const handoff = synthesizeHandoffFile({
+				runId: this.runId,
+				agentId,
+				fromDriver,
+				reason: params.reason,
+				reasonKind: params.reasonKind,
+				originalPrompt: params.originalPrompt,
+				workspace,
+				worktrees: this.worktrees,
+				store: this.store,
+				failedApproaches: params.failedApproaches,
+				acceptanceCriteria: assignedTask?.acceptanceCriteria,
+				ownedPaths: assignedTask?.ownedPaths,
+			});
+
+			let nextSelection = selection;
+			let switchedDriver = false;
+			if (params.escalateToTier) {
+				try {
+					const candidate = await this.router.acquireForRole(req.role, {
+						minTier: params.escalateToTier,
+						avoidDrivers: [...attemptedDrivers, ...(req.avoidDrivers ?? [])],
+						signal: params.signal,
+					});
+					const candidateTier = this.router.getDriverTier?.(candidate.driver.id) ?? "standard";
+					if (candidate.driver.id !== fromDriver && TIER_ORDER.indexOf(candidateTier) > TIER_ORDER.indexOf(fromTier)) {
+						nextSelection = candidate;
+						switchedDriver = true;
+					} else {
+						candidate.release();
+					}
+				} catch {
+					// Fall back to same-driver clean-slate respawn.
+				}
+			}
+
+			await session.close().catch(() => {});
+			if (switchedDriver) {
+				selection.release();
+				mcpReg.unregister();
+				selection = nextSelection;
+				pendingPermitWaitMs += nextSelection.waitedMs ?? 0;
+				attemptedDrivers.add(selection.driver.id);
+				recordEscalationUsed();
+				tools = buildTools(selection.driver.kind, selection.driver.id);
+				mcpReg = this.mcp.registerWorker({ runId: this.runId, agentId, role: req.role, workspace, tools });
+				const latestEsc = this.store.get("agents", agentId) ?? agent;
+				agent = { ...latestEsc, driverId: selection.driver.id, sessionId: undefined, model: undefined, updatedAt: Date.now() };
+				this.bus.save("agents", agent, agentId);
+				const toTier: DriverTier = this.router.getDriverTier?.(selection.driver.id) ?? "standard";
+				this.bus.emit(
+					this.runId,
+					"agent.escalated",
+					{ agentId, fromDriver, toDriver: selection.driver.id, fromTier, toTier, reason: params.reason },
+					agentId,
+				);
+			}
+
+			this.bus.emit(
+				this.runId,
+				"agent.handoff",
+				{
+					agentId,
+					fromDriver,
+					toDriver: selection.driver.id,
+					workspace,
+					handoffPath: handoff.handoffPath,
+					reasonKind: params.reasonKind,
+					waitedMs: switchedDriver ? nextSelection.waitedMs || undefined : undefined,
+				},
+				agentId,
+			);
+
+			try {
+				session = await selection.driver.spawn({
+					runId: this.runId,
+					agentId,
+					role: req.role,
+					workspace,
+					systemPrompt: composedSystemPrompt,
+					model: switchedDriver ? undefined : req.model,
+					maxTurns: req.maxTurns,
+					readOnly: req.readOnly,
+					deniedReadPaths: req.deniedReadPaths,
+					cacheKeyPrefix,
+					compaction: compactionPolicy,
+					mcp: mcpReg.connection,
+					tools,
+					onActivity: handleActivity,
+				});
+			} catch (error) {
+				handleState = { kind: "broken", error: error instanceof Error ? error.message : String(error) };
+				throw error;
+			}
+			return { prompt: handoff.prompt, escalated: switchedDriver };
+		};
 
 		const store = this.store;
 		const handle: WorkerHandle = {
@@ -773,6 +1057,9 @@ export class SwarmOS implements SwarmOsApi {
 				if (handleState.kind === "closed") {
 					throw new Error(`Worker ${agentId} is already closed (${handleState.finalStatus})`);
 				}
+				if (handleState.kind === "broken") {
+					throw new Error(`Worker ${agentId} session is broken after respawn failure (${handleState.error})`);
+				}
 				if (handleState.kind === "running_turn") {
 					throw new Error(`Worker ${agentId} already has an active turn in flight`);
 				}
@@ -784,49 +1071,21 @@ export class SwarmOS implements SwarmOsApi {
 
 				try {
 					// Tier 2 Clean-Slate Handoff rollover before starting a new turn on a heavily compacted session.
+					// Because this boundary already resets the KV cache, opportunistically escalate to a higher tier if available.
 					if (rollover && this.autoHandoffOnSecondCompaction) {
-						const handoff = synthesizeHandoffFile({
-							runId: this.runId,
-							agentId,
-							fromDriver: selection.driver.id,
+						const rolloverSignal = opts.signal
+							? AbortSignal.any([this.runAbort.signal, abort.signal, opts.signal])
+							: AbortSignal.any([this.runAbort.signal, abort.signal]);
+						const targetTier = escalationState.status === "ready" ? findHigherHealthyTier() : undefined;
+						const switched = await switchSessionWithHandoff({
 							reason: rollover.reason,
 							reasonKind: "compaction_limit",
 							originalPrompt: prompt,
-							workspace,
-							worktrees: this.worktrees,
-							store: this.store,
 							failedApproaches: rollover.failedApproaches,
+							escalateToTier: targetTier,
+							signal: rolloverSignal,
 						});
-						await session.close().catch(() => {});
-						this.bus.emit(
-							this.runId,
-							"agent.handoff",
-							{
-								agentId,
-								fromDriver: selection.driver.id,
-								toDriver: selection.driver.id,
-								workspace,
-								handoffPath: handoff.handoffPath,
-								reasonKind: "compaction_limit",
-							},
-							agentId,
-						);
-						session = await selection.driver.spawn({
-							runId: this.runId,
-							agentId,
-							role: req.role,
-							workspace,
-							systemPrompt: composedSystemPrompt,
-							model: req.model,
-							maxTurns: req.maxTurns,
-							readOnly: req.readOnly,
-							cacheKeyPrefix,
-							compaction: compactionPolicy,
-							mcp: mcpReg.connection,
-							tools,
-							onActivity: handleActivity,
-						});
-						currentPrompt = `${handoff.prompt}\n\nNext instruction:\n${prompt}`;
+						currentPrompt = `${switched.prompt}\n\nNext instruction:\n${prompt}`;
 					}
 
 					for (;;) {
@@ -925,6 +1184,24 @@ export class SwarmOS implements SwarmOsApi {
 							agentId,
 						);
 
+						// If TriggerEngine armed a stall escalation during this turn, immediately escalate cleanly at this cold boundary.
+						const pendingEsc = consumeEscalation();
+						if (pendingEsc && !combinedSignal.aborted) {
+							const escalated = await switchSessionWithHandoff({
+								reason: pendingEsc.reason,
+								reasonKind: "stall_escalation",
+								originalPrompt: prompt,
+								failedApproaches: res.failedApproaches,
+								escalateToTier: pendingEsc.targetMinTier,
+								signal: combinedSignal,
+							});
+							if (escalated.escalated) {
+								currentPrompt = escalated.prompt;
+								rpmRetries = 0;
+								continue;
+							}
+						}
+
 						switch (res.status) {
 							case "completed":
 							case "yielded":
@@ -1001,6 +1278,8 @@ export class SwarmOS implements SwarmOsApi {
 									worktrees: this.worktrees,
 									store: this.store,
 									failedApproaches: res.failedApproaches,
+									acceptanceCriteria: assignedTask?.acceptanceCriteria,
+									ownedPaths: assignedTask?.ownedPaths,
 								});
 
 								await session.close().catch(() => {});
@@ -1010,7 +1289,7 @@ export class SwarmOS implements SwarmOsApi {
 								selection = nextSelection;
 								pendingPermitWaitMs += nextSelection.waitedMs ?? 0;
 								attemptedDrivers.add(selection.driver.id);
-								tools = buildTools(selection.driver.kind);
+								tools = buildTools(selection.driver.kind, selection.driver.id);
 								mcpReg = this.mcp.registerWorker({ runId: this.runId, agentId, role: req.role, workspace, tools });
 
 								const latestHandoff = this.store.get("agents", agentId) ?? agent;
@@ -1031,20 +1310,26 @@ export class SwarmOS implements SwarmOsApi {
 									agentId,
 								);
 
-								session = await selection.driver.spawn({
-									runId: this.runId,
-									agentId,
-									role: req.role,
-									workspace,
-									systemPrompt: composedSystemPrompt,
-									maxTurns: req.maxTurns,
-									readOnly: req.readOnly,
-									cacheKeyPrefix,
-									compaction: compactionPolicy,
-									mcp: mcpReg.connection,
-									tools,
-									onActivity: handleActivity,
-								});
+								try {
+									session = await selection.driver.spawn({
+										runId: this.runId,
+										agentId,
+										role: req.role,
+										workspace,
+										systemPrompt: composedSystemPrompt,
+										maxTurns: req.maxTurns,
+										readOnly: req.readOnly,
+										deniedReadPaths: req.deniedReadPaths,
+										cacheKeyPrefix,
+										compaction: compactionPolicy,
+										mcp: mcpReg.connection,
+										tools,
+										onActivity: handleActivity,
+									});
+								} catch (error) {
+									handleState = { kind: "broken", error: error instanceof Error ? error.message : String(error) };
+									throw error;
+								}
 								currentPrompt = handoff.prompt;
 								rpmRetries = 0;
 								break;
@@ -1062,22 +1347,24 @@ export class SwarmOS implements SwarmOsApi {
 					throw error;
 				}
 			},
-			steer: (msg) => (handleState.kind === "closed" ? Promise.resolve() : (session.steer?.(msg) ?? Promise.resolve())),
-			interrupt: () => (handleState.kind === "closed" ? Promise.resolve() : (session.interrupt?.() ?? Promise.resolve())),
+			steer: (msg) => (handleState.kind === "closed" || handleState.kind === "broken" ? Promise.resolve() : (session.steer?.(msg) ?? Promise.resolve())),
+			interrupt: () => (handleState.kind === "closed" || handleState.kind === "broken" ? Promise.resolve() : (session.interrupt?.() ?? Promise.resolve())),
 			close: async () => {
 				if (handleState.kind === "closed") return;
-				const last = handleState.lastOutcome;
 				const finalStatus: TerminalAgentStatus =
-					last?.status === "failed" || last?.status === "rate_limited"
+					handleState.kind === "broken"
 						? "failed"
-						: last?.status === "interrupted"
-							? "stopped"
-							: "done";
-				handleState = { kind: "closed", finalStatus, reason: last?.error };
+						: handleState.lastOutcome?.status === "failed" || handleState.lastOutcome?.status === "rate_limited"
+							? "failed"
+							: handleState.lastOutcome?.status === "interrupted"
+								? "stopped"
+								: "done";
+				const finalReason = handleState.kind === "broken" ? handleState.error : handleState.lastOutcome?.error;
+				handleState = { kind: "closed", finalStatus, reason: finalReason };
 				this.activeHandles.delete(agentId);
 				const latestClose = this.store.get("agents", agentId) ?? agent;
 				if (latestClose.status === "running") {
-					this.updateAgentStatus(agentId, finalStatus, last?.error);
+					this.updateAgentStatus(agentId, finalStatus, finalReason);
 				}
 				await session.close().catch(() => {});
 				mcpReg.unregister();
@@ -1085,11 +1372,15 @@ export class SwarmOS implements SwarmOsApi {
 			},
 		};
 
-		this.activeHandles.set(agentId, { handle, abort, workspace });
+		this.activeHandles.set(agentId, { handle, abort, workspace, armEscalation });
 		return handle;
 	}
 
 	async execute(plugin: TopologyPlugin, signal?: AbortSignal): Promise<TopologyOutcome & { reportPath: string }> {
+		if (this.lifecycle.kind !== "ready") {
+			throw new Error(`SwarmOS.execute() called in invalid lifecycle state "${this.lifecycle.kind}"`);
+		}
+		this.lifecycle = { kind: "executing", topology: plugin.name };
 		const onExternalAbort = () => this.runAbort.abort(signal?.reason);
 		signal?.addEventListener("abort", onExternalAbort, { once: true });
 		this.bus.emit(this.runId, "run.started", { topology: plugin.name, goal: this.currentRun.goal.title });
@@ -1131,15 +1422,20 @@ export class SwarmOS implements SwarmOsApi {
 		this.bus.save("runs", this.currentRun);
 		this.bus.emit(this.runId, "run.finished", { status: outcome.status, reason: outcome.summary });
 
+		const nomination = closedOut.nominatedFindingId !== undefined
+			? { nominatedFindingId: closedOut.nominatedFindingId, nominatedRevision: closedOut.nominatedRevision }
+			: {};
 		return {
-			...outcome,
-			nominatedFindingId: closedOut.nominatedFindingId,
-			nominatedRevision: closedOut.nominatedRevision,
+			status: outcome.status,
+			summary: outcome.summary,
+			...nomination,
 			reportPath: closedOut.reportPath,
 		};
 	}
 
 	async dispose(): Promise<void> {
+		if (this.lifecycle.kind === "disposed") return;
+		this.lifecycle = { kind: "disposed" };
 		if (this.wallReserveTimer) clearTimeout(this.wallReserveTimer);
 		this.triggers.stop();
 		this.runAbort.abort();
@@ -1151,8 +1447,15 @@ export class SwarmOS implements SwarmOsApi {
 	private updateAgentStatus(agentId: string, status: AgentRecord["status"], reason?: string): void {
 		const existing = this.store.get("agents", agentId);
 		if (!existing) return;
-		this.bus.save("agents", { ...existing, status, statusReason: reason, updatedAt: Date.now() }, agentId);
-		this.bus.emit(this.runId, "agent.status", { status, reason }, agentId);
+		const { next, changed } = transitionAgentRecord(existing, {
+			type: "set_status",
+			status,
+			reason,
+			now: Date.now(),
+		});
+		if (!changed) return;
+		this.bus.save("agents", next, agentId);
+		this.bus.emit(this.runId, "agent.status", { status: next.status, reason: next.statusReason }, agentId);
 	}
 
 	private chargeBudget(

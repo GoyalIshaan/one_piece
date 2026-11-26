@@ -37,8 +37,12 @@ export interface LifecycleEvents {
 		transcriptFile?: string;
 	};
 	"agent.stalled": { agentId: string; reason: string; repeatCount?: number };
+	"agent.escalated": { agentId: string; fromDriver: string; toDriver: string; fromTier: string; toTier: string; reason: string };
 	"agent.compacted": { agentId: string; strategy: "micro" | "anchor"; beforeTokens: number; afterTokens: number; prunedCount: number; compactionCount: number };
 	"agent.handoff": { agentId: string; fromDriver: string; toDriver: string; workspace: string; handoffPath: string; reasonKind?: string; waitedMs?: number };
+	"refinery.conflict_resolved": { taskId: string; branch: string; conflictFiles: string[]; commitSha: string };
+	"peer.conflict_detected": { peerHandle: string; branch: string; conflictFiles: string[] };
+	"peer.conflict_resolved": { peerHandle: string; branch: string; conflictFiles: string[]; commitSha: string };
 	"skill.loaded": { skill: string; source: string; bytes: number };
 	"codemode.executed": { exitCode: number; durationMs: number; outputBytes: number; artifactId?: string };
 	"driver.tool_call": { tool: string; argsPreview?: string; isMcp?: boolean; driverId?: string };
@@ -48,7 +52,16 @@ export interface LifecycleEvents {
 	"task.ready": { taskId: string; title: string };
 	"task.claimed": { taskId: string; agentId: string; fencingToken: number; leaseExpiresAt: number };
 	"task.status": { taskId: string; status: TaskStatus; result?: string };
-	"board.posted": { postId: string; topic: string; authorAgentId: string };
+	"board.posted": {
+		postId: string;
+		topic: string;
+		authorAgentId: string;
+		authorHandle?: string;
+		threadId?: string;
+		supersedes?: string;
+		labels?: Record<string, string>;
+	};
+	"board.labeled": { postId: string; set?: Record<string, string>; unset?: string[]; actorId: string };
 	"artifact.stored": { artifactId: string; sha256: string; bytes: number; label: string };
 	"job.started": { jobId: string; pool: string; exclusive: boolean };
 	"job.leasing": { jobId: string; pool: string };

@@ -206,14 +206,20 @@ export function createMockAdapter(options: MockAdapterOptions): HarnessAdapter {
 				const autoNominated = !explicitlyNominated && spec.autoNominate && options.mode !== "mid_run_crash";
 				const nominatedDir = explicitlyNominated || autoNominated ? candidateDir : undefined;
 
+				const nomination = nominatedDir
+					? {
+						nominatedArtifactDir: nominatedDir,
+						nominatedSha256: candidateSha,
+						nominatedAtTokens: totalTokensSoFar,
+						nominatedAtWallMs: clock - t0,
+						autoNominated,
+					}
+					: { autoNominated: false as const };
+
 				return {
 					runId: spec.runId,
 					status: options.mode === "mid_run_crash" ? "failed" : "done",
-					nominatedArtifactDir: nominatedDir,
-					nominatedSha256: nominatedDir ? candidateSha : undefined,
-					nominatedAtTokens: nominatedDir ? totalTokensSoFar : undefined,
-					nominatedAtWallMs: nominatedDir ? clock - t0 : undefined,
-					autoNominated,
+					...nomination,
 					candidateSnapshots: snapshots,
 					harnessFaults: [],
 					driverIds: ["mock"],

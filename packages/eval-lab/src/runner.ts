@@ -22,6 +22,8 @@ export interface ArmSpec {
 	controlRung: ControlRung;
 	topology?: string;
 	swarmSize: number;
+	/** Optional task seat count override (used so solo faces the same N-shard task as N-peer swarms). */
+	taskN?: number;
 	autoNominate?: boolean;
 }
 
@@ -93,6 +95,7 @@ async function runSilentBestOfN(
 			const subDbPath = join(subDir, "trace.db");
 			const subRunId = `${spec.runId}-seat-${i}`;
 
+			const otherShards = (spec.privateShards ?? []).filter((_, idx) => idx !== i);
 			const subReceipt = await adapter.run({
 				...spec,
 				runId: subRunId,
@@ -100,6 +103,9 @@ async function runSilentBestOfN(
 				dbPath: subDbPath,
 				workspaceDir: subWorkspace,
 				privateShards: spec.privateShards?.[i] ? [spec.privateShards[i]!] : undefined,
+				seatIndex: i,
+				totalSeats: spec.totalSeats ?? spec.privateShards?.length ?? n,
+				hiddenDenyPaths: [...spec.hiddenDenyPaths, ...otherShards],
 				controlRung: "solo",
 				topology: "silent_bon_member",
 				swarmSize: 1,
@@ -147,7 +153,7 @@ async function runSilentBestOfN(
 				? await task.publicCheck({
 						artifactDir: sub.nominatedArtifactDir,
 						seed: spec.seed,
-						n: 1,
+						n: spec.totalSeats ?? spec.privateShards?.length ?? n,
 						options,
 					})
 				: {
@@ -162,7 +168,7 @@ async function runSilentBestOfN(
 			) {
 				chosen = {
 					dir: sub.nominatedArtifactDir,
-					sha256: sub.nominatedSha256 ?? sha256Dir(sub.nominatedArtifactDir),
+					sha256: sub.nominatedSha256,
 					score: pub.score,
 					passed: pub.passed,
 				};
@@ -170,14 +176,19 @@ async function runSilentBestOfN(
 		}
 
 		insertEvent.run(Date.now(), spec.runId, "run.finished", null, null, null, JSON.stringify({ status: "done" }));
+		const nomination = chosen
+			? {
+				nominatedArtifactDir: chosen.dir,
+				nominatedSha256: chosen.sha256,
+				nominatedAtTokens: cumulativeTokens,
+				nominatedAtWallMs: Date.now() - began,
+				autoNominated: true as const,
+			}
+			: { autoNominated: false as const };
 		return {
 			runId: spec.runId,
 			status: "done",
-			nominatedArtifactDir: chosen?.dir,
-			nominatedSha256: chosen?.sha256,
-			nominatedAtTokens: cumulativeTokens,
-			nominatedAtWallMs: Date.now() - began,
-			autoNominated: true,
+			...nomination,
 			candidateSnapshots: allSnapshots,
 			harnessFaults: faults,
 			driverIds: [...driverSet],
@@ -265,9 +276,14 @@ export async function runCampaign(options: CampaignOptions): Promise<CampaignRes
 			mkdirSync(hiddenDir, { recursive: true });
 			mkdirSync(runDir, { recursive: true });
 
+			const defaultTaskN =
+				task.family === "info-routing"
+					? Math.max(...arms.map((a) => a.taskN ?? a.swarmSize), 2)
+					: arm.swarmSize;
+			const taskN = arm.taskN ?? defaultTaskN;
 			const prepared = await task.prepare({
 				seed,
-				n: arm.swarmSize,
+				n: taskN,
 				options: taskOptions,
 				workDir,
 				hiddenDir,
@@ -284,6 +300,8 @@ export async function runCampaign(options: CampaignOptions): Promise<CampaignRes
 				rubric: prepared.rubric,
 				workspaceDir: prepared.workspaceDir,
 				privateShards: prepared.privateShards,
+				seatIndex: arm.controlRung === "solo" ? 0 : undefined,
+				totalSeats: prepared.n,
 				hiddenDenyPaths: [hiddenDir, dbPath, `${dbPath}-wal`, `${dbPath}-shm`],
 				controlRung: arm.controlRung,
 				topology: arm.topology ?? arm.controlRung,

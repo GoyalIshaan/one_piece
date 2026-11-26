@@ -47,6 +47,7 @@ function readJsonBody(req: IncomingMessage): Promise<string> {
 const READ_ONLY_TOOLS = new Set([
 	"board_search",
 	"board_visit",
+	"board_wait",
 	"read_artifact",
 	"list_pools",
 	"job_status",
@@ -54,6 +55,8 @@ const READ_ONLY_TOOLS = new Set([
 	"list_files",
 	"grep_files",
 	"load_skill",
+	"delegate_explore",
+	"run_swarm_script",
 ]);
 
 function sendJson(res: ServerResponse, status: number, body: unknown, extraHeaders: Record<string, string> = {}): void {
@@ -75,6 +78,11 @@ function rpcError(id: string | number | null, code: number, message: string) {
 	return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
+type McpServerState =
+	| { readonly kind: "starting" }
+	| { readonly kind: "listening"; readonly url: string }
+	| { readonly kind: "closed"; readonly url: string };
+
 /**
  * Embedded zero-dependency local Streamable HTTP MCP server (`127.0.0.1:0`).
  * Every CLI worker (Codex, Grok, Gemini) connects here with a per-worker bearer token
@@ -85,7 +93,7 @@ export class McpBusServer implements McpToolRegistry {
 	private readonly bus: EventBus;
 	private readonly workersByToken = new Map<string, RegisteredWorker>();
 	private readonly tokenByAgent = new Map<string, string>();
-	private _url = "";
+	private state: McpServerState = { kind: "starting" };
 
 	private constructor(bus: EventBus) {
 		this.bus = bus;
@@ -101,7 +109,7 @@ export class McpBusServer implements McpToolRegistry {
 			instance.server.listen(port, "127.0.0.1", () => {
 				instance.server.off("error", reject);
 				const addr = instance.server.address() as AddressInfo;
-				instance._url = `http://127.0.0.1:${addr.port}/mcp`;
+				instance.state = { kind: "listening", url: `http://127.0.0.1:${addr.port}/mcp` };
 				resolve();
 			});
 		});
@@ -109,7 +117,10 @@ export class McpBusServer implements McpToolRegistry {
 	}
 
 	get url(): string {
-		return this._url;
+		if (this.state.kind === "starting") {
+			throw new Error("McpBusServer is not listening yet");
+		}
+		return this.state.url;
 	}
 
 	registerWorker(spec: {
@@ -119,6 +130,10 @@ export class McpBusServer implements McpToolRegistry {
 		workspace?: string;
 		tools: ToolDefinition[];
 	}): McpWorkerRegistration {
+		if (this.state.kind !== "listening") {
+			throw new Error(`Cannot register worker ${spec.agentId} when McpBusServer is ${this.state.kind}`);
+		}
+		const serverUrl = this.state.url;
 		const existingToken = this.tokenByAgent.get(spec.agentId);
 		if (existingToken) {
 			this.workersByToken.get(existingToken)?.abort.abort();
@@ -144,7 +159,7 @@ export class McpBusServer implements McpToolRegistry {
 		return {
 			token,
 			connection: {
-				url: this._url,
+				url: serverUrl,
 				token,
 				serverName: "swarm",
 				toolNames: [...toolMap.keys()],
@@ -168,6 +183,9 @@ export class McpBusServer implements McpToolRegistry {
 	}
 
 	async close(): Promise<void> {
+		if (this.state.kind === "closed") return;
+		const prevUrl = this.state.kind === "listening" ? this.state.url : "";
+		this.state = { kind: "closed", url: prevUrl };
 		for (const worker of this.workersByToken.values()) worker.abort.abort();
 		this.workersByToken.clear();
 		this.tokenByAgent.clear();

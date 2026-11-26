@@ -56,7 +56,7 @@ function bridgePublicVerifier(task: EvalTask | undefined, spec: HarnessRunSpec):
 			const res = await checkFn({
 				artifactDir: workspace,
 				seed: spec.seed,
-				n: spec.swarmSize,
+				n: spec.totalSeats ?? spec.privateShards?.length ?? spec.swarmSize,
 				options: spec.taskOptions ?? {},
 			});
 			return {
@@ -147,13 +147,66 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 				});
 
 				const n = Math.max(1, spec.swarmSize);
+				const totalSeats = spec.totalSeats ?? spec.privateShards?.length ?? n;
+				const shards = spec.privateShards ?? [];
+
+				const buildSeatPrompt = (seatIdx: number, shardDir: string, multiPeer: boolean): string => {
+					const shardFile = join(shardDir, "shard.json");
+					if (!multiPeer) {
+						return [
+							`Seat assignment: You are Seat ${seatIdx} of ${totalSeats} (seats 0..${totalSeats - 1}).`,
+							`Your private shard file is at: ${shardFile}`,
+							"Other seats' private shards and hidden grading directories are kernel-denied by the sandbox.",
+							`Write your deliverable in your workspace (e.g. submissions/seat_${seatIdx}.json) using only information you can legally access.`,
+						].join("\n");
+					}
+					return [
+						`Seat assignment: You are Seat ${seatIdx} of ${totalSeats} (seats 0..${totalSeats - 1}).`,
+						`Your private shard file is at: ${shardFile}`,
+						"Other seats' private shards are kernel-denied by the sandbox — coordinate with peers strictly via the shared message board!",
+						"Workflow:",
+						`1. Read ONLY your own shard at ${shardFile} and compute the sum of its \`values\` array.`,
+						`2. Immediately call \`board_publish(topic="shard-subtotal", summary="seat ${seatIdx} subtotal=<SUM>", body="...", labels={"seat": "${seatIdx}"})\`.`,
+						`3. Call \`board_wait(topic="shard-subtotal", min_posts=${totalSeats}, timeout_seconds=25)\` (call it again if it times out before all ${totalSeats} seats appear) until all ${totalSeats} seats have published their subtotals.`,
+						`4. Compute your offset = sum of subtotals for seats 0..${seatIdx - 1} (0 if seat 0), then compute your global prefix array and write ONLY \`submissions/seat_${seatIdx}.json\` as \`{"seat": ${seatIdx}, "prefix": [...]}\`.`,
+						`5. Verify your JSON file format (12 integers in \`prefix\`) and finish cleanly — the swarm will automatically assemble all ${totalSeats} seats onto trunk and run the full ${totalSeats}-seat verifier (no need to call \`report_finding\` on a partial 1/${totalSeats} workspace).`,
+					].join("\n");
+				};
+
+				const seatConfigs =
+					topologyName === "substrate-peers" && shards.length > 0
+						? Array.from({ length: Math.max(2, n) }, (_, idx) => {
+							const myShard = shards[idx];
+							const siblingDenies = shards.filter((_, j) => j !== idx);
+							return {
+								handle: `seat-${idx}`,
+								deniedReadPaths: [...denyPaths, ...siblingDenies],
+								seatPrompt: myShard ? buildSeatPrompt(idx, myShard, true) : undefined,
+							};
+						})
+						: undefined;
+
+				const singleSeatIdx = spec.seatIndex ?? 0;
+				const singleShard = shards.length === 1 ? shards[0] : shards[singleSeatIdx];
+				const singleDeniedReads = [...denyPaths, ...shards.filter((p) => p !== singleShard)];
+				const singleExtra =
+					topologyName === "single"
+						? {
+							handle: shards.length > 0 ? `seat-${singleSeatIdx}` : "solo",
+							deniedReadPaths: singleDeniedReads,
+							seatPrompt: singleShard ? buildSeatPrompt(singleSeatIdx, singleShard, false) : undefined,
+						}
+						: {};
+
 				const plugin = createTopology(topologyName, {
 					maxWorkers: n,
 					concurrency: n,
 					peers: Math.max(2, n),
 					populationPerGen: n,
 					generations: 2,
-					rounds: 2,
+					rounds: shards.length > 0 ? 1 : 2,
+					...(seatConfigs ? { seatConfigs } : {}),
+					...singleExtra,
 					...options.topologyOptions,
 				});
 
@@ -205,14 +258,20 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 				const usedDrivers = [...new Set(agents.map((a) => a.driverId).filter(Boolean))];
 				const usedModels = [...new Set(agents.map((a) => a.model).filter((m): m is string => Boolean(m)))];
 
+				const receiptNomination = validNomDir
+					? {
+						nominatedArtifactDir: validNomDir,
+						nominatedSha256: nomSnap?.sha256 ?? sha256Dir(validNomDir),
+						nominatedAtTokens: nomSnap?.atTokens ?? cumulativeTokens,
+						nominatedAtWallMs: nomSnap?.atWallMs ?? Date.now() - began,
+						autoNominated: wasAutoNominated,
+					}
+					: { autoNominated: false as const };
+
 				return {
 					runId: spec.runId,
 					status: outcome.status,
-					nominatedArtifactDir: validNomDir,
-					nominatedSha256: validNomDir ? (nomSnap?.sha256 ?? sha256Dir(validNomDir)) : undefined,
-					nominatedAtTokens: nomSnap?.atTokens ?? (validNomDir ? cumulativeTokens : undefined),
-					nominatedAtWallMs: nomSnap?.atWallMs ?? (validNomDir ? Date.now() - began : undefined),
-					autoNominated: allowNomination && wasAutoNominated,
+					...receiptNomination,
 					candidateSnapshots: snapshots,
 					harnessFaults: [],
 					driverIds: usedDrivers.length ? usedDrivers : driverIds,

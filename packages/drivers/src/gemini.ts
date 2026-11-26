@@ -95,7 +95,14 @@ export class GeminiCliDriver implements WorkerDriver {
 			? buildCliEnv([])
 			: buildCliEnv(["GEMINI_API_KEY", "GOOGLE_API_KEY"]);
 		let currentSessionId = spec.resumeSessionId;
-		let activeChild: ChildProcess | undefined;
+		type HeadlessState =
+			| { readonly kind: "idle" }
+			| { readonly kind: "running"; readonly child: ChildProcess }
+			| { readonly kind: "closed" };
+		let sessionState: HeadlessState = { kind: "idle" };
+		const resetToIdle = (): void => {
+			if (sessionState.kind !== "closed") sessionState = { kind: "idle" };
+		};
 		const driverId = this.id;
 		const config = this.config;
 
@@ -105,6 +112,12 @@ export class GeminiCliDriver implements WorkerDriver {
 				return currentSessionId;
 			},
 			async runTurn(prompt: string, opts = {}): Promise<WorkerTurnResult> {
+				if (sessionState.kind === "closed") {
+					throw new Error("GeminiCliDriver session is closed");
+				}
+				if (sessionState.kind === "running") {
+					throw new Error("GeminiCliDriver session already has an active turn in flight");
+				}
 				const startedAt = Date.now();
 				const fullPrompt = spec.systemPrompt && !currentSessionId
 					? `${spec.systemPrompt}\n\n${prompt}`
@@ -128,7 +141,7 @@ export class GeminiCliDriver implements WorkerDriver {
 						stdio: ["ignore", "pipe", "pipe"],
 						detached: true,
 					});
-					activeChild = child;
+					sessionState = { kind: "running", child };
 
 					const textChunks: string[] = [];
 					let stderr = "";
@@ -202,7 +215,7 @@ export class GeminiCliDriver implements WorkerDriver {
 					});
 
 					child.on("close", (code) => {
-						activeChild = undefined;
+						resetToIdle();
 						rl.close();
 						if (timer) clearTimeout(timer);
 						opts.signal?.removeEventListener("abort", onAbort);
@@ -230,10 +243,12 @@ export class GeminiCliDriver implements WorkerDriver {
 				});
 			},
 			async interrupt(): Promise<void> {
-				if (activeChild) killTree(activeChild);
+				if (sessionState.kind === "running") killTree(sessionState.child);
 			},
 			async close(): Promise<void> {
-				if (activeChild) killTree(activeChild);
+				const prev = sessionState;
+				sessionState = { kind: "closed" };
+				if (prev.kind === "running") killTree(prev.child);
 			},
 		};
 	}
@@ -264,7 +279,14 @@ export class GeminiCliDriver implements WorkerDriver {
 		const pending = new Map<number, { resolve: (val: any) => void; reject: (err: Error) => void }>();
 		let stderr = "";
 		let acpSessionId: string | undefined = spec.resumeSessionId;
-		let turnChunks: string[] = [];
+		type GeminiAcpState =
+			| { readonly kind: "idle" }
+			| { readonly kind: "running"; readonly chunks: string[] }
+			| { readonly kind: "closed" };
+		let sessionState: GeminiAcpState = { kind: "idle" };
+		const resetToIdle = (): void => {
+			if (sessionState.kind !== "closed") sessionState = { kind: "idle" };
+		};
 
 		const sendRpc = (method: string, params: Record<string, unknown>): Promise<any> =>
 			new Promise((resolve, reject) => {
@@ -306,7 +328,7 @@ export class GeminiCliDriver implements WorkerDriver {
 			if (msg.method === "session/update") {
 				const update = msg.params?.update ?? msg.params;
 				if (update?.sessionUpdate === "agent_message_chunk" && typeof update.content?.text === "string") {
-					turnChunks.push(update.content.text);
+					if (sessionState.kind === "running") sessionState.chunks.push(update.content.text);
 					spec.onActivity?.({ type: "text", delta: update.content.text });
 				} else if (update?.sessionUpdate === "tool_call") {
 					spec.onActivity?.({ type: "tool_call", name: String(update.title ?? update.toolCallId ?? "tool") });
@@ -322,14 +344,21 @@ export class GeminiCliDriver implements WorkerDriver {
 			pending.clear();
 		});
 
-		await sendRpc("initialize", { protocolVersion: 1, clientCapabilities: {} });
-		const mcpServers = spec.mcp
-			? [{ name: spec.mcp.serverName, type: "http", url: spec.mcp.url, headers: [{ name: "Authorization", value: `Bearer ${spec.mcp.token}` }] }]
-			: [];
-		const created = await sendRpc("session/new", { cwd: spec.workspace, mcpServers });
-		acpSessionId = String(created?.sessionId ?? acpSessionId ?? "");
-		const resolvedModel = typeof created?.model === "string" ? created.model : model;
-		if (acpSessionId) spec.onActivity?.({ type: "session", sessionId: acpSessionId, model: resolvedModel });
+		let resolvedModel: string | undefined = model;
+		try {
+			await sendRpc("initialize", { protocolVersion: 1, clientCapabilities: {} });
+			const mcpServers = spec.mcp
+				? [{ name: spec.mcp.serverName, type: "http", url: spec.mcp.url, headers: [{ name: "Authorization", value: `Bearer ${spec.mcp.token}` }] }]
+				: [];
+			const created = await sendRpc("session/new", { cwd: spec.workspace, mcpServers });
+			acpSessionId = String(created?.sessionId ?? acpSessionId ?? "");
+			if (typeof created?.model === "string") resolvedModel = created.model;
+			if (acpSessionId) spec.onActivity?.({ type: "session", sessionId: acpSessionId, model: resolvedModel });
+		} catch (error) {
+			rl.close();
+			killTree(child);
+			throw error;
+		}
 
 		const driverId = this.id;
 		let sentSystem = false;
@@ -339,30 +368,42 @@ export class GeminiCliDriver implements WorkerDriver {
 				return acpSessionId;
 			},
 			async runTurn(prompt: string, opts = {}): Promise<WorkerTurnResult> {
+				if (sessionState.kind === "closed") {
+					throw new Error("GeminiAcp session is closed");
+				}
+				if (sessionState.kind === "running") {
+					throw new Error("GeminiAcp session already has an active turn in flight");
+				}
 				const startedAt = Date.now();
-				turnChunks = [];
+				const chunks: string[] = [];
+				sessionState = { kind: "running", chunks };
 				const text = spec.systemPrompt && !sentSystem ? `${spec.systemPrompt}\n\n${prompt}` : prompt;
 				sentSystem = true;
 				try {
 					await sendRpc("session/prompt", { sessionId: acpSessionId, prompt: [{ type: "text", text }] });
-					return { status: "completed", finalText: turnChunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage: { durationMs: Date.now() - startedAt } };
+					return { status: "completed", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage: { durationMs: Date.now() - startedAt } };
 				} catch (error) {
 					const raw = `${error instanceof Error ? error.message : String(error)}\n${stderr}`.trim();
 					const quota = classifyQuotaError(raw);
 					const usage = { durationMs: Date.now() - startedAt };
 					if (quota) {
-						return { status: "rate_limited", finalText: turnChunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, quotaError: quota, error: raw };
+						return { status: "rate_limited", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, quotaError: quota, error: raw };
 					}
 					if (opts.signal?.aborted) {
-						return { status: "interrupted", finalText: turnChunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage };
+						return { status: "interrupted", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage };
 					}
-					return { status: "failed", finalText: turnChunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, error: raw };
+					return { status: "failed", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, error: raw };
+				} finally {
+					resetToIdle();
 				}
 			},
 			async interrupt(): Promise<void> {
-				if (acpSessionId) await sendRpc("session/cancel", { sessionId: acpSessionId }).catch(() => {});
+				if (sessionState.kind === "running" && acpSessionId) {
+					await sendRpc("session/cancel", { sessionId: acpSessionId }).catch(() => {});
+				}
 			},
 			async close(): Promise<void> {
+				sessionState = { kind: "closed" };
 				rl.close();
 				killTree(child);
 			},

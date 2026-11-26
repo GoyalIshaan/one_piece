@@ -6,9 +6,11 @@ import {
 	type FindingSubmission,
 	type FindingVerifier,
 	newId,
+	type ReviewLens,
 	type ReviewRound,
 	type SpawnWorkerRequest,
 	type SubmitFindingInput,
+	transitionFinding,
 	type TrustService,
 	type WorkerHandle,
 } from "@one-piece/core";
@@ -22,6 +24,8 @@ export interface TrustLayerOptions {
 	/** Spawn a blind cross-provider reviewer when executable verification alone isn't enough. */
 	spawnReviewer?: (req: SpawnWorkerRequest) => Promise<WorkerHandle>;
 	enableBlindReview?: boolean;
+	/** Composable decorrelated review lenses (default: ["blind-diff"] when enableBlindReview is true). */
+	reviewLenses?: ReviewLens[];
 }
 
 /**
@@ -38,6 +42,7 @@ export class TrustLayer implements TrustService {
 	private readonly bus: EventBus;
 	private readonly spawnReviewer?: (req: SpawnWorkerRequest) => Promise<WorkerHandle>;
 	private readonly enableBlindReview: boolean;
+	private readonly reviewLenses: ReviewLens[];
 	private readonly savedCounterexamples = new Map<string, Set<string>>();
 	private readonly inFlight = new Set<Promise<unknown>>();
 
@@ -48,6 +53,7 @@ export class TrustLayer implements TrustService {
 		this.verifier = opts.verifier;
 		this.spawnReviewer = opts.spawnReviewer;
 		this.enableBlindReview = opts.enableBlindReview ?? false;
+		this.reviewLenses = opts.reviewLenses ?? (opts.enableBlindReview ? ["blind-diff"] : []);
 	}
 
 	async submitFinding(input: SubmitFindingInput, signal?: AbortSignal): Promise<Finding> {
@@ -83,17 +89,16 @@ export class TrustLayer implements TrustService {
 		};
 
 		const finding: Finding = existing
-			? {
-				...existing,
+			? transitionFinding(existing, {
+				type: "new_submission",
 				claim: input.claim,
 				summary: input.summary,
-				evidence: input.evidence ?? existing.evidence,
+				evidence: input.evidence,
 				level: input.level,
-				status: "pending_review",
-				score: input.score ?? existing.score,
-				submissions: [...existing.submissions, submission],
-				updatedAt: now,
-			}
+				score: input.score,
+				submission,
+				now,
+			})
 			: {
 				id: findingId,
 				runId: this.runId,
@@ -146,15 +151,17 @@ export class TrustLayer implements TrustService {
 			challenge: challengeJson,
 			signal: signal ?? new AbortController().signal,
 		});
+		let updated = finding;
 		if (receipt.status === "failed" && receipt.counterexample) {
 			const scope = submission.scope ?? this.verifier.defaultScope;
 			if (!this.savedCounterexamples.has(scope)) this.savedCounterexamples.set(scope, new Set());
 			this.savedCounterexamples.get(scope)!.add(receipt.counterexample);
-			finding.status = "needs_work";
+			updated = transitionFinding(finding, { type: "challenge_failed", now: Date.now() });
+		} else {
+			updated = { ...finding, updatedAt: Date.now() };
 		}
-		finding.updatedAt = Date.now();
-		this.bus.save("findings", finding, actorId);
-		return finding;
+		this.bus.save("findings", updated, actorId);
+		return updated;
 	}
 
 	async verifyAndReview(findingId: string, opts: { runBlindReviewer?: boolean; signal?: AbortSignal } = {}): Promise<Finding> {
@@ -229,60 +236,138 @@ export class TrustLayer implements TrustService {
 			}
 		}
 
-		// 2. Optional blind cross-provider reviewer (zero access to author's CoT!)
-		if (opts.runBlindReviewer && this.spawnReviewer && submission.snapshotDir) {
-			try {
-				const reviewer = await this.spawnReviewer({
-					role: "reviewer",
-					avoidDrivers: finding.authorDriverId ? [finding.authorDriverId] : undefined,
-					workspace: submission.snapshotDir,
-					readOnly: true,
-					systemPrompt: [
-						"You are a blind independent evaluator. You have NO access to the author's reasoning trace.",
-						"Inspect the frozen files in your read-only workspace and verify the claim strictly against evidence.",
-						'Respond with JSON: {"verdict":"accepted"|"needs_work"|"rejected","confidence":0.0-1.0,"message":"concise rationale"}',
-					].join("\n"),
-				});
+		// 2. Stacked decorrelated review lenses (e.g. "blind-diff" + "transcript-audit") across distinct providers.
+		const lensesToRun: ReviewLens[] = this.reviewLenses.length
+			? this.reviewLenses.filter((l) => l === "blind-diff" || l === "transcript-audit")
+			: opts.runBlindReviewer
+				? ["blind-diff"]
+				: [];
+
+		if (lensesToRun.length && this.spawnReviewer && submission.snapshotDir) {
+			type LensOutcome =
+				| { readonly kind: "verdict"; readonly round: ReviewRound }
+				| { readonly kind: "error"; readonly lens: ReviewLens; readonly error: string };
+
+			const usedDrivers = new Set<string>(finding.authorDriverId ? [finding.authorDriverId] : []);
+			let currentFinding = finding;
+			let completedRounds = 0;
+
+			for (const lens of lensesToRun) {
+				let outcome: LensOutcome;
 				try {
-					const reviewPrompt = [
-						`Claim: ${finding.claim}`,
-						`Summary: ${finding.summary}`,
-						`Evidence: ${finding.evidence.join("; ") || "(none cited)"}`,
-						`Executable checks: ${checksRun.join(", ") || "(none configured)"}`,
-						`Inspect the workspace files and return your JSON verdict.`,
-					].join("\n");
-					const res = await reviewer.runTurn(reviewPrompt, { signal: sig });
-					const parsed = parseReviewJson(res.finalText);
-					return this.recordVerdict(finding, {
-						round: finding.rounds.length + 1,
-						revision: submission.revision,
-						reviewerAgentId: reviewer.agent.id,
-						reviewerDriverId: reviewer.agent.driverId,
-						verdict: parsed.verdict,
-						confidence: parsed.confidence,
-						message: parsed.message,
-						checksRun,
-						at: Date.now(),
+					const isTranscriptLens = lens === "transcript-audit";
+					const reviewer = await this.spawnReviewer({
+						role: "reviewer",
+						avoidDrivers: usedDrivers.size ? [...usedDrivers] : undefined,
+						workspace: submission.snapshotDir,
+						readOnly: true,
+						systemPrompt: isTranscriptLens
+							? [
+								"You are an independent transcript-audit reviewer.",
+								"Inspect the author's recorded tool/command trace and the frozen files to detect skipped tests, hardcoded/faked checks, or unverified claims.",
+								'Respond with JSON: {"verdict":"accepted"|"needs_work"|"rejected","confidence":0.0-1.0,"message":"concise rationale"}',
+							].join("\n")
+							: [
+								"You are a blind independent evaluator. You have NO access to the author's reasoning trace.",
+								"Inspect the frozen files in your read-only workspace and verify the claim strictly against evidence.",
+								'Respond with JSON: {"verdict":"accepted"|"needs_work"|"rejected","confidence":0.0-1.0,"message":"concise rationale"}',
+							].join("\n"),
 					});
-				} finally {
-					await reviewer.close();
+					try {
+						if (reviewer.agent.driverId) usedDrivers.add(reviewer.agent.driverId);
+						const traceSection = isTranscriptLens
+							? `\nAuthor Tool & Turn Trace:\n${this.summarizeAuthorTranscript(currentFinding.runId, currentFinding.authorAgentId)}`
+							: "";
+						const reviewPrompt = [
+							`Review lens: ${lens}`,
+							`Claim: ${currentFinding.claim}`,
+							`Summary: ${currentFinding.summary}`,
+							`Evidence: ${currentFinding.evidence.join("; ") || "(none cited)"}`,
+							`Executable checks: ${checksRun.join(", ") || "(none configured)"}`,
+							traceSection,
+							`Inspect the workspace files and return your JSON verdict.`,
+						].filter(Boolean).join("\n");
+						const res = await reviewer.runTurn(reviewPrompt, { signal: sig });
+						if (res.status === "failed" || res.status === "rate_limited" || res.status === "interrupted") {
+							const errText = res.status === "interrupted" ? "reviewer turn interrupted" : res.error;
+							outcome = { kind: "error", lens, error: `Review lens "${lens}" ${res.status}: ${errText}` };
+						} else {
+							const parsed = parseReviewJson(res.finalText);
+							outcome = {
+								kind: "verdict",
+								round: {
+									round: currentFinding.rounds.length + 1,
+									revision: submission.revision,
+									reviewerAgentId: reviewer.agent.id,
+									reviewerDriverId: reviewer.agent.driverId,
+									lens,
+									verdict: parsed.verdict,
+									confidence: parsed.confidence,
+									message: parsed.message,
+									checksRun: [...checksRun, `lens:${lens}:${parsed.verdict}`],
+									at: Date.now(),
+								},
+							};
+						}
+					} finally {
+						await reviewer.close();
+					}
+				} catch (error) {
+					outcome = { kind: "error", lens, error: error instanceof Error ? error.message : String(error) };
 				}
-			} catch (error) {
-				finding.reviewError = error instanceof Error ? error.message : String(error);
+
+				if (outcome.kind === "error") {
+					// NEVER silently fall through to "accepted" when a configured review lens fails!
+					const errored = transitionFinding(currentFinding, {
+						type: "review_error",
+						error: outcome.error,
+						now: Date.now(),
+					});
+					this.bus.save("findings", errored, "verifier");
+					return errored;
+				}
+
+				completedRounds += 1;
+				currentFinding = this.recordVerdict(currentFinding, outcome.round);
+				// All-pass veto semantics: any non-accepted lens blocks immediately.
+				if (outcome.round.verdict !== "accepted") {
+					return currentFinding;
+				}
 			}
+
+			if (completedRounds === lensesToRun.length) return currentFinding;
 		}
 
-		// Executable suite passed (or no verifier/blind reviewer configured) -> accept with frozen receipt.
+		// Executable suite passed (or no verifier/review lenses configured) -> accept with frozen receipt.
 		return this.recordVerdict(finding, {
 			round: finding.rounds.length + 1,
 			revision: submission.revision,
 			reviewerAgentId: this.verifier ? "verifier" : "harness",
+			lens: this.verifier ? "executable" : undefined,
 			verdict: "accepted",
 			confidence: this.verifier ? 0.95 : 0.7,
 			message: checksRun.length ? `Verified (${checksRun.join(", ")})` : "Recorded frozen snapshot (no verifier configured)",
 			checksRun,
 			at: Date.now(),
 		});
+	}
+
+	private summarizeAuthorTranscript(runId: string, authorAgentId: string): string {
+		const events = this.bus.store
+			.events(runId, { nodeId: authorAgentId })
+			.filter(
+				(ev) =>
+					ev.type === "driver.tool_call" ||
+					ev.type === "driver.tool_result" ||
+					ev.type === "mcp.tool_call" ||
+					ev.type === "mcp.tool_result" ||
+					ev.type === "agent.turn" ||
+					ev.type === "workspace.command",
+			)
+			.slice(-30);
+		if (!events.length) return "(no tool or turn events recorded for author)";
+		const lines = events.map((ev) => `- [seq ${ev.seq}] ${ev.type}: ${JSON.stringify(ev.data).slice(0, 220)}`);
+		return lines.join("\n").slice(0, 4096);
 	}
 
 	bestVerifiedFinding(runId: string): { finding: Finding; revision: number } | undefined {
@@ -305,13 +390,7 @@ export class TrustLayer implements TrustService {
 	}
 
 	private recordVerdict(finding: Finding, round: ReviewRound): Finding {
-		const updated: Finding = {
-			...finding,
-			status: round.verdict,
-			confidence: round.confidence ?? finding.confidence,
-			rounds: [...finding.rounds, round],
-			updatedAt: Date.now(),
-		};
+		const updated = transitionFinding(finding, { type: "verdict", round, now: Date.now() });
 		this.bus.save("findings", updated, round.reviewerAgentId);
 		this.bus.emit(
 			updated.runId,

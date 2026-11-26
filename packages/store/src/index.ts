@@ -2,7 +2,10 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
+	applyBoardPostLabels,
 	type BoardPost,
+	type BoardPostLabelResult,
+	type BoardPostLabelUpdate,
 	type Collection,
 	type Documents,
 	type EventQuery,
@@ -149,6 +152,23 @@ export class SqliteStore implements Store {
 		}
 		const rows = this.db.prepare(`SELECT data FROM docs WHERE ${where.join(" AND ")} ORDER BY updated_at`).all(...params) as Array<{ data: string }>;
 		return rows.map((r) => JSON.parse(r.data) as BoardPost);
+	}
+
+	findBoardPostByIdempotencyKey(runId: string, idempotencyKey: string): BoardPost | undefined {
+		const row = this.db
+			.prepare(
+				"SELECT data FROM docs WHERE collection = 'posts' AND run_id = ? AND json_extract(data, '$.idempotencyKey') = ? LIMIT 1",
+			)
+			.get(runId, idempotencyKey) as { data: string } | undefined;
+		return row ? (JSON.parse(row.data) as BoardPost) : undefined;
+	}
+
+	updateBoardPostLabels(postId: string, update: BoardPostLabelUpdate): BoardPostLabelResult {
+		return this.withWriteTransaction(() => {
+			const res = applyBoardPostLabels(this.get("posts", postId), update);
+			if (res.ok) this.put("posts", res.post);
+			return res;
+		});
 	}
 
 	private withWriteTransaction<T>(fn: () => T): T {

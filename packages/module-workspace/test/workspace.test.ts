@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -71,6 +71,105 @@ describe("module-workspace v2", () => {
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 			rmSync(runDir, { recursive: true, force: true });
+		}
+	});
+
+	it("returns nearest-line and whitespace diagnostics on edit mismatch and supports OpenAI-style apply_patch", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "op-ws-patch-"));
+		try {
+			const bus = new EventBus(new MemoryStore(), new Redactor());
+			const ctx = { runId: "r1", agentId: "a1", role: "worker" as const, workspace: dir, signal: new AbortController().signal };
+
+			// 1. Targeted edit-mismatch diagnostic (spaces vs tabs + closest matching lines)
+			writeFileSync(join(dir, "calc.ts"), "export function add(a: number, b: number) {\n\treturn a + b;\n}\n", "utf8");
+			const srTools = workspaceTools({ bus, editFormat: "search_replace" });
+			const editTool = srTools.find((t) => t.name === "apply_workspace_change")!;
+			const mismatch = await editTool.execute(
+				{ operation: "edit", path: "calc.ts", old_text: "  return a + b;", new_text: "  return a + b + 1;" },
+				ctx,
+			);
+			expect(mismatch.isError).toBe(true);
+			expect(mismatch.text).toContain("tab indentation");
+			expect(mismatch.text).toContain("Closest match in calc.ts");
+			expect(mismatch.text).toContain("2\t\treturn a + b;");
+
+			// 2. OpenAI/Codex-native apply_patch format: Add, Update, Delete + path traversal rejection
+			const patchTools = workspaceTools({ bus, editFormat: "apply_patch" });
+			const patchTool = patchTools.find((t) => t.name === "apply_patch")!;
+			expect(patchTool).toBeDefined();
+			expect(patchTools.find((t) => t.name === "apply_workspace_change")).toBeUndefined();
+
+			const okPatch = await patchTool.execute(
+				{
+					patch: [
+						"*** Begin Patch",
+						"*** Add File: sub/new.txt",
+						"+hello world",
+						"*** Update File: calc.ts",
+						"@@",
+						" export function add(a: number, b: number) {",
+						"-\treturn a + b;",
+						"+\treturn a + b + 10;",
+						" }",
+						"*** End Patch",
+					].join("\n"),
+				},
+				ctx,
+			);
+			expect(okPatch.isError).toBeFalsy();
+			expect(readFileSync(join(dir, "sub/new.txt"), "utf8")).toBe("hello world\n");
+			expect(readFileSync(join(dir, "calc.ts"), "utf8")).toContain("return a + b + 10;");
+
+			const delPatch = await patchTool.execute(
+				{
+					patch: ["*** Begin Patch", "*** Delete File: sub/new.txt", "*** End Patch"].join("\n"),
+				},
+				ctx,
+			);
+			expect(delPatch.isError).toBeFalsy();
+			expect(existsSync(join(dir, "sub/new.txt"))).toBe(false);
+
+			// Atomic 2-phase rollback: if file #2 fails, file #1 MUST NOT be created on disk!
+			const atomicFail = await patchTool.execute(
+				{
+					patch: [
+						"*** Begin Patch",
+						"*** Add File: atomic-should-not-exist.txt",
+						"+partial write",
+						"*** Update File: calc.ts",
+						"@@",
+						" non_existent_line();",
+						"-bad",
+						"+good",
+						"*** End Patch",
+					].join("\n"),
+				},
+				ctx,
+			);
+			expect(atomicFail.isError).toBe(true);
+			expect(existsSync(join(dir, "atomic-should-not-exist.txt"))).toBe(false);
+
+			// Hunk with zero context/removed lines must be rejected cleanly
+			const emptyOldHunk = await patchTool.execute(
+				{
+					patch: ["*** Begin Patch", "*** Update File: calc.ts", "@@", "+orphan", "*** End Patch"].join("\n"),
+				},
+				ctx,
+			);
+			expect(emptyOldHunk.isError).toBe(true);
+			expect(emptyOldHunk.text).toContain("at least one context");
+
+			// Path escape must throw / fail outside workspace
+			await expect(
+				Promise.resolve().then(() =>
+					patchTool.execute(
+						{ patch: ["*** Begin Patch", "*** Add File: ../escape.txt", "+bad", "*** End Patch"].join("\n") },
+						ctx,
+					),
+				),
+			).rejects.toThrow(/outside workspace/i);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 });

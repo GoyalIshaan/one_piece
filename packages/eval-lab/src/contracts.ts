@@ -154,6 +154,10 @@ export interface HarnessRunSpec {
 	rubric?: string;
 	workspaceDir: string;
 	privateShards?: readonly string[];
+	/** Assigned seat index (0-based) for single-seat runs on sharded tasks. */
+	seatIndex?: number;
+	/** Total seat count of the prepared task instance (may exceed swarmSize for solo arms). */
+	totalSeats?: number;
 	hiddenDenyPaths: readonly string[];
 	controlRung: ControlRung;
 	topology?: string;
@@ -167,19 +171,30 @@ export interface HarnessRunSpec {
 	injectedPrompt?: string;
 }
 
-export interface HarnessRunReceipt {
-	runId: string;
-	status: "done" | "stopped" | "failed" | "timeout";
-	nominatedArtifactDir?: string;
-	nominatedSha256?: string;
-	nominatedAtTokens?: number;
-	nominatedAtWallMs?: number;
-	autoNominated: boolean;
-	candidateSnapshots: readonly CandidateSnapshot[];
-	harnessFaults: readonly HarnessFault[];
-	driverIds?: readonly string[];
-	modelIds?: readonly string[];
-}
+export type ReceiptNomination =
+	| {
+		readonly nominatedArtifactDir: string;
+		readonly nominatedSha256: string;
+		readonly nominatedAtTokens?: number;
+		readonly nominatedAtWallMs?: number;
+		readonly autoNominated: boolean;
+	}
+	| {
+		readonly nominatedArtifactDir?: never;
+		readonly nominatedSha256?: never;
+		readonly nominatedAtTokens?: never;
+		readonly nominatedAtWallMs?: never;
+		readonly autoNominated: false;
+	};
+
+export type HarnessRunReceipt = {
+	readonly runId: string;
+	readonly status: "done" | "stopped" | "failed" | "timeout";
+	readonly candidateSnapshots: readonly CandidateSnapshot[];
+	readonly harnessFaults: readonly HarnessFault[];
+	readonly driverIds?: readonly string[];
+	readonly modelIds?: readonly string[];
+} & ReceiptNomination;
 
 export interface HarnessAdapter {
 	readonly name: string;

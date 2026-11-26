@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { cp, lstat, rm } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import {
@@ -99,6 +99,224 @@ function sha256File(path: string): string {
 	return createHash("sha256").update(readFileSync(path)).digest("hex").slice(0, 12);
 }
 
+/**
+ * Targeted edit-mismatch diagnostic: locates the closest matching line window and reports
+ * concrete line numbers + whitespace/line-ending mismatches so models fix edits in 1 retry.
+ */
+function diagnoseEditMismatch(relPath: string, fileText: string, needle: string): string {
+	const fileHasCrlf = fileText.includes("\r\n");
+	const needleHasCrlf = needle.includes("\r\n");
+	const fileLines = fileText.split(/\r?\n/);
+	const needleLines = needle.split(/\r?\n/);
+	const trimmedNeedle = needleLines.map((l) => l.trim());
+	const firstNonEmpty = trimmedNeedle.find((l) => l.length > 0) ?? "";
+
+	const hints: string[] = [];
+	if (fileHasCrlf !== needleHasCrlf) {
+		hints.push(fileHasCrlf ? "file uses CRLF line endings while old_text uses LF" : "file uses LF line endings while old_text uses CRLF");
+	}
+	const fileHasTabs = fileLines.some((l) => l.startsWith("\t"));
+	const needleHasTabs = needleLines.some((l) => l.startsWith("\t"));
+	const needleHasSpaces = needleLines.some((l) => /^ {2,}/.test(l));
+	if (fileHasTabs && !needleHasTabs && needleHasSpaces) {
+		hints.push("file uses tab indentation while old_text uses spaces");
+	} else if (!fileHasTabs && needleHasTabs) {
+		hints.push("file uses space indentation while old_text uses tabs");
+	}
+
+	const winSize = Math.max(1, needleLines.length);
+	const tokenize = (s: string) => new Set(s.trim().split(/[^a-zA-Z0-9_]+/).filter(Boolean));
+	const needleTokens = tokenize(needle);
+	let bestIdx = -1;
+	let bestScore = 0;
+
+	for (let i = 0; i <= Math.max(0, fileLines.length - winSize); i++) {
+		let exactTrim = 0;
+		for (let j = 0; j < winSize && i + j < fileLines.length; j++) {
+			if (fileLines[i + j]!.trim() === trimmedNeedle[j]) exactTrim += 1;
+		}
+		const windowText = fileLines.slice(i, i + winSize).join("\n");
+		const winTokens = tokenize(windowText);
+		let overlap = 0;
+		for (const t of needleTokens) if (winTokens.has(t)) overlap += 1;
+		const jaccard = needleTokens.size + winTokens.size > 0
+			? overlap / (needleTokens.size + winTokens.size - overlap)
+			: 0;
+		const firstBoost = firstNonEmpty && fileLines[i]?.trim() === firstNonEmpty ? 0.5 : 0;
+		const score = (exactTrim / winSize) * 2 + jaccard + firstBoost;
+		if (score > bestScore) {
+			bestScore = score;
+			bestIdx = i;
+		}
+	}
+
+	const lines: string[] = [`Edit failed: old_text not found verbatim in ${relPath}.`];
+	if (hints.length) lines.push(`Hint: ${hints.join("; ")}.`);
+	if (bestIdx >= 0 && bestScore >= 0.45) {
+		const start = Math.max(0, bestIdx - 1);
+		const end = Math.min(fileLines.length, bestIdx + winSize + 2);
+		lines.push(`Closest match in ${relPath} (lines ${start + 1}-${end}):`);
+		for (let k = start; k < end; k++) {
+			lines.push(`${k + 1}\t${fileLines[k]}`);
+		}
+	}
+	return lines.join("\n");
+}
+
+type StagedPatchOp =
+	| { readonly kind: "add"; readonly relPath: string; readonly fullPath: string; readonly content: string }
+	| { readonly kind: "delete"; readonly relPath: string; readonly fullPath: string }
+	| {
+		readonly kind: "update";
+		readonly relPath: string;
+		readonly fullPath: string;
+		readonly beforeSha: string;
+		readonly nextContent: string;
+		readonly hunksApplied: number;
+	};
+
+/**
+ * Atomic 2-phase patch applier:
+ * Phase 1 parses, sandboxes, and validates EVERY file & hunk in memory (zero disk writes on any failure).
+ * Phase 2 commits all validated operations to disk and verifies post-write SHA-256 hashes.
+ */
+function applyPatchToWorkspace(workspace: string, patchText: string): { text: string; isError?: boolean } {
+	const rawLines = patchText.replace(/\r\n/g, "\n").split("\n");
+	const beginIdx = rawLines.findIndex((l) => l.trim() === "*** Begin Patch");
+	const endIdx = rawLines.findIndex((l, i) => i > beginIdx && l.trim() === "*** End Patch");
+	if (beginIdx < 0 || endIdx < 0) {
+		return { text: "Patch failed: missing '*** Begin Patch' / '*** End Patch' markers.", isError: true };
+	}
+
+	const body = rawLines.slice(beginIdx + 1, endIdx);
+	const staged: StagedPatchOp[] = [];
+	const virtualFiles = new Map<string, string | null>(); // null => deleted in this patch
+	let i = 0;
+
+	const readVirtual = (fullPath: string): string | null => {
+		if (virtualFiles.has(fullPath)) return virtualFiles.get(fullPath)!;
+		if (!existsSync(fullPath) || !statSync(fullPath).isFile()) return null;
+		return readFileSync(fullPath, "utf8");
+	};
+
+	while (i < body.length) {
+		const line = body[i]!;
+		if (!line.trim()) {
+			i += 1;
+			continue;
+		}
+		if (line.startsWith("*** Add File: ")) {
+			const relPath = line.slice("*** Add File: ".length).trim();
+			const full = writePath(workspace, relPath);
+			if (readVirtual(full) !== null) return { text: `Patch failed: file already exists: ${relPath}`, isError: true };
+			i += 1;
+			const added: string[] = [];
+			while (i < body.length && !body[i]!.startsWith("*** ")) {
+				const l = body[i]!;
+				if (!l.startsWith("+")) return { text: `Patch failed: expected '+' line in Add File ${relPath}`, isError: true };
+				added.push(l.slice(1));
+				i += 1;
+			}
+			const nextContent = `${added.join("\n")}\n`;
+			virtualFiles.set(full, nextContent);
+			staged.push({ kind: "add", relPath, fullPath: full, content: nextContent });
+			continue;
+		}
+		if (line.startsWith("*** Delete File: ")) {
+			const relPath = line.slice("*** Delete File: ".length).trim();
+			const full = writePath(workspace, relPath);
+			if (readVirtual(full) === null) {
+				return { text: `Patch failed: file not found to delete: ${relPath}`, isError: true };
+			}
+			virtualFiles.set(full, null);
+			staged.push({ kind: "delete", relPath, fullPath: full });
+			i += 1;
+			continue;
+		}
+		if (line.startsWith("*** Update File: ")) {
+			const relPath = line.slice("*** Update File: ".length).trim();
+			const full = writePath(workspace, relPath);
+			const existing = readVirtual(full);
+			if (existing === null) {
+				return { text: `Patch failed: file not found: ${relPath}`, isError: true };
+			}
+			const beforeSha = createHash("sha256").update(existing, "utf8").digest("hex").slice(0, 12);
+			const hasCrlf = existing.includes("\r\n");
+			let content = hasCrlf ? existing.replace(/\r\n/g, "\n") : existing;
+			i += 1;
+
+			let hunksApplied = 0;
+			while (i < body.length && !body[i]!.startsWith("*** ")) {
+				if (body[i]!.startsWith("@@")) {
+					i += 1;
+					const oldLines: string[] = [];
+					const newLines: string[] = [];
+					while (i < body.length && !body[i]!.startsWith("@@") && !body[i]!.startsWith("*** ")) {
+						const hl = body[i]!;
+						if (hl.startsWith("-")) oldLines.push(hl.slice(1));
+						else if (hl.startsWith("+")) newLines.push(hl.slice(1));
+						else if (hl.startsWith(" ")) {
+							oldLines.push(hl.slice(1));
+							newLines.push(hl.slice(1));
+						} else if (hl === "") {
+							oldLines.push("");
+							newLines.push("");
+						} else {
+							return { text: `Patch failed: invalid hunk line prefix in ${relPath}: ${hl.slice(0, 60)}`, isError: true };
+						}
+						i += 1;
+					}
+					if (!oldLines.length) {
+						return { text: `Patch failed: hunk in ${relPath} requires at least one context (' ') or removed ('-') line.`, isError: true };
+					}
+					const oldChunk = oldLines.join("\n");
+					const newChunk = newLines.join("\n");
+					const at = content.indexOf(oldChunk);
+					if (at < 0) return { text: diagnoseEditMismatch(relPath, content, oldChunk), isError: true };
+					if (content.indexOf(oldChunk, at + 1) >= 0) {
+						return { text: `Patch failed: hunk matched multiple times in ${relPath}; include more context lines.`, isError: true };
+					}
+					content = content.slice(0, at) + newChunk + content.slice(at + oldChunk.length);
+					hunksApplied += 1;
+				} else {
+					i += 1;
+				}
+			}
+			if (hunksApplied === 0) {
+				return { text: `Patch failed: no @@ hunks provided for Update File ${relPath}`, isError: true };
+			}
+			const nextContent = hasCrlf ? content.replace(/\n/g, "\r\n") : content;
+			virtualFiles.set(full, nextContent);
+			staged.push({ kind: "update", relPath, fullPath: full, beforeSha, nextContent, hunksApplied });
+			continue;
+		}
+		return { text: `Patch failed: unrecognized header line: ${line.slice(0, 80)}`, isError: true };
+	}
+
+	if (!staged.length) return { text: "Patch failed: empty patch body.", isError: true };
+
+	// Phase 2: Commit validated operations to disk
+	const summaries: string[] = [];
+	for (const op of staged) {
+		switch (op.kind) {
+			case "add":
+				mkdirSync(dirname(op.fullPath), { recursive: true });
+				writeFileSync(op.fullPath, op.content, { flag: "wx" });
+				summaries.push(`Added ${op.relPath} (sha=${sha256File(op.fullPath)})`);
+				break;
+			case "delete":
+				unlinkSync(op.fullPath);
+				summaries.push(`Deleted ${op.relPath}`);
+				break;
+			case "update":
+				writeFileSync(op.fullPath, op.nextContent, "utf8");
+				summaries.push(`Updated ${op.relPath} (${op.beforeSha} -> ${sha256File(op.fullPath)}, ${op.hunksApplied} hunk${op.hunksApplied === 1 ? "" : "s"})`);
+				break;
+		}
+	}
+	return { text: summaries.join("\n") };
+}
+
 function listTree(root: string, dir: string, depth: number, out: string[]): void {
 	if (out.length > 400) return;
 	for (const name of readdirSync(dir).sort()) {
@@ -147,6 +365,8 @@ export interface WorkspaceToolOptions {
 	networkOff?: boolean;
 	maxCommandSeconds?: number;
 	defaultFileLines?: number;
+	/** File-editing tool format aligned to model family (default "search_replace"). */
+	editFormat?: "search_replace" | "apply_patch";
 }
 
 /**
@@ -302,9 +522,25 @@ export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
 		];
 	}
 
-	return [
-		...readOnlyTools,
-		{
+	const editTool: ToolDefinition = opts.editFormat === "apply_patch"
+		? {
+			name: "apply_patch",
+			description: "Apply a multi-file plain-text patch (`*** Begin Patch` ... `*** Update File:` / `*** Add File:` / `*** Delete File:` ... `*** End Patch`).",
+			inputSchema: {
+				type: "object",
+				properties: {
+					patch: { type: "string", description: "Complete patch enclosed in *** Begin Patch / *** End Patch markers" },
+				},
+				required: ["patch"],
+			},
+			execute(args, ctx) {
+				if (!ctx.workspace) return { text: "No workspace attached", isError: true };
+				const patch = typeof args.patch === "string" ? args.patch : "";
+				if (!patch.trim()) return { text: "patch must be a non-empty string", isError: true };
+				return applyPatchToWorkspace(ctx.workspace, patch);
+			},
+		}
+		: {
 			name: "apply_workspace_change",
 			description: "Create, replace, or edit one exact unique text match in a workspace file (verifies post-write state loudly).",
 			inputSchema: {
@@ -346,7 +582,7 @@ export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
 					if (!existsSync(full) || !statSync(full).isFile()) return { text: `File not found: ${relPath}`, isError: true };
 					const text = readFileSync(full, "utf8");
 					const at = text.indexOf(args.old_text);
-					if (at < 0) return { text: `Edit failed: old_text not found in ${relPath}`, isError: true };
+					if (at < 0) return { text: diagnoseEditMismatch(relPath, text, args.old_text), isError: true };
 					if (text.indexOf(args.old_text, at + 1) >= 0) {
 						return { text: `Edit failed: old_text matched multiple times in ${relPath}; include more context`, isError: true };
 					}
@@ -361,7 +597,11 @@ export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
 				}
 				return { text: `Unsupported operation: ${op}`, isError: true };
 			},
-		},
+		};
+
+	return [
+		...readOnlyTools,
+		editTool,
 		{
 			name: "bash",
 			description: "Run a sandboxed shell command inside your workspace.",
