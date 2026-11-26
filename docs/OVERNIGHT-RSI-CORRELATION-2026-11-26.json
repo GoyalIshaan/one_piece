@@ -1,0 +1,825 @@
+{
+  "armKeys": [
+    "silent_bon:silent_bon:n4",
+    "solo:single:n1",
+    "swarm:elastic-phase:n4",
+    "swarm:evolution:n4",
+    "swarm:pull-refinery:n4",
+    "swarm:substrate-peers:n4"
+  ],
+  "proxyTaskIds": [
+    "causal-incident-mesh",
+    "silo-join-micro",
+    "mini-coop-interp"
+  ],
+  "targetTaskIds": [
+    "adversarial-spec-forge",
+    "vliw-kernel-opt",
+    "horizon-repo-migration"
+  ],
+  "armTaskTable": {
+    "silent_bon:silent_bon:n4": {
+      "causal-incident-mesh": {
+        "runs": 2,
+        "meanScore": 0.3,
+        "passRate": 0,
+        "meanTokens": 839489,
+        "efficiency": 0.035736,
+        "meanNominationLoss": 0.075,
+        "meanCoordShare": 0,
+        "meanToolErrorRate": 0.18275
+      },
+      "mini-coop-interp": {
+        "runs": 2,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 342707,
+        "efficiency": 0.291794,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0,
+        "meanToolErrorRate": 0.0147
+      },
+      "vliw-kernel-opt": {
+        "runs": 2,
+        "meanScore": 19.41614,
+        "passRate": 1,
+        "meanTokens": 791223,
+        "efficiency": 2.453942,
+        "meanNominationLoss": 0.01547,
+        "meanCoordShare": 0,
+        "meanToolErrorRate": 0
+      }
+    },
+    "solo:single:n1": {
+      "causal-incident-mesh": {
+        "runs": 2,
+        "meanScore": 0,
+        "passRate": 0,
+        "meanTokens": 188451,
+        "efficiency": 0,
+        "meanNominationLoss": 0.05,
+        "meanCoordShare": 0,
+        "meanToolErrorRate": 0.33335
+      },
+      "silo-join-micro": {
+        "runs": 1,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 66774,
+        "efficiency": 1.497589,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0,
+        "meanToolErrorRate": 0
+      },
+      "mini-coop-interp": {
+        "runs": 2,
+        "meanScore": 0.5,
+        "passRate": 0.5,
+        "meanTokens": 83685,
+        "efficiency": 0.597482,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0,
+        "meanToolErrorRate": 0
+      },
+      "adversarial-spec-forge": {
+        "runs": 2,
+        "meanScore": 0.5,
+        "passRate": 0.5,
+        "meanTokens": 179718,
+        "efficiency": 0.278214,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0,
+        "meanToolErrorRate": 0.05555
+      },
+      "vliw-kernel-opt": {
+        "runs": 2,
+        "meanScore": 10.148066,
+        "passRate": 0.5,
+        "meanTokens": 190478,
+        "efficiency": 5.327698,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0,
+        "meanToolErrorRate": 0
+      },
+      "horizon-repo-migration": {
+        "runs": 2,
+        "meanScore": 0.5,
+        "passRate": 0,
+        "meanTokens": 146017,
+        "efficiency": 0.342426,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0,
+        "meanToolErrorRate": 0
+      }
+    },
+    "swarm:elastic-phase:n4": {
+      "causal-incident-mesh": {
+        "runs": 2,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 874358,
+        "efficiency": 0.11437,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 1,
+        "meanToolErrorRate": 0.0587
+      },
+      "silo-join-micro": {
+        "runs": 1,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 166380,
+        "efficiency": 0.601034,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0,
+        "meanToolErrorRate": 0
+      },
+      "mini-coop-interp": {
+        "runs": 2,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 579656,
+        "efficiency": 0.172516,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0.34105,
+        "meanToolErrorRate": 0
+      },
+      "adversarial-spec-forge": {
+        "runs": 2,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 160512,
+        "efficiency": 0.623008,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0.3156,
+        "meanToolErrorRate": 0
+      },
+      "vliw-kernel-opt": {
+        "runs": 2,
+        "meanScore": 15.670751,
+        "passRate": 1,
+        "meanTokens": 48924,
+        "efficiency": 32.031131,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 1,
+        "meanToolErrorRate": 0.05555
+      },
+      "horizon-repo-migration": {
+        "runs": 2,
+        "meanScore": 0.958334,
+        "passRate": 0.5,
+        "meanTokens": 399079,
+        "efficiency": 0.240136,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0.7333,
+        "meanToolErrorRate": 0
+      }
+    },
+    "swarm:evolution:n4": {
+      "silo-join-micro": {
+        "runs": 1,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 547117,
+        "efficiency": 0.182776,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0,
+        "meanToolErrorRate": 0
+      },
+      "mini-coop-interp": {
+        "runs": 2,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 1034428,
+        "efficiency": 0.096672,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0,
+        "meanToolErrorRate": 0
+      },
+      "adversarial-spec-forge": {
+        "runs": 2,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 804416,
+        "efficiency": 0.124314,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0,
+        "meanToolErrorRate": 0
+      },
+      "vliw-kernel-opt": {
+        "runs": 2,
+        "meanScore": 18.382691,
+        "passRate": 1,
+        "meanTokens": 1143697,
+        "efficiency": 1.607304,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0,
+        "meanToolErrorRate": 0.0091
+      },
+      "horizon-repo-migration": {
+        "runs": 2,
+        "meanScore": 0.916667,
+        "passRate": 0,
+        "meanTokens": 770094,
+        "efficiency": 0.119033,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0,
+        "meanToolErrorRate": 0.00675
+      }
+    },
+    "swarm:pull-refinery:n4": {
+      "silo-join-micro": {
+        "runs": 1,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 94149,
+        "efficiency": 1.062146,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0.2216,
+        "meanToolErrorRate": 0.1667
+      },
+      "mini-coop-interp": {
+        "runs": 2,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 414089,
+        "efficiency": 0.241494,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0.15295,
+        "meanToolErrorRate": 0.01615
+      },
+      "adversarial-spec-forge": {
+        "runs": 2,
+        "meanScore": 0.14375,
+        "passRate": 0,
+        "meanTokens": 274211,
+        "efficiency": 0.052423,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0.2019,
+        "meanToolErrorRate": 0.01925
+      },
+      "vliw-kernel-opt": {
+        "runs": 4,
+        "meanScore": 1,
+        "passRate": 0,
+        "meanTokens": 351732,
+        "efficiency": 0.284308,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0.08065,
+        "meanToolErrorRate": 0
+      },
+      "horizon-repo-migration": {
+        "runs": 2,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 420618,
+        "efficiency": 0.237746,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0.1822,
+        "meanToolErrorRate": 0.0111
+      }
+    },
+    "swarm:substrate-peers:n4": {
+      "causal-incident-mesh": {
+        "runs": 2,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 761793,
+        "efficiency": 0.131269,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 1,
+        "meanToolErrorRate": 0.0698
+      },
+      "silo-join-micro": {
+        "runs": 1,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 910178,
+        "efficiency": 0.109869,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0.2664,
+        "meanToolErrorRate": 0
+      },
+      "mini-coop-interp": {
+        "runs": 2,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 1702362,
+        "efficiency": 0.058742,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0.68805,
+        "meanToolErrorRate": 0.0097
+      },
+      "adversarial-spec-forge": {
+        "runs": 2,
+        "meanScore": 0.5,
+        "passRate": 0.5,
+        "meanTokens": 2917433,
+        "efficiency": 0.017138,
+        "meanNominationLoss": 0.14375,
+        "meanCoordShare": 0.3628,
+        "meanToolErrorRate": 0.01265
+      },
+      "vliw-kernel-opt": {
+        "runs": 4,
+        "meanScore": 14.876267,
+        "passRate": 0.75,
+        "meanTokens": 913687,
+        "efficiency": 1.628158,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0.13745,
+        "meanToolErrorRate": 0.013975
+      },
+      "horizon-repo-migration": {
+        "runs": 2,
+        "meanScore": 1,
+        "passRate": 1,
+        "meanTokens": 1676496,
+        "efficiency": 0.059648,
+        "meanNominationLoss": 0,
+        "meanCoordShare": 0.61875,
+        "meanToolErrorRate": 0.0055
+      }
+    }
+  },
+  "pairwise": [
+    {
+      "proxyTaskId": "causal-incident-mesh",
+      "targetTaskId": "adversarial-spec-forge",
+      "sharedArms": [
+        "solo:single:n1",
+        "swarm:elastic-phase:n4",
+        "swarm:substrate-peers:n4"
+      ],
+      "scoreCorrelation": {
+        "n": 3,
+        "pearsonR": 0.5,
+        "spearmanRho": 0.5,
+        "kendallTauB": 0.5,
+        "permutationPValue": 1,
+        "direction": "positive"
+      },
+      "passRateCorrelation": {
+        "n": 3,
+        "pearsonR": 0.5,
+        "spearmanRho": 0.5,
+        "kendallTauB": 0.5,
+        "permutationPValue": 1,
+        "direction": "positive"
+      },
+      "efficiencyCorrelation": {
+        "n": 3,
+        "pearsonR": -0.038981,
+        "spearmanRho": -0.5,
+        "kendallTauB": -0.333333,
+        "permutationPValue": 1,
+        "direction": "negative"
+      }
+    },
+    {
+      "proxyTaskId": "causal-incident-mesh",
+      "targetTaskId": "vliw-kernel-opt",
+      "sharedArms": [
+        "silent_bon:silent_bon:n4",
+        "solo:single:n1",
+        "swarm:elastic-phase:n4",
+        "swarm:substrate-peers:n4"
+      ],
+      "scoreCorrelation": {
+        "n": 4,
+        "pearsonR": 0.31287,
+        "spearmanRho": 0.316228,
+        "kendallTauB": 0.182574,
+        "permutationPValue": 0.666667,
+        "direction": "positive"
+      },
+      "passRateCorrelation": {
+        "n": 4,
+        "pearsonR": 0.301511,
+        "spearmanRho": 0.235702,
+        "kendallTauB": 0.223607,
+        "permutationPValue": 1,
+        "direction": "neutral"
+      },
+      "efficiencyCorrelation": {
+        "n": 4,
+        "pearsonR": 0.383931,
+        "spearmanRho": -0.4,
+        "kendallTauB": -0.333333,
+        "permutationPValue": 0.75,
+        "direction": "negative"
+      }
+    },
+    {
+      "proxyTaskId": "causal-incident-mesh",
+      "targetTaskId": "horizon-repo-migration",
+      "sharedArms": [
+        "solo:single:n1",
+        "swarm:elastic-phase:n4",
+        "swarm:substrate-peers:n4"
+      ],
+      "scoreCorrelation": {
+        "n": 3,
+        "pearsonR": 0.997177,
+        "spearmanRho": 0.866025,
+        "kendallTauB": 0.816497,
+        "permutationPValue": 0.666667,
+        "direction": "positive"
+      },
+      "passRateCorrelation": {
+        "n": 3,
+        "pearsonR": 0.866025,
+        "spearmanRho": 0.866025,
+        "kendallTauB": 0.816497,
+        "permutationPValue": 0.666667,
+        "direction": "positive"
+      },
+      "efficiencyCorrelation": {
+        "n": 3,
+        "pearsonR": -0.845486,
+        "spearmanRho": -1,
+        "kendallTauB": -1,
+        "permutationPValue": 0.333333,
+        "direction": "negative"
+      }
+    },
+    {
+      "proxyTaskId": "silo-join-micro",
+      "targetTaskId": "adversarial-spec-forge",
+      "sharedArms": [
+        "solo:single:n1",
+        "swarm:elastic-phase:n4",
+        "swarm:evolution:n4",
+        "swarm:pull-refinery:n4",
+        "swarm:substrate-peers:n4"
+      ],
+      "scoreCorrelation": {
+        "n": 5,
+        "pearsonR": 0,
+        "spearmanRho": 0,
+        "kendallTauB": 0,
+        "permutationPValue": 1,
+        "direction": "neutral"
+      },
+      "passRateCorrelation": {
+        "n": 5,
+        "pearsonR": 0,
+        "spearmanRho": 0,
+        "kendallTauB": 0,
+        "permutationPValue": 1,
+        "direction": "neutral"
+      },
+      "efficiencyCorrelation": {
+        "n": 5,
+        "pearsonR": 0.197252,
+        "spearmanRho": 0.5,
+        "kendallTauB": 0.4,
+        "permutationPValue": 0.45,
+        "direction": "positive"
+      }
+    },
+    {
+      "proxyTaskId": "silo-join-micro",
+      "targetTaskId": "vliw-kernel-opt",
+      "sharedArms": [
+        "solo:single:n1",
+        "swarm:elastic-phase:n4",
+        "swarm:evolution:n4",
+        "swarm:pull-refinery:n4",
+        "swarm:substrate-peers:n4"
+      ],
+      "scoreCorrelation": {
+        "n": 5,
+        "pearsonR": 0,
+        "spearmanRho": 0,
+        "kendallTauB": 0,
+        "permutationPValue": 1,
+        "direction": "neutral"
+      },
+      "passRateCorrelation": {
+        "n": 5,
+        "pearsonR": 0,
+        "spearmanRho": 0,
+        "kendallTauB": 0,
+        "permutationPValue": 1,
+        "direction": "neutral"
+      },
+      "efficiencyCorrelation": {
+        "n": 5,
+        "pearsonR": -0.007205,
+        "spearmanRho": 0.1,
+        "kendallTauB": 0,
+        "permutationPValue": 0.95,
+        "direction": "neutral"
+      }
+    },
+    {
+      "proxyTaskId": "silo-join-micro",
+      "targetTaskId": "horizon-repo-migration",
+      "sharedArms": [
+        "solo:single:n1",
+        "swarm:elastic-phase:n4",
+        "swarm:evolution:n4",
+        "swarm:pull-refinery:n4",
+        "swarm:substrate-peers:n4"
+      ],
+      "scoreCorrelation": {
+        "n": 5,
+        "pearsonR": 0,
+        "spearmanRho": 0,
+        "kendallTauB": 0,
+        "permutationPValue": 1,
+        "direction": "neutral"
+      },
+      "passRateCorrelation": {
+        "n": 5,
+        "pearsonR": 0,
+        "spearmanRho": 0,
+        "kendallTauB": 0,
+        "permutationPValue": 1,
+        "direction": "neutral"
+      },
+      "efficiencyCorrelation": {
+        "n": 5,
+        "pearsonR": 0.943876,
+        "spearmanRho": 0.9,
+        "kendallTauB": 0.8,
+        "permutationPValue": 0.083333,
+        "direction": "positive"
+      }
+    },
+    {
+      "proxyTaskId": "mini-coop-interp",
+      "targetTaskId": "adversarial-spec-forge",
+      "sharedArms": [
+        "solo:single:n1",
+        "swarm:elastic-phase:n4",
+        "swarm:evolution:n4",
+        "swarm:pull-refinery:n4",
+        "swarm:substrate-peers:n4"
+      ],
+      "scoreCorrelation": {
+        "n": 5,
+        "pearsonR": 0.19516,
+        "spearmanRho": 0.186339,
+        "kendallTauB": 0.176777,
+        "permutationPValue": 1,
+        "direction": "neutral"
+      },
+      "passRateCorrelation": {
+        "n": 5,
+        "pearsonR": 0.133631,
+        "spearmanRho": 0.186339,
+        "kendallTauB": 0.176777,
+        "permutationPValue": 1,
+        "direction": "neutral"
+      },
+      "efficiencyCorrelation": {
+        "n": 5,
+        "pearsonR": 0.205856,
+        "spearmanRho": 0.5,
+        "kendallTauB": 0.4,
+        "permutationPValue": 0.45,
+        "direction": "positive"
+      }
+    },
+    {
+      "proxyTaskId": "mini-coop-interp",
+      "targetTaskId": "vliw-kernel-opt",
+      "sharedArms": [
+        "silent_bon:silent_bon:n4",
+        "solo:single:n1",
+        "swarm:elastic-phase:n4",
+        "swarm:evolution:n4",
+        "swarm:pull-refinery:n4",
+        "swarm:substrate-peers:n4"
+      ],
+      "scoreCorrelation": {
+        "n": 6,
+        "pearsonR": 0.22275,
+        "spearmanRho": 0.392792,
+        "kendallTauB": 0.34641,
+        "permutationPValue": 0.666667,
+        "direction": "positive"
+      },
+      "passRateCorrelation": {
+        "n": 6,
+        "pearsonR": 0.254824,
+        "spearmanRho": 0.417365,
+        "kendallTauB": 0.387298,
+        "permutationPValue": 0.833333,
+        "direction": "positive"
+      },
+      "efficiencyCorrelation": {
+        "n": 6,
+        "pearsonR": -0.066346,
+        "spearmanRho": 0.314286,
+        "kendallTauB": 0.2,
+        "permutationPValue": 0.563889,
+        "direction": "positive"
+      }
+    },
+    {
+      "proxyTaskId": "mini-coop-interp",
+      "targetTaskId": "horizon-repo-migration",
+      "sharedArms": [
+        "solo:single:n1",
+        "swarm:elastic-phase:n4",
+        "swarm:evolution:n4",
+        "swarm:pull-refinery:n4",
+        "swarm:substrate-peers:n4"
+      ],
+      "scoreCorrelation": {
+        "n": 5,
+        "pearsonR": 0.98669,
+        "spearmanRho": 0.725476,
+        "kendallTauB": 0.666667,
+        "permutationPValue": 0.2,
+        "direction": "positive"
+      },
+      "passRateCorrelation": {
+        "n": 5,
+        "pearsonR": 0.559017,
+        "spearmanRho": 0.559017,
+        "kendallTauB": 0.53033,
+        "permutationPValue": 0.8,
+        "direction": "positive"
+      },
+      "efficiencyCorrelation": {
+        "n": 5,
+        "pearsonR": 0.889439,
+        "spearmanRho": 0.9,
+        "kendallTauB": 0.8,
+        "permutationPValue": 0.083333,
+        "direction": "positive"
+      }
+    }
+  ],
+  "composite": {
+    "sharedArms": [
+      "silent_bon:silent_bon:n4",
+      "solo:single:n1",
+      "swarm:elastic-phase:n4",
+      "swarm:evolution:n4",
+      "swarm:pull-refinery:n4",
+      "swarm:substrate-peers:n4"
+    ],
+    "perArmComposite": [
+      {
+        "arm": "silent_bon:silent_bon:n4",
+        "proxyComposite": 0.65,
+        "targetComposite": 1
+      },
+      {
+        "arm": "solo:single:n1",
+        "proxyComposite": 0.166667,
+        "targetComposite": 0.304267
+      },
+      {
+        "arm": "swarm:elastic-phase:n4",
+        "proxyComposite": 0.833333,
+        "targetComposite": 0.904431
+      },
+      {
+        "arm": "swarm:evolution:n4",
+        "proxyComposite": 0.75,
+        "targetComposite": 0.925739
+      },
+      {
+        "arm": "swarm:pull-refinery:n4",
+        "proxyComposite": 0.75,
+        "targetComposite": 0.333333
+      },
+      {
+        "arm": "swarm:substrate-peers:n4",
+        "proxyComposite": 0.833333,
+        "targetComposite": 0.723181
+      }
+    ],
+    "scoreCorrelation": {
+      "n": 6,
+      "pearsonR": 0.562493,
+      "spearmanRho": 0.147122,
+      "kendallTauB": 0.071611,
+      "permutationPValue": 0.777778,
+      "direction": "neutral"
+    },
+    "passRateCorrelation": {
+      "n": 6,
+      "pearsonR": -0.039715,
+      "spearmanRho": -0.105021,
+      "kendallTauB": -0.094491,
+      "permutationPValue": 0.933333,
+      "direction": "neutral"
+    }
+  },
+  "diagnosticTransfers": [
+    {
+      "metric": "proxy.nominationLoss",
+      "targetTaskId": "adversarial-spec-forge",
+      "correlation": {
+        "n": 5,
+        "pearsonR": -0.19516,
+        "spearmanRho": -0.186339,
+        "kendallTauB": -0.176777,
+        "permutationPValue": 1,
+        "direction": "neutral"
+      }
+    },
+    {
+      "metric": "proxy.coordinationTokenShare",
+      "targetTaskId": "adversarial-spec-forge",
+      "correlation": {
+        "n": 5,
+        "pearsonR": -0.020697,
+        "spearmanRho": -0.108148,
+        "kendallTauB": -0.117851,
+        "permutationPValue": 0.866667,
+        "direction": "neutral"
+      }
+    },
+    {
+      "metric": "proxy.toolErrorRate",
+      "targetTaskId": "adversarial-spec-forge",
+      "correlation": {
+        "n": 5,
+        "pearsonR": -0.76505,
+        "spearmanRho": -0.790569,
+        "kendallTauB": -0.67082,
+        "permutationPValue": 0.133333,
+        "direction": "negative"
+      }
+    },
+    {
+      "metric": "proxy.nominationLoss",
+      "targetTaskId": "vliw-kernel-opt",
+      "correlation": {
+        "n": 6,
+        "pearsonR": 0.340661,
+        "spearmanRho": 0.338062,
+        "kendallTauB": 0.258199,
+        "permutationPValue": 0.533333,
+        "direction": "positive"
+      }
+    },
+    {
+      "metric": "proxy.coordinationTokenShare",
+      "targetTaskId": "vliw-kernel-opt",
+      "correlation": {
+        "n": 6,
+        "pearsonR": -0.016006,
+        "spearmanRho": -0.333947,
+        "kendallTauB": -0.298142,
+        "permutationPValue": 0.533333,
+        "direction": "negative"
+      }
+    },
+    {
+      "metric": "proxy.toolErrorRate",
+      "targetTaskId": "vliw-kernel-opt",
+      "correlation": {
+        "n": 6,
+        "pearsonR": -0.469251,
+        "spearmanRho": -0.314286,
+        "kendallTauB": -0.333333,
+        "permutationPValue": 0.563889,
+        "direction": "negative"
+      }
+    },
+    {
+      "metric": "proxy.nominationLoss",
+      "targetTaskId": "horizon-repo-migration",
+      "correlation": {
+        "n": 5,
+        "pearsonR": -0.98669,
+        "spearmanRho": -0.725476,
+        "kendallTauB": -0.666667,
+        "permutationPValue": 0.2,
+        "direction": "negative"
+      }
+    },
+    {
+      "metric": "proxy.coordinationTokenShare",
+      "targetTaskId": "horizon-repo-migration",
+      "correlation": {
+        "n": 5,
+        "pearsonR": 0.583295,
+        "spearmanRho": 0.789474,
+        "kendallTauB": 0.666667,
+        "permutationPValue": 0.15,
+        "direction": "positive"
+      }
+    },
+    {
+      "metric": "proxy.toolErrorRate",
+      "targetTaskId": "horizon-repo-migration",
+      "correlation": {
+        "n": 5,
+        "pearsonR": -0.613103,
+        "spearmanRho": -0.051299,
+        "kendallTauB": 0.105409,
+        "permutationPValue": 1,
+        "direction": "neutral"
+      }
+    }
+  ]
+}
