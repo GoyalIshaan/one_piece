@@ -1080,34 +1080,116 @@ describe("RSI Harness Upgrades: Field Guide, Semantic Auto-Repair, Fail-Closed T
 			allowSandboxReads([secretDir]);
 			expect(isSandboxReadBlocked(secretDir)).toBe(false);
 
-			// 2. Adaptive regime classification across all 4 benchmark regimes
+			// 2. Generalized structural adaptive regime classification (no benchmark-specific keyword memorization!)
+			// 2a. Sharded seats -> elastic-phase regardless of prompt
 			const optDir = join(root, "opt");
 			mkdirSync(optDir, { recursive: true });
-			writeFileSync(join(optDir, "kernel.py"), "def build_kernel(): pass\n");
-			writeFileSync(join(optDir, "vliw_sim.py"), "def run_vliw(): pass\n");
+			writeFileSync(join(optDir, "solver.py"), "def solve(x): return x\n");
+			writeFileSync(join(optDir, "bench.py"), "import solver\n");
+			expect(classifyAdaptiveRegime({ workspaceDir: optDir, goal: "Correlate shards", hasSeatConfigs: true }).delegate).toBe("elastic-phase");
 
-			expect(classifyAdaptiveRegime({ workspaceDir: optDir, goal: "RCA shards", hasSeatConfigs: true }).delegate).toBe("elastic-phase");
-			expect(
-				classifyAdaptiveRegime({
-					workspaceDir: optDir,
-					goal: "Optimize build_kernel for minimum VLIW cycles and maximum speedup",
-					hasSeatConfigs: false,
-				}).delegate,
-			).toBe("evolution");
-			expect(
-				classifyAdaptiveRegime({
-					workspaceDir: optDir,
-					goal: "Implement 6 interacting modules (MVCC, SQL 3VL, cache, views) preserving cross-module semantic invariants",
-					hasSeatConfigs: false,
-				}).delegate,
-			).toBe("evolution");
-			expect(
-				classifyAdaptiveRegime({
-					workspaceDir: optDir,
-					goal: "Complete all 3 phases: Phase A forensics + Phase B FX migration + Phase C throughput bar",
-					hasSeatConfigs: false,
-				}).delegate,
-			).toBe("elastic-phase");
+			// 2b. Compact unseen scalar optimization -> evolution
+			const optCls = classifyAdaptiveRegime({
+				workspaceDir: optDir,
+				goal: "Optimize solver runtime to minimize latency and maximize speedup over baseline",
+				hasSeatConfigs: false,
+			});
+			expect(optCls.regime).toBe("scalar-optimization");
+			expect(optCls.delegate).toBe("evolution");
+
+			// 2c. Compact tightly-coupled Python hub repo with COMPLETELY SCRUBBED generic prompt -> evolution via static import graph
+			const pyCoupledDir = join(root, "py-coupled");
+			mkdirSync(join(pyCoupledDir, "core"), { recursive: true });
+			writeFileSync(join(pyCoupledDir, "core", "__init__.py"), "from .hub import Hub\n");
+			writeFileSync(join(pyCoupledDir, "core", "hub.py"), "from .a import A\nfrom .b import B\nfrom .c import C\nfrom .d import D\nclass Hub: pass\n");
+			writeFileSync(join(pyCoupledDir, "core", "a.py"), "class A: pass\n");
+			writeFileSync(join(pyCoupledDir, "core", "b.py"), "class B: pass\n");
+			writeFileSync(join(pyCoupledDir, "core", "c.py"), "class C: pass\n");
+			writeFileSync(join(pyCoupledDir, "core", "d.py"), "class D: pass\n");
+			const pyCoupledCls = classifyAdaptiveRegime({
+				workspaceDir: pyCoupledDir,
+				goal: "Implement the workspace specification.",
+				hasSeatConfigs: false,
+			});
+			expect(pyCoupledCls.regime).toBe("coupled-single-context");
+			expect(pyCoupledCls.delegate).toBe("evolution");
+			expect(pyCoupledCls.maxImportFanOut).toBeGreaterThanOrEqual(4);
+
+			// 2d. Compact tightly-coupled TypeScript hub repo with COMPLETELY SCRUBBED generic prompt -> evolution
+			const tsCoupledDir = join(root, "ts-coupled");
+			mkdirSync(join(tsCoupledDir, "src"), { recursive: true });
+			writeFileSync(
+				join(tsCoupledDir, "src", "machine.ts"),
+				'import { a } from "./a.ts";\nimport { b } from "./b.ts";\nimport { c } from "./c.ts";\nexport const run = () => [a, b, c];\n',
+			);
+			writeFileSync(join(tsCoupledDir, "src", "a.ts"), "export const a = 1;\n");
+			writeFileSync(join(tsCoupledDir, "src", "b.ts"), "export const b = 2;\n");
+			writeFileSync(join(tsCoupledDir, "src", "c.ts"), "export const c = 3;\n");
+			const tsCoupledCls = classifyAdaptiveRegime({
+				workspaceDir: tsCoupledDir,
+				goal: "Implement all pending functions.",
+				hasSeatConfigs: false,
+			});
+			expect(tsCoupledCls.regime).toBe("coupled-single-context");
+			expect(tsCoupledCls.delegate).toBe("evolution");
+
+			// 2e. Same hub structure WITH multi-stage SPEC.md headings and scrubbed prompt -> elastic-phase via specPhaseHeadings
+			const stagedDir = join(root, "staged-hub");
+			mkdirSync(join(stagedDir, "pkg"), { recursive: true });
+			writeFileSync(join(stagedDir, "SPEC.md"), "# Plan\n## Stage 1 — Cleanup\n...\n## Stage 2 — Rollout\n...\n");
+			writeFileSync(join(stagedDir, "pkg", "hub.py"), "from .a import A\nfrom .b import B\nfrom .c import C\n");
+			writeFileSync(join(stagedDir, "pkg", "a.py"), "class A: pass\n");
+			writeFileSync(join(stagedDir, "pkg", "b.py"), "class B: pass\n");
+			writeFileSync(join(stagedDir, "pkg", "c.py"), "class C: pass\n");
+			const stagedCls = classifyAdaptiveRegime({
+				workspaceDir: stagedDir,
+				goal: "Complete SPEC.md.",
+				hasSeatConfigs: false,
+			});
+			expect(stagedCls.regime).toBe("decomposable-multi-phase");
+			expect(stagedCls.delegate).toBe("elastic-phase");
+			expect(stagedCls.specPhaseHeadings).toBe(2);
+
+			// 2f. Compact loosely-coupled plugin repo (0 cross-imports) -> elastic-phase
+			const looseDir = join(root, "loose-plugins");
+			mkdirSync(join(looseDir, "plugins"), { recursive: true });
+			for (let i = 1; i <= 6; i++) {
+				writeFileSync(join(looseDir, "plugins", `cmd_${i}.py`), `def run_${i}(): return ${i}\n`);
+			}
+			const looseCls = classifyAdaptiveRegime({
+				workspaceDir: looseDir,
+				goal: "Implement all 6 independent command handlers.",
+				hasSeatConfigs: false,
+			});
+			expect(looseCls.regime).toBe("decomposable-multi-phase");
+			expect(looseCls.delegate).toBe("elastic-phase");
+			expect(looseCls.internalImportEdges).toBe(0);
+
+			// 2g. Broad multi-directory monorepo -> elastic-phase even with high fan-out
+			const broadDir = join(root, "broad-mono");
+			for (const pkg of ["api", "auth", "db", "ui"]) {
+				mkdirSync(join(broadDir, "packages", pkg), { recursive: true });
+				for (let i = 1; i <= 4; i++) {
+					writeFileSync(join(broadDir, "packages", pkg, `m${i}.ts`), `export const v = ${i};\n`);
+				}
+			}
+			const broadCls = classifyAdaptiveRegime({
+				workspaceDir: broadDir,
+				goal: "Update all packages.",
+				hasSeatConfigs: false,
+			});
+			expect(broadCls.regime).toBe("decomposable-multi-phase");
+			expect(broadCls.delegate).toBe("elastic-phase");
+			expect(broadCls.codeFiles).toBe(16);
+			expect(broadCls.sourceDirs).toBe(4);
+
+			// 2h. Missing directory edge case -> safe fallback without throwing
+			const missingCls = classifyAdaptiveRegime({
+				workspaceDir: join(root, "does-not-exist"),
+				goal: "Any task",
+				hasSeatConfigs: false,
+			});
+			expect(missingCls.delegate).toBe("elastic-phase");
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

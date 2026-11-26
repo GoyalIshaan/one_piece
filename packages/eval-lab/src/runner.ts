@@ -162,34 +162,85 @@ async function runSilentBestOfN(
 		}
 
 		// Fair public-only selector: NEVER peeks at hidden `task.grade()`!
-		// Uses `task.publicCheck()` when available, breaking ties deterministically by first valid submission.
+		// On privately sharded tasks, each isolated seat i produces `submissions/seat_i.json` with zero
+		// cross-seat communication; mechanically assemble those disjoint seat files just like swarm trunk
+		// assembly so `silent_bon` is a fair, non-strawman no-communication baseline (all 4 seats present).
 		const higher = task.higherIsBetter ?? true;
 		let chosen: { dir: string; sha256: string; score: number; passed: boolean } | undefined;
-		for (const sub of subReceipts) {
-			if (!sub.nominatedArtifactDir || !existsSync(sub.nominatedArtifactDir)) continue;
-			const pub = task.publicCheck
-				? await task.publicCheck({
-						artifactDir: sub.nominatedArtifactDir,
-						seed: spec.seed,
-						n: spec.totalSeats ?? spec.privateShards?.length ?? n,
-						options,
-					})
-				: {
-						passed: sub.candidateSnapshots.some((c) => c.sha256 === sub.nominatedSha256 && c.acceptedByVerifier),
-						score: 0,
-						details: "no publicCheck defined; deterministic first-valid selection",
-					};
-			if (
-				!chosen ||
-				(pub.passed && !chosen.passed) ||
-				(pub.passed === chosen.passed && (higher ? pub.score > chosen.score : pub.score < chosen.score))
-			) {
+
+		if (spec.privateShards && spec.privateShards.length > 0) {
+			const assembledDir = join(spec.runDir, "silent-assembled");
+			mkdirSync(assembledDir, { recursive: true });
+			cpSync(spec.workspaceDir, assembledDir, { recursive: true });
+			let mergedSeats = 0;
+			for (let i = 0; i < subReceipts.length; i++) {
+				const sub = subReceipts[i];
+				if (!sub?.nominatedArtifactDir || !existsSync(sub.nominatedArtifactDir)) continue;
+				const seatRel = join("submissions", `seat_${i}.json`);
+				const srcSeatFile = join(sub.nominatedArtifactDir, seatRel);
+				if (existsSync(srcSeatFile)) {
+					mkdirSync(join(assembledDir, "submissions"), { recursive: true });
+					cpSync(srcSeatFile, join(assembledDir, seatRel));
+					mergedSeats += 1;
+				}
+			}
+			if (mergedSeats > 0) {
+				const assembledSha = sha256Dir(assembledDir);
+				const pub = task.publicCheck
+					? await task.publicCheck({
+							artifactDir: assembledDir,
+							seed: spec.seed,
+							n: spec.totalSeats ?? spec.privateShards.length ?? n,
+							options,
+						})
+					: { passed: mergedSeats === n, score: mergedSeats / n, details: `assembled ${mergedSeats}/${n} seats` };
+				allSnapshots.push({
+					id: "silent-assembled",
+					agentId: "silent_bon:assembler",
+					dir: assembledDir,
+					sha256: assembledSha,
+					atTokens: cumulativeTokens,
+					atWallMs: Math.max(0, Date.now() - began),
+					acceptedByVerifier: pub.passed,
+				});
 				chosen = {
-					dir: sub.nominatedArtifactDir,
-					sha256: sub.nominatedSha256,
+					dir: assembledDir,
+					sha256: assembledSha,
 					score: pub.score,
 					passed: pub.passed,
 				};
+			}
+		}
+
+		// For unsharded tasks (or fallback when no sharded seat files were produced), pick the best
+		// individual seat artifact using `task.publicCheck()` only.
+		if (!chosen) {
+			for (const sub of subReceipts) {
+				if (!sub.nominatedArtifactDir || !existsSync(sub.nominatedArtifactDir)) continue;
+				const pub = task.publicCheck
+					? await task.publicCheck({
+							artifactDir: sub.nominatedArtifactDir,
+							seed: spec.seed,
+							n: spec.totalSeats ?? spec.privateShards?.length ?? n,
+							options,
+						})
+					: {
+							passed: sub.candidateSnapshots.some((c) => c.sha256 === sub.nominatedSha256 && c.acceptedByVerifier),
+							score: 0,
+							details: "no publicCheck defined; deterministic first-valid selection",
+						};
+				if (
+					!chosen ||
+					(pub.passed && !chosen.passed) ||
+					(pub.passed === chosen.passed && (higher ? pub.score > chosen.score : pub.score < chosen.score))
+				) {
+					chosen = {
+						dir: sub.nominatedArtifactDir,
+						sha256: sub.nominatedSha256,
+						score: pub.score,
+						passed: pub.passed,
+					};
+				}
 			}
 		}
 

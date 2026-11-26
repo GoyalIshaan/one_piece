@@ -1,9 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, unlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { isSandboxReadBlocked } from "@one-piece/core";
+import { classifyAdaptiveRegime } from "@one-piece/engine";
 import type { HarnessAdapter, Scorecard } from "../src/contracts.ts";
 import { runTaskCalibration } from "../src/calibration.ts";
 import {
@@ -21,6 +22,7 @@ import { runCampaign } from "../src/runner.ts";
 import { adversarialSpecForgeTask } from "../src/tasks/adversarial-spec-forge/index.ts";
 import { causalIncidentMeshTask } from "../src/tasks/causal-incident-mesh/index.ts";
 import { horizonRepoMigrationTask } from "../src/tasks/horizon-repo-migration/index.ts";
+import { miniCoopInterpTask } from "../src/tasks/mini-coop-interp/index.ts";
 import { vliwKernelOptTask } from "../src/tasks/vliw-kernel-opt/index.ts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -284,7 +286,8 @@ describe("Cross-Benchmark Rank Correlation Engine (Proxy -> Long-Horizon Transfe
 				expect(refPub.score).toBe(1);
 			}
 
-			// 2. silent_bon on causal-incident-mesh passes exact per-seat soloSeatPrompts[i] (`seat_i.json`) to ALL 4 seats!
+			// 2. silent_bon on causal-incident-mesh passes exact per-seat soloSeatPrompts[i] (`seat_i.json`) to ALL 4 seats
+			//    AND mechanically assembles all 4 disjoint seat submissions into the delivered artifact!
 			const seenSeats = new Map<number, { prompt?: string; shardCount: number; hiddenBlocked: boolean }>();
 			const probeAdapter: HarnessAdapter = {
 				name: "probe",
@@ -295,10 +298,24 @@ describe("Cross-Benchmark Rank Correlation Engine (Proxy -> Long-Horizon Transfe
 						shardCount: spec.privateShards?.length ?? 0,
 						hiddenBlocked: isSandboxReadBlocked(spec.hiddenDenyPaths[0] ?? ""),
 					});
+					const subDir = join(spec.workspaceDir, "submissions");
+					mkdirSync(subDir, { recursive: true });
+					writeFileSync(
+						join(subDir, `seat_${idx}.json`),
+						JSON.stringify({
+							rootCauseService: "guess",
+							faultyCommit: "0000000",
+							causalChain: ["a", "b"],
+							rejectedRedHerrings: [],
+							remediationConfig: { service: "guess", parameter: "p", targetValue: 1 },
+						}),
+					);
 					return {
 						runId: spec.runId,
 						status: "done",
-						autoNominated: false,
+						autoNominated: true,
+						nominatedArtifactDir: spec.workspaceDir,
+						nominatedSha256: `sha-seat-${idx}`,
 						candidateSnapshots: [],
 						harnessFaults: [],
 						driverIds: ["probe"],
@@ -306,7 +323,7 @@ describe("Cross-Benchmark Rank Correlation Engine (Proxy -> Long-Horizon Transfe
 					};
 				},
 			};
-			await runCampaign({
+			const silentRes = await runCampaign({
 				task: causalIncidentMeshTask,
 				adapter: probeAdapter,
 				arms: [{ id: "silent_bon-n4", controlRung: "silent_bon", topology: "silent_bon", swarmSize: 4 }],
@@ -323,6 +340,40 @@ describe("Cross-Benchmark Rank Correlation Engine (Proxy -> Long-Horizon Transfe
 				expect(entry.prompt).toContain(`Seat ${i} of 4`);
 				expect(entry.prompt).toContain(`submissions/seat_${i}.json`);
 			}
+			// All 4 isolated seat submissions must be present in the assembled silent_bon artifact!
+			expect(silentRes.scorecards[0]?.customMetrics.presentSeats).toBe(4);
+
+			// 3. Structural adaptive classifier generalizes across actual prepared benchmark workspaces WITHOUT relying on benchmark jargon!
+			const scrubbedGoal = "Implement the repository specification cleanly.";
+			const specWork = join(root, "cls-spec");
+			await adversarialSpecForgeTask.prepare({ seed: 1, n: 4, options: {}, workDir: specWork, hiddenDir: join(root, "cls-spec-h") });
+			const specCls = classifyAdaptiveRegime({ workspaceDir: specWork, goal: scrubbedGoal, hasSeatConfigs: false });
+			expect(specCls.regime).toBe("coupled-single-context");
+			expect(specCls.delegate).toBe("evolution");
+
+			const interpWork = join(root, "cls-interp");
+			await miniCoopInterpTask.prepare({ seed: 1, n: 4, options: {}, workDir: interpWork, hiddenDir: join(root, "cls-interp-h") });
+			const interpCls = classifyAdaptiveRegime({ workspaceDir: interpWork, goal: scrubbedGoal, hasSeatConfigs: false });
+			expect(interpCls.regime).toBe("coupled-single-context");
+			expect(interpCls.delegate).toBe("evolution");
+
+			const migWork = join(root, "cls-mig");
+			await horizonRepoMigrationTask.prepare({ seed: 1, n: 4, options: {}, workDir: migWork, hiddenDir: join(root, "cls-mig-h") });
+			const migCls = classifyAdaptiveRegime({ workspaceDir: migWork, goal: scrubbedGoal, hasSeatConfigs: false });
+			expect(migCls.regime).toBe("decomposable-multi-phase");
+			expect(migCls.delegate).toBe("elastic-phase");
+
+			const vliwWork = join(root, "cls-vliw");
+			const vliwPrep = await vliwKernelOptTask.prepare({ seed: 1, n: 4, options: {}, workDir: vliwWork, hiddenDir: join(root, "cls-vliw-h") });
+			const vliwCls = classifyAdaptiveRegime({ workspaceDir: vliwWork, goal: vliwPrep.goal, rubric: vliwPrep.rubric, hasSeatConfigs: false });
+			expect(vliwCls.regime).toBe("scalar-optimization");
+			expect(vliwCls.delegate).toBe("evolution");
+
+			const meshWork = join(root, "cls-mesh");
+			const meshPrep = await causalIncidentMeshTask.prepare({ seed: 1, n: 4, options: {}, workDir: meshWork, hiddenDir: join(root, "cls-mesh-h") });
+			const meshCls = classifyAdaptiveRegime({ workspaceDir: meshWork, goal: meshPrep.goal, rubric: meshPrep.rubric, hasSeatConfigs: true });
+			expect(meshCls.regime).toBe("sharded-consensus");
+			expect(meshCls.delegate).toBe("elastic-phase");
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

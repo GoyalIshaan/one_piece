@@ -10,9 +10,11 @@ import { substratePeersTopology } from "./substrate-peers.ts";
 export {
 	adaptiveTopology,
 	classifyAdaptiveRegime,
+	inspectWorkspaceStructure,
 	type AdaptiveClassification,
 	type AdaptiveRegime,
 	type AdaptiveTopologyOptions,
+	type WorkspaceStructureMetrics,
 } from "./adaptive.ts";
 export { elasticPhaseTopology, type ElasticPhaseOptions } from "./elastic-phase.ts";
 export { evolutionTopology, type EvolutionTopologyOptions } from "./evolution.ts";
