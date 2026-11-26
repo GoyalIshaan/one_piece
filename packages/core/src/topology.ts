@@ -310,6 +310,8 @@ export interface SwarmOsApi {
 	run(): Run;
 	/** Check remaining wall-clock/token/USD fraction (0..1); returns true once reserve threshold is reached. */
 	isInCloseoutReserve(): boolean;
+	/** Remaining wall-clock budget in milliseconds (undefined if no wallSeconds limit is configured). */
+	remainingWallMs?(): number | undefined;
 	/** Create a new task on the shared task table. */
 	createTask(input: {
 		title: string;

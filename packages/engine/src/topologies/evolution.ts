@@ -59,6 +59,13 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 				}
 				const sortedElites = [...uniqueByBasin.values()].sort((a, b) => b.score - a.score || b.generation - a.generation);
 				let genImproved = false;
+				// Pace each generation against remaining wall-clock budget so Gen 2+ crossover & dreaming always run!
+				const remWall = os.remainingWallMs?.();
+				const remainingGens = Math.max(1, maxGenerations - gen + 1);
+				const genTimeoutMs =
+					remWall !== undefined && remWall > 20_000
+						? Math.max(20_000, Math.floor((remWall * 0.9) / remainingGens))
+						: undefined;
 
 				await Promise.all(
 					Array.from({ length: popSize }, async (_, slot) => {
@@ -127,8 +134,10 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 								strategyDirective,
 							].filter(Boolean).join("\n\n");
 
-							const res = await worker.runTurn(prompt, { signal });
-							os.worktrees.commitWip(worker.workspace, `evo-gen-${gen}-slot-${slot + 1}`);
+							const res = await worker.runTurn(prompt, { signal, ...(genTimeoutMs ? { timeoutMs: genTimeoutMs } : {}) });
+							const wipSha = os.worktrees.commitWip(worker.workspace, `evo-gen-${gen}-slot-${slot + 1}`);
+							const headAfter = os.worktrees.headSha(worker.workspace);
+							const hasEdits = Boolean(wipSha) || (Boolean(headAfter) && headAfter !== (parent?.branch ?? os.worktrees.baseSha));
 							const diffSha = os.worktrees.diffSha(worker.workspace);
 							const diffStat = os.worktrees.diffStat(worker.workspace, parent?.branch ?? os.worktrees.baseSha);
 
@@ -137,7 +146,8 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 								.filter((f) => f.authorAgentId === worker.agent.id)
 								.at(-1);
 
-							if (!finding && res.status === "completed") {
+							if (!finding && (res.status === "completed" || (res.status === "interrupted" && hasEdits))) {
+								const verifySig = signal.aborted ? new AbortController().signal : signal;
 								finding = await os.trust.submitFinding(
 									{
 										agentId: worker.agent.id,
@@ -147,7 +157,7 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 										summary: res.finalText.slice(0, 1200) || "Evolutionary candidate",
 										level: "empirical",
 									},
-									signal,
+									verifySig,
 								);
 							}
 

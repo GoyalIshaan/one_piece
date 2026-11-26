@@ -487,4 +487,101 @@ describe("RSI Harness Upgrades: Field Guide, Semantic Auto-Repair, Fail-Closed T
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	it("elastic-phase still performs mechanical Git trunk assembly and nominates merged work after wall abort (RSI-6)", async () => {
+		const root = mkdtempSync(join(tmpdir(), "rsi6-elastic-abort-"));
+		try {
+			const seed = join(root, "seed");
+			mkdirSync(seed, { recursive: true });
+			writeFileSync(join(seed, "part_a.txt"), "todo\n");
+			writeFileSync(join(seed, "part_b.txt"), "todo\n");
+
+			const driver: WorkerDriver = {
+				id: "rsi6-drv",
+				kind: "codex-exec",
+				capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema: false, supportsMcpHttp: false },
+				async healthCheck() {
+					return { ok: true, driverId: "rsi6-drv", kind: "codex-exec", version: "1" };
+				},
+				async spawn(spec) {
+					return {
+						driverId: "rsi6-drv",
+						sessionId: `s-${spec.agentId}`,
+						async runTurn(prompt, opts) {
+							if (spec.role === "planner") {
+								return {
+									status: "completed",
+									finalText: JSON.stringify({
+										lanes: [
+											{ title: "Part A", description: "Write DONE_A to part_a.txt", owned_paths: ["part_a.txt"], cross_contracts: [] },
+											{ title: "Part B", description: "Write DONE_B to part_b.txt", owned_paths: ["part_b.txt"], cross_contracts: [] },
+										],
+									}),
+								};
+							}
+							if (prompt.includes("DONE_A")) {
+								writeFileSync(join(spec.workspace, "part_a.txt"), "DONE_A\n");
+								return { status: "completed", finalText: "wrote A" };
+							}
+							// Track 2 writes part_b.txt then stalls until aborted (simulating slow straggler at wall cutoff)
+							writeFileSync(join(spec.workspace, "part_b.txt"), "DONE_B\n");
+							return new Promise<WorkerTurnResult>((resolve) => {
+								if (opts?.signal?.aborted) {
+									resolve({ status: "interrupted", finalText: "interrupted after writing B" });
+									return;
+								}
+								opts?.signal?.addEventListener(
+									"abort",
+									() => resolve({ status: "interrupted", finalText: "interrupted after writing B" }),
+									{ once: true },
+								);
+							});
+						},
+						async close() {},
+					};
+				},
+			};
+
+			const store = new SqliteStore(join(root, "rsi6.db"));
+			const os = await SwarmOS.create({
+				runDir: join(root, "run"),
+				workspace: seed,
+				topology: "elastic-phase",
+				goal: { title: "RSI-6 Closeout Merge", text: "Complete part_a and part_b" },
+				wallSeconds: 1.5,
+				reservePct: 0.15,
+				verifier: {
+					name: "ab-check",
+					version: "1.0.0",
+					scopes: ["deliverable"],
+					defaultScope: "deliverable",
+					async check({ workspace }) {
+						const a = readFileSync(join(workspace, "part_a.txt"), "utf8").trim() === "DONE_A";
+						const b = readFileSync(join(workspace, "part_b.txt"), "utf8").trim() === "DONE_B";
+						const score = (a ? 0.5 : 0) + (b ? 0.5 : 0);
+						return { status: a && b ? "passed" : "failed", score, message: `a=${a} b=${b}` };
+					},
+				},
+				store,
+				router: new DriverQuotaRouter({
+					drivers: [{ driver, config: { id: "rsi6-drv", kind: "codex-exec", maxConcurrent: 4 } }],
+					roles: { default: ["rsi6-drv"] },
+				}),
+			});
+			try {
+				const outcome = await os.execute(createTopology("elastic-phase", { peers: 2, enableSemanticRepair: false }));
+				// Both completed Track 1 AND salvaged interrupted Track 2 MUST be mechanically merged onto trunk!
+				expect(readFileSync(join(os.worktrees.trunkPath, "part_a.txt"), "utf8").trim()).toBe("DONE_A");
+				expect(readFileSync(join(os.worktrees.trunkPath, "part_b.txt"), "utf8").trim()).toBe("DONE_B");
+				expect(outcome.nominatedFindingId).toBeTruthy();
+				const finding = store.get("findings", outcome.nominatedFindingId!);
+				expect(finding?.score).toBe(1);
+			} finally {
+				await os.dispose();
+				store.close();
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
 });

@@ -213,7 +213,10 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 						toolScope: {
 							board: "read-write",
 							artifacts: true,
-							findings: !hasSeatConfigs,
+							// When running multiple parallel lanes, individual 1/K branches are partial;
+							// hide report_finding so lanes never pollute findings or waste turns on partial rejections —
+							// Phase 4 integrated trunk assembly owns deliverable verification & nomination.
+							findings: wideCount <= 1 && !hasSeatConfigs,
 							tasks: false,
 							nominate: false,
 							scheduler: "auto",
@@ -227,6 +230,14 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 			);
 
 			try {
+				// Phase-budget reservation: cap wide-exploration turn time so Phase 3 (Dreaming) and
+				// Phase 4 (Verified Trunk Assembly + Semantic Auto-Repair) ALWAYS get dedicated time!
+				const remWall = os.remainingWallMs?.();
+				const wideTimeoutMs =
+					remWall !== undefined && remWall > 20_000
+						? Math.max(15_000, Math.floor(remWall * (hasSeatConfigs ? 0.85 : 0.62)))
+						: undefined;
+
 				await Promise.all(
 					workers.map(async (worker, idx) => {
 						if (signal.aborted) return;
@@ -251,16 +262,16 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 									? `Cross-module contracts to preserve:\n${lane.cross_contracts.map((c) => `- ${c}`).join("\n")}`
 									: "",
 								pulse,
-								"Implement your lane cleanly, coordinate interfaces on the board if needed, run tests, and call `report_finding` (or finish cleanly so trunk assembly verifies the combined work).",
+								"Implement your lane cleanly, coordinate interfaces on the board if needed, run tests, and finish promptly so Phase 4 trunk assembly verifies the integrated codebase.",
 							].filter(Boolean).join("\n\n");
 
-						const res = await worker.runTurn(prompt, { signal });
+						const res = await worker.runTurn(prompt, { signal, ...(wideTimeoutMs ? { timeoutMs: wideTimeoutMs } : {}) });
 						os.worktrees.commitWip(worker.workspace, `elastic(${worker.agent.handle})`);
 						const headSha = os.worktrees.headSha(worker.workspace);
 						const hasCommits = Boolean(worker.branch && headSha && headSha !== os.worktrees.baseSha);
 
 						const workerFindings = os.store.list("findings", { runId: os.runId }).filter((f) => f.authorAgentId === worker.agent.id);
-						if (!workerFindings.length && res.status === "completed" && hasCommits && !hasSeatConfigs) {
+						if (!workerFindings.length && res.status === "completed" && hasCommits && wideCount <= 1 && !hasSeatConfigs && !signal.aborted) {
 							const f = await os.trust.submitFinding(
 								{
 									agentId: worker.agent.id,
@@ -305,13 +316,15 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 			}
 
 			// --- Phase 4: Narrow Single-Writer Trunk Assembly, Conflict Resolution & Semantic Repair (N=1) ---
+			// Mechanical Git assembly of committed lane branches ALWAYS runs (zero LLM tokens, <50ms)
+			// even if the wall cutoff fired right as lanes finished committing!
 			let mergedCount = 0;
 			let conflictCount = 0;
 			let resolvedConflicts = 0;
 			let trunkAccepted = false;
 			let lastTrunkSha = os.worktrees.baseSha;
 
-			if (peerBranches.length > 0 && !signal.aborted) {
+			if (peerBranches.length > 0) {
 				os.bus.emit(os.runId, "phase.changed", {
 					from: enableDreaming ? "elastic-dream-reset" : "elastic-wide-explore",
 					to: "elastic-narrow-integrate",
@@ -392,7 +405,9 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 					}
 				}
 
-				if (mergedCount > 0 && !signal.aborted) {
+				if (mergedCount > 0) {
+					// Use a fresh closeout signal for mechanical trunk verification so assembled work is never dropped on wall abort!
+					const verifySig = signal.aborted ? new AbortController().signal : signal;
 					let trunkFinding = await os.trust.submitFinding(
 						{
 							agentId: "elastic-trunk",
@@ -401,7 +416,7 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 							summary: `Assembled ${mergedCount} lane branches onto trunk (conflicts=${conflictCount}, resolved=${resolvedConflicts}).`,
 							level: "empirical",
 						},
-						signal,
+						verifySig,
 					);
 
 					// Semantic Integration Auto-Repair if verifier rejects assembled trunk OR cross-contract polish needed.

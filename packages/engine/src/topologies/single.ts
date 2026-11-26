@@ -51,8 +51,11 @@ export function singleTopology(opts: SingleTopologyOptions = {}): TopologyPlugin
 				// If the worker made changes or finished without explicitly calling report_finding,
 				// capture a frozen snapshot mechanically so CloseoutController can verify & nominate it.
 				const existing = os.store.list("findings", { runId: os.runId });
-				if (!existing.length && res.status === "completed") {
-					os.worktrees.commitWip(worker.workspace, `one-piece: ${worker.agent.id} final`);
+				const wipSha = os.worktrees.commitWip(worker.workspace, `one-piece: ${worker.agent.id} final`);
+				const headAfter = os.worktrees.headSha(worker.workspace);
+				const hasChanges = Boolean(wipSha) || (Boolean(headAfter) && headAfter !== os.worktrees.baseSha);
+				if (!existing.length && (res.status === "completed" || (res.status === "interrupted" && hasChanges))) {
+					const verifySig = signal.aborted ? new AbortController().signal : signal;
 					await os.trust.submitFinding(
 						{
 							agentId: worker.agent.id,
@@ -62,7 +65,7 @@ export function singleTopology(opts: SingleTopologyOptions = {}): TopologyPlugin
 							summary: res.finalText.slice(0, 2000) || "Completed task in isolated worktree.",
 							level: "empirical",
 						},
-						signal,
+						verifySig,
 					);
 				}
 

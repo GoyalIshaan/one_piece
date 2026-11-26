@@ -309,6 +309,11 @@ export class SwarmOS implements SwarmOsApi {
 		return false;
 	}
 
+	remainingWallMs(): number | undefined {
+		if (!this.wallSeconds || this.wallSeconds <= 0) return undefined;
+		return Math.max(0, Math.floor(this.wallSeconds * 1000 - (Date.now() - this.startedAt)));
+	}
+
 	createTask(input: {
 		title: string;
 		description: string;

@@ -131,8 +131,9 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 
 				// Closeout Option A: assemble committed peer branches onto isolated `trunk`
 				// (highest verified score first), with an impartial 1-turn conflict-resolver fallback.
+				// Mechanical Git trunk assembly ALWAYS runs even if wall cutoff aborted late peer turns!
 				const assemblyOutcomes: BranchAssemblyOutcome[] = [];
-				if (!signal.aborted) {
+				{
 					os.bus.emit(os.runId, "phase.changed", { to: "trunk-assembly", reason: "Assembling committed peer branches onto trunk" });
 					const findings = os.store.list("findings", { runId: os.runId });
 					const peerCandidates = handles
@@ -280,7 +281,8 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 						}
 					}
 
-					if (mergedCount > 0 && !signal.aborted) {
+					if (mergedCount > 0) {
+						const verifySig = signal.aborted ? new AbortController().signal : signal;
 						const trunkFinding = await os.trust.submitFinding(
 							{
 								agentId: "substrate-trunk",
@@ -289,7 +291,7 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 								summary: `Assembled ${mergedCount} peer branches onto isolated trunk (conflicts=${conflictCount}, resolved=${resolvedConflicts}).`,
 								level: "empirical",
 							},
-							signal,
+							verifySig,
 						);
 
 						// If the assembled trunk merged cleanly in Git yet failed the executable verifier
