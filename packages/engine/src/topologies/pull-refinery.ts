@@ -176,6 +176,8 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 			const mergedBranches: string[] = [];
 			const conflictCounts = new Map<string, number>();
 			let lastTrunkSha = os.worktrees.baseSha;
+			let lastTrunkScore: number | undefined;
+			let lastTrunkAccepted = false;
 
 			const enqueueRefinery = (task: TaskRecord, branch: string, authorAgentId: string, authorDriverId: string) => {
 				const job = mergeChain.then(async () => {
@@ -183,6 +185,8 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 					const previewBeforeMerge = os.worktrees.mergePreviewDiff(branch);
 					const merged = os.worktrees.mergeIntoTrunk(branch, { message: `refinery(${task.id}): ${task.title}` });
 					if (merged.ok) {
+						// Always use a fresh closeout signal if the run aborted right as a branch finished committing.
+						const verifySig = signal.aborted ? new AbortController().signal : signal;
 						const finding = await os.trust.submitFinding(
 							{
 								agentId: authorAgentId,
@@ -193,12 +197,25 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 								summary: `Serialized merge of ${branch} onto isolated trunk worktree succeeded cleanly.`,
 								level: "empirical",
 							},
-							signal,
+							verifySig,
 						);
 
-						// Monotonic green trunk ratchet: if an executable verifier rejects a clean Git merge
-						// (pure semantic interference!), attempt impartial repair or roll back trunk cleanly.
-						if (os.trust.verifier && finding.status !== "accepted") {
+						// Monotonic green trunk ratchet:
+						// - Keep merges that pass verification OR strictly advance the trunk score from an unaccepted baseline
+						//   (so Ticket 1/N on a multi-feature repo is not falsely rolled back before Tickets 2..N land!).
+						// - Trigger impartial semantic repair / rollback on genuine regressions (accepted -> failed,
+						//   score drop, or non-advancing failing merges).
+						const newScore = typeof finding.score === "number" ? finding.score : undefined;
+						const strictlyAdvancedFromUnaccepted =
+							!lastTrunkAccepted &&
+							newScore !== undefined &&
+							newScore > (lastTrunkScore ?? 0) + 1e-9;
+						const isSemanticRegression =
+							Boolean(os.trust.verifier) &&
+							finding.status !== "accepted" &&
+							!strictlyAdvancedFromUnaccepted;
+
+						if (isSemanticRegression) {
 							const failReason = finding.rounds.at(-1)?.message ?? "Executable verifier rejected merged trunk";
 							let repaired = false;
 							if (enableSemanticRepair && !signal.aborted) {
@@ -246,6 +263,7 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 											message: `refinery-semantic-repair(${task.id}): ${task.title}`,
 										});
 										if (repMerge.ok) {
+											const repVerifySig = signal.aborted ? new AbortController().signal : signal;
 											const repFinding = await os.trust.submitFinding(
 												{
 													agentId: repairer.agent.id,
@@ -257,11 +275,13 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 													summary: `Impartial semantic repair reconciled cross-feature verifier failure on trunk.`,
 													level: "empirical",
 												},
-												signal,
+												repVerifySig,
 											);
 											if (repFinding.status === "accepted") {
 												repaired = true;
 												lastTrunkSha = repMerge.commitSha;
+												lastTrunkAccepted = true;
+												if (typeof repFinding.score === "number") lastTrunkScore = repFinding.score;
 												mergedBranches.push(branch, repairer.branch);
 												os.board.publish({
 													runId: os.runId,
@@ -300,6 +320,8 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 						}
 
 						lastTrunkSha = merged.commitSha;
+						if (finding.status === "accepted") lastTrunkAccepted = true;
+						if (newScore !== undefined) lastTrunkScore = Math.max(lastTrunkScore ?? -Infinity, newScore);
 						mergedBranches.push(branch);
 						os.board.publish({
 							runId: os.runId,
@@ -396,7 +418,8 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 											{ taskId: task.id, branch, conflictFiles, commitSha: resolved.commitSha },
 											resolver.agent.id,
 										);
-										await os.trust.submitFinding(
+										const resVerifySig = signal.aborted ? new AbortController().signal : signal;
+										const resFinding = await os.trust.submitFinding(
 											{
 												agentId: resolver.agent.id,
 												driverId: resolver.agent.driverId,
@@ -406,8 +429,12 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 												summary: `Neutral resolver reconciled conflicts in ${conflictFiles.join(", ")} cleanly on trunk.`,
 												level: "empirical",
 											},
-											signal,
+											resVerifySig,
 										);
+										if (resFinding.status === "accepted") lastTrunkAccepted = true;
+										if (typeof resFinding.score === "number") {
+											lastTrunkScore = Math.max(lastTrunkScore ?? -Infinity, resFinding.score);
+										}
 										os.board.publish({
 											runId: os.runId,
 											authorAgentId: "refinery",

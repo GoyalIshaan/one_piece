@@ -57,7 +57,14 @@ export class GitWorktreeManager implements WorktreeManager {
 						const rel = relative(resolvedSource, src);
 						if (!rel) return true;
 						const parts = rel.split(/[\\/]/);
-						return !parts.includes(".one_piece") && !parts.includes("node_modules") && !parts.includes(".git");
+						return (
+							!parts.includes(".one_piece") &&
+							!parts.includes("node_modules") &&
+							!parts.includes(".git") &&
+							!parts.includes("__pycache__") &&
+							!parts.includes(".pytest_cache") &&
+							!parts.includes(".DS_Store")
+						);
 					},
 				});
 			}
@@ -93,7 +100,20 @@ export class GitWorktreeManager implements WorktreeManager {
 			// Branch did not exist yet.
 		}
 		git(this.repoRoot, ["worktree", "add", "-b", branch, worktreePath, baseRef]);
-		this.writeGitExclude(worktreePath, [".swarm/", ".gemini/settings.json", ".grok/config.toml", ".one_piece/"]);
+		this.writeGitExclude(worktreePath, [
+			".swarm/",
+			".gemini/settings.json",
+			".grok/config.toml",
+			".one_piece/",
+			"__pycache__/",
+			"*.pyc",
+			"*.pyo",
+			".pytest_cache/",
+			".mypy_cache/",
+			".ruff_cache/",
+			".DS_Store",
+			"*.egg-info/",
+		]);
 		return { path: worktreePath, branch, baseSha: baseRef };
 	}
 

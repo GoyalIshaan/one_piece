@@ -336,7 +336,8 @@ export class CodexAppServerDriver implements WorkerDriver {
 			sessionState = { kind: "closed" };
 			if (running) {
 				const quota = classifyQuotaError(errMsg);
-				const usage = { durationMs: Date.now() - running.startedAt };
+				const durationMs = Date.now() - running.startedAt;
+				const usage = running.usage ? { ...running.usage, durationMs } : { durationMs };
 				if (quota) {
 					running.resolve({ status: "rate_limited", finalText: running.chunks.join(""), sessionId: threadId, model: resolvedModel, usage, quotaError: quota, error: errMsg });
 				} else {
@@ -398,7 +399,9 @@ export class CodexAppServerDriver implements WorkerDriver {
 						}
 						if (running) {
 							if (sessionState.kind === "running") sessionState = { kind: "idle" };
-							finish({ status: "interrupted", finalText: running.chunks.join(""), sessionId: threadId, model: resolvedModel, usage: { durationMs: Date.now() - startedAt } });
+							const durationMs = Date.now() - startedAt;
+							const usage = running.usage ? { ...running.usage, durationMs } : { durationMs };
+							finish({ status: "interrupted", finalText: running.chunks.join(""), sessionId: threadId, model: resolvedModel, usage });
 						}
 					};
 					if (opts.signal?.aborted) {

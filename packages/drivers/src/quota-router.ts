@@ -171,15 +171,24 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 			if (!withFreeSlots.length) {
 				chosenId = pool[0]!;
 			} else {
-				const weights = pool.map((id) => Math.max(0.01, this.driverMap.get(id)!.config.weight ?? 1));
+				// Least-loaded provider diversity: prefer drivers with minimum weighted utilization
+				// (reserved / maxConcurrent / weight) so concurrent waves spread evenly across providers!
+				const utilOf = (id: string): number => {
+					const d = this.driverMap.get(id)!;
+					const w = Math.max(0.01, d.config.weight ?? 1);
+					return d.reserved / d.maxConcurrent / w;
+				};
+				const minUtil = Math.min(...pool.map(utilOf));
+				const tiedPool = pool.filter((id) => utilOf(id) <= minUtil + 1e-9);
+				const weights = tiedPool.map((id) => Math.max(0.01, this.driverMap.get(id)!.config.weight ?? 1));
 				const total = weights.reduce((a, b) => a + b, 0);
 				this.rotation = (this.rotation + 0.618_033_988_75) % 1;
 				let point = this.rotation * total;
-				chosenId = pool[0]!;
-				for (let i = 0; i < pool.length; i++) {
+				chosenId = tiedPool[0]!;
+				for (let i = 0; i < tiedPool.length; i++) {
 					point -= weights[i]!;
 					if (point <= 0) {
-						chosenId = pool[i]!;
+						chosenId = tiedPool[i]!;
 						break;
 					}
 				}

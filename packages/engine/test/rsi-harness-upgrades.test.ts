@@ -584,4 +584,120 @@ describe("RSI Harness Upgrades: Field Guide, Semantic Auto-Repair, Fail-Closed T
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	it("excludes __pycache__/*.pyc across parallel worktrees and preserves monotonic partial progress in pull-refinery (RSI-7)", async () => {
+		const root = mkdtempSync(join(tmpdir(), "rsi7-pycache-monotonic-"));
+		try {
+			const seed = join(root, "seed");
+			mkdirSync(seed, { recursive: true });
+			writeFileSync(join(seed, "a.py"), "A = 0\n");
+			writeFileSync(join(seed, "b.py"), "B = 0\n");
+
+			// Case 1: Concurrent peers both generate conflicting binary __pycache__/*.pyc files while editing disjoint source files.
+			const peerDriver = new MockDriver("peer-pyc", async (spec, prompt) => {
+				const pycache = join(spec.workspace, "__pycache__");
+				mkdirSync(pycache, { recursive: true });
+				if (spec.agentId.endsWith("1") || prompt.includes("peer-1")) {
+					writeFileSync(join(spec.workspace, "a.py"), "A = 1\n");
+					writeFileSync(join(pycache, "mod.cpython-314.pyc"), Buffer.from([0x01, 0x02, 0x03, 0xaa]));
+				} else {
+					writeFileSync(join(spec.workspace, "b.py"), "B = 1\n");
+					writeFileSync(join(pycache, "mod.cpython-314.pyc"), Buffer.from([0xff, 0xfe, 0xfd, 0xbb]));
+				}
+				return { status: "completed", finalText: "done" };
+			});
+			const store1 = new SqliteStore(join(root, "pyc.db"));
+			const os1 = await SwarmOS.create({
+				runDir: join(root, "run-pyc"),
+				workspace: seed,
+				topology: "substrate-peers",
+				goal: { title: "Pycache isolation", text: "Update a.py and b.py" },
+				verifier: {
+					name: "ab-py",
+					version: "1.0.0",
+					scopes: ["deliverable"],
+					defaultScope: "deliverable",
+					async check({ workspace }) {
+						const a = readFileSync(join(workspace, "a.py"), "utf8").includes("A = 1");
+						const b = readFileSync(join(workspace, "b.py"), "utf8").includes("B = 1");
+						return { status: a && b ? "passed" : "failed", score: (a ? 0.5 : 0) + (b ? 0.5 : 0), message: `a=${a} b=${b}` };
+					},
+				},
+				store: store1,
+				router: new DriverQuotaRouter({
+					drivers: [{ driver: peerDriver, config: { id: "peer-pyc", kind: "codex-exec", maxConcurrent: 4 } }],
+					roles: { default: ["peer-pyc"] },
+				}),
+			});
+			try {
+				await os1.execute(createTopology("substrate-peers", { peers: 2, maxRounds: 1 }));
+				// Zero binary __pycache__ conflicts should occur!
+				const conflicts = store1.events(os1.runId, { types: ["peer.conflict_detected"] });
+				expect(conflicts.length).toBe(0);
+				expect(readFileSync(join(os1.worktrees.trunkPath, "a.py"), "utf8")).toContain("A = 1");
+				expect(readFileSync(join(os1.worktrees.trunkPath, "b.py"), "utf8")).toContain("B = 1");
+			} finally {
+				await os1.dispose();
+				store1.close();
+			}
+
+			// Case 2: pull-refinery keeps Ticket 1 (score 0.5, status=failed) on trunk without rolling it back before Ticket 2 (score 1.0, status=passed)!
+			const refDriver = new MockDriver("ref-mono", async (spec, prompt) => {
+				if (spec.role === "planner") {
+					return {
+						status: "completed",
+						finalText: JSON.stringify({
+							tasks: [
+								{ key: "t1", title: "Write a.py", description: "Set A = 1 in a.py", owned_paths: ["a.py"], depends_on: [] },
+								{ key: "t2", title: "Write b.py", description: "Set B = 1 in b.py", owned_paths: ["b.py"], depends_on: ["t1"] },
+							],
+						}),
+					};
+				}
+				if (prompt.includes("A = 1")) {
+					writeFileSync(join(spec.workspace, "a.py"), "A = 1\n");
+				} else if (prompt.includes("B = 1")) {
+					writeFileSync(join(spec.workspace, "b.py"), "B = 1\n");
+				}
+				return { status: "completed", finalText: "done" };
+			});
+			const store2 = new SqliteStore(join(root, "mono.db"));
+			const os2 = await SwarmOS.create({
+				runDir: join(root, "run-mono"),
+				workspace: seed,
+				topology: "pull-refinery",
+				goal: { title: "Monotonic multi-ticket", text: "Set A=1 and B=1" },
+				verifier: {
+					name: "ab-py",
+					version: "1.0.0",
+					scopes: ["deliverable"],
+					defaultScope: "deliverable",
+					async check({ workspace }) {
+						const a = readFileSync(join(workspace, "a.py"), "utf8").includes("A = 1");
+						const b = readFileSync(join(workspace, "b.py"), "utf8").includes("B = 1");
+						return { status: a && b ? "passed" : "failed", score: (a ? 0.5 : 0) + (b ? 0.5 : 0), message: `a=${a} b=${b}` };
+					},
+				},
+				store: store2,
+				router: new DriverQuotaRouter({
+					drivers: [{ driver: refDriver, config: { id: "ref-mono", kind: "codex-exec", maxConcurrent: 4 } }],
+					roles: { default: ["ref-mono"] },
+				}),
+			});
+			try {
+				const out = await os2.execute(createTopology("pull-refinery", { concurrency: 2, enableSemanticRepair: false }));
+				const regressions = store2.events(os2.runId, { types: ["refinery.semantic_regression"] });
+				// Ticket 1 advanced 0.0 -> 0.5 (strict monotonic progress!) so MUST NOT trigger rollback!
+				expect(regressions.length).toBe(0);
+				expect(readFileSync(join(os2.worktrees.trunkPath, "a.py"), "utf8")).toContain("A = 1");
+				expect(readFileSync(join(os2.worktrees.trunkPath, "b.py"), "utf8")).toContain("B = 1");
+				expect(out.nominatedFindingId).toBeTruthy();
+			} finally {
+				await os2.dispose();
+				store2.close();
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
 });

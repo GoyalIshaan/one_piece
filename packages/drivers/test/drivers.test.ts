@@ -454,5 +454,52 @@ describe("drivers & 3-class quota classification", () => {
 				clearTimeout(timer);
 			}
 		}
+
+		// Also verify 2-worker waves ALWAYS split 1+1 across 2 equal-weight providers (least-loaded diversity, RSI-7)
+		for (let round = 0; round < 20; round++) {
+			const [a, b] = await Promise.all([router.acquireForRole("worker"), router.acquireForRole("worker")]);
+			expect(new Set([a.driver.id, b.driver.id]).size).toBe(2);
+			a.release();
+			b.release();
+		}
+	});
+
+	it("preserves accumulated token usage when a Codex app-server turn is interrupted (RSI-7)", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "op-codex-abort-usage-"));
+		try {
+			const fakeCodex = makeFakeBinary(
+				dir,
+				"fake-codex-abort",
+				`
+				const rl = require("node:readline").createInterface({ input: process.stdin });
+				rl.on("line", (line) => {
+					const msg = JSON.parse(line);
+					if (msg.method === "initialize") {
+						console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {} }));
+					} else if (msg.method === "thread/start") {
+						console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "th-abort", model: "gpt-6.2-sol" } } }));
+					} else if (msg.method === "turn/start") {
+						console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {} }));
+						console.log(JSON.stringify({ jsonrpc: "2.0", method: "turn/started", params: { turn: { id: "t-1" } } }));
+						console.log(JSON.stringify({ jsonrpc: "2.0", method: "thread/tokenUsage/updated", params: { tokenUsage: { total: { inputTokens: 12000, cachedInputTokens: 4000, outputTokens: 850, reasoningOutputTokens: 200, totalTokens: 12850 } } } }));
+						// Deliberately stall until interrupted by timeoutMs/signal!
+					} else if (msg.method === "turn/interrupt") {
+						console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {} }));
+					}
+				});
+				`,
+			);
+			const drv = new CodexAppServerDriver({ id: "codex-abort", kind: "codex-app-server", binary: fakeCodex });
+			const sess = await drv.spawn({ runId: "r1", agentId: "a1", role: "worker", workspace: dir });
+			const res = await sess.runTurn("long task", { timeoutMs: 250 });
+			expect(res.status).toBe("interrupted");
+			expect(res.usage?.totalTokens).toBe(12850);
+			expect(res.usage?.inputTokens).toBe(12000);
+			expect(res.usage?.outputTokens).toBe(850);
+			expect(res.usage?.cachedTokens).toBe(4000);
+			await sess.close();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
