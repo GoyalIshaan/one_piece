@@ -1,7 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { statfsSync } from "node:fs";
 import { cpus, freemem, loadavg, platform, totalmem } from "node:os";
-import type { DriverConfig, DriverKind } from "@one-piece/core";
+import {
+	type DriverConfig,
+	type DriverKind,
+	type DriverWindowState,
+	transitionDriverWindow,
+} from "@one-piece/core";
 
 export interface HostPhysicsSnapshot {
 	readonly freeMemBytes: number;
@@ -44,14 +49,6 @@ export interface GovernorScaleEvent {
 	readonly reason: string;
 	readonly freeMemMb: number;
 	readonly cpuLoadRatio: number;
-}
-
-interface DriverWindowState {
-	readonly kind: DriverKind;
-	readonly fixedLimit: number;
-	readonly hardMax?: number;
-	window: number;
-	consecutiveSuccesses: number;
 }
 
 const MIB = 1024 * 1024;
@@ -133,14 +130,16 @@ export class PhysicsConcurrencyGovernor {
 	registerDriver(driverId: string, config: DriverConfig): void {
 		const isInProc = config.kind === "pi-in-process";
 		const fixedLimit = Math.max(1, config.maxConcurrent ?? (isInProc ? 4 : 2));
-		const initialWindow = this.mode === "physics"
-			? Math.max(fixedLimit, isInProc ? 8 : 4)
-			: fixedLimit;
+		if (this.mode === "fixed") {
+			this.drivers.set(driverId, { mode: "fixed", kind: config.kind, fixedLimit });
+			return;
+		}
+		const initialWindow = Math.max(fixedLimit, isInProc ? 8 : 4);
 		const hardMax = config.hardMaxConcurrent !== undefined ? Math.max(1, config.hardMaxConcurrent) : undefined;
 		this.drivers.set(driverId, {
+			mode: "physics",
 			kind: config.kind,
-			fixedLimit,
-			hardMax,
+			...(hardMax !== undefined ? { hardMax } : {}),
 			window: hardMax !== undefined ? Math.min(initialWindow, hardMax) : initialWindow,
 			consecutiveSuccesses: 0,
 		});
@@ -175,7 +174,7 @@ export class PhysicsConcurrencyGovernor {
 	effectiveLimit(driverId: string, driverRunning: number): number {
 		const state = this.drivers.get(driverId);
 		if (!state) return 1;
-		if (this.mode === "fixed") return state.fixedLimit;
+		if (state.mode === "fixed") return state.fixedLimit;
 
 		const snap = this.sampleHost();
 		const additionalAllowed = this.hostHeadroomSlots(state.kind, snap);
@@ -190,26 +189,24 @@ export class PhysicsConcurrencyGovernor {
 	/** AIMD additive increase on clean turn completion when host physics permits scale-up. */
 	onSuccess(driverId: string): GovernorScaleEvent | undefined {
 		const state = this.drivers.get(driverId);
-		if (!state || this.mode === "fixed") return undefined;
+		if (!state || state.mode === "fixed") return undefined;
 
-		state.consecutiveSuccesses += 1;
-		if (state.consecutiveSuccesses < this.scaleUpAfterSuccesses) return undefined;
-		state.consecutiveSuccesses = 0;
-
-		const snap = this.sampleHost(true);
-		const headroom = this.hostHeadroomSlots(state.kind, snap);
-		if (headroom < 1 || snap.cpuLoadRatio > this.maxCpuLoadRatio) {
-			return undefined;
-		}
-		const prev = state.window;
-		const nextRaw = prev + 1;
-		const next = state.hardMax !== undefined ? Math.min(nextRaw, state.hardMax) : nextRaw;
-		if (next <= prev) return undefined;
-		state.window = next;
+		const willEvaluateScale = state.consecutiveSuccesses + 1 >= this.scaleUpAfterSuccesses;
+		const snap = willEvaluateScale ? this.sampleHost(true) : undefined;
+		const hostHasHeadroom = snap
+			? this.hostHeadroomSlots(state.kind, snap) >= 1 && snap.cpuLoadRatio <= this.maxCpuLoadRatio
+			: false;
+		const res = transitionDriverWindow(state, {
+			type: "success",
+			scaleUpAfter: this.scaleUpAfterSuccesses,
+			hostHasHeadroom,
+		});
+		this.drivers.set(driverId, res.next);
+		if (!res.changed || !snap) return undefined;
 		return {
 			driverId,
-			prevWindow: prev,
-			nextWindow: next,
+			prevWindow: res.prevWindow,
+			nextWindow: res.nextWindow,
 			reason: "aimd_additive_increase",
 			freeMemMb: Math.round(snap.freeMemBytes / MIB),
 			cpuLoadRatio: Math.round(snap.cpuLoadRatio * 100) / 100,
@@ -219,18 +216,16 @@ export class PhysicsConcurrencyGovernor {
 	/** AIMD multiplicative decrease on provider rate-limit / HTTP 429 backpressure. */
 	onRateLimit(driverId: string, reason = "provider_rate_limit"): GovernorScaleEvent | undefined {
 		const state = this.drivers.get(driverId);
-		if (!state || this.mode === "fixed") return undefined;
+		if (!state || state.mode === "fixed") return undefined;
 
-		state.consecutiveSuccesses = 0;
-		const prev = state.window;
-		const next = Math.max(1, Math.floor(prev / 2));
-		state.window = next;
-		if (next === prev) return undefined;
+		const res = transitionDriverWindow(state, { type: "rate_limit" });
+		this.drivers.set(driverId, res.next);
+		if (!res.changed) return undefined;
 		const snap = this.sampleHost();
 		return {
 			driverId,
-			prevWindow: prev,
-			nextWindow: next,
+			prevWindow: res.prevWindow,
+			nextWindow: res.nextWindow,
 			reason,
 			freeMemMb: Math.round(snap.freeMemBytes / MIB),
 			cpuLoadRatio: Math.round(snap.cpuLoadRatio * 100) / 100,
@@ -238,6 +233,8 @@ export class PhysicsConcurrencyGovernor {
 	}
 
 	currentWindow(driverId: string): number {
-		return this.drivers.get(driverId)?.window ?? 1;
+		const state = this.drivers.get(driverId);
+		if (!state) return 1;
+		return state.mode === "fixed" ? state.fixedLimit : state.window;
 	}
 }

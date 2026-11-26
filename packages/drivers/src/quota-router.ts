@@ -8,7 +8,9 @@ import {
 	type QuotaErrorClass,
 	type QuotaPoolRouter,
 	type Role,
+	type SlotPermitState,
 	transitionQuotaRecord,
+	transitionSlotPermit,
 	type WorkerDriver,
 } from "@one-piece/core";
 import { PhysicsConcurrencyGovernor, type PhysicsGovernorOptions } from "./physics-governor.ts";
@@ -234,29 +236,24 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 	private grantSlot(driverId: string, waitedMs: number): DriverPoolSelection {
 		const entry = this.driverMap.get(driverId)!;
 		entry.running += 1;
-		let released = false;
-		let parked = false;
-		const park = () => {
-			if (released || parked) return;
-			parked = true;
-			entry.running = Math.max(0, entry.running - 1);
-			this.dispatchWaiters();
-		};
-		const unpark = () => {
-			if (released || !parked) return;
-			parked = false;
-			entry.running += 1;
-		};
-		const release = () => {
-			if (released) return;
-			released = true;
-			if (!parked) {
-				entry.running = Math.max(0, entry.running - 1);
+		let permitState: SlotPermitState = "held";
+		const apply = (event: "park" | "unpark" | "release") => {
+			const res = transitionSlotPermit(permitState, event);
+			permitState = res.next;
+			if (res.runningDelta !== 0) {
+				entry.running = Math.max(0, entry.running + res.runningDelta);
 			}
-			parked = false;
-			this.dispatchWaiters();
+			if (res.shouldDispatch) {
+				this.dispatchWaiters();
+			}
 		};
-		return { driver: entry.driver, release, park, unpark, waitedMs };
+		return {
+			driver: entry.driver,
+			park: () => apply("park"),
+			unpark: () => apply("unpark"),
+			release: () => apply("release"),
+			waitedMs,
+		};
 	}
 
 	private dispatchWaiters(): void {

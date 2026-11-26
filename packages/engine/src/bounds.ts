@@ -1,4 +1,5 @@
 import {
+	type Exclusive,
 	getNoulAnswer,
 	type JsonSchema,
 	type SwarmOsApi,
@@ -34,12 +35,19 @@ export type HumanCheckpointHandler = (
 	report: ResearcherCheckpointReport,
 ) => HumanCheckpointDecision | Promise<HumanCheckpointDecision>;
 
-export interface CheckpointOutcome {
-	readonly shouldStop: boolean;
-	readonly trigger?: ResearcherCheckpointReport["trigger"];
-	readonly reason: string;
-	readonly steeringNote?: string;
-}
+export type CheckpointOutcome = Exclusive<
+	| {
+		readonly shouldStop: true;
+		readonly trigger: ResearcherCheckpointReport["trigger"];
+		readonly reason: string;
+	}
+	| {
+		readonly shouldStop: false;
+		readonly reason: string;
+		readonly trigger?: ResearcherCheckpointReport["trigger"];
+		readonly steeringNote?: string;
+	}
+>;
 
 const BOUND_SCHEMA: JsonSchema = {
 	type: "object",

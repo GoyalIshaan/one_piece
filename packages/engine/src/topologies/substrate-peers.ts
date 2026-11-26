@@ -43,28 +43,12 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 				Array.from({ length: peerCount }, (_, idx) => {
 					const seatCfg = opts.seatConfigs?.[idx];
 					const peerHandle = seatCfg?.handle ?? `peer-${idx + 1}`;
-					return os.spawnWorker({
-						role: peerSpawning ? "planner" : "worker",
+					const baseReq = {
 						handle: peerHandle,
 						subtreeId: peerHandle,
 						depth: 0,
-						canSpawn: peerSpawning,
 						deniedReadPaths: seatCfg?.deniedReadPaths,
 						cacheKeyPrefix: `${os.runId}:substrate-peer`,
-						toolScope: {
-							board: "read-write",
-							artifacts: true,
-							// On privately sharded tasks, a single 1/N seat cannot satisfy the full N-seat verifier;
-							// hide report_finding so peers don't waste turns retrying partial rejections before trunk assembly.
-							findings: !isSharded,
-							tasks: false,
-							nominate: false,
-							scheduler: "auto",
-							canSpawn: peerSpawning,
-							spawnAgents: peerSpawning,
-							subtreeId: peerHandle,
-							defaultPostVisibility: "global",
-						},
 						systemPrompt: [
 							"You are a peer engineer in a flat ScaleMAS substrate swarm working in an isolated git worktree.",
 							"Coordinate cleanly with peers using the 4 shared board tools:",
@@ -76,7 +60,32 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 								? "Cite useful peer post IDs via `parent_ids`, write ONLY your seat deliverable cleanly, and exit once verified — trunk assembly verifies the combined N-seat output."
 								: "Cite useful peer post IDs via `parent_ids`, avoid overwriting peers' files unnecessarily, and call `report_finding` when your worktree has a verified deliverable.",
 						].join("\n"),
-					});
+					};
+					const sharedScope = {
+						board: "read-write" as const,
+						artifacts: true,
+						// On privately sharded tasks, a single 1/N seat cannot satisfy the full N-seat verifier;
+						// hide report_finding so peers don't waste turns retrying partial rejections before trunk assembly.
+						findings: !isSharded,
+						tasks: false,
+						nominate: false,
+						scheduler: "auto" as const,
+						subtreeId: peerHandle,
+						defaultPostVisibility: "global" as const,
+					};
+					return peerSpawning
+						? os.spawnWorker({
+							...baseReq,
+							role: "planner",
+							canSpawn: true,
+							toolScope: { ...sharedScope, canSpawn: true, spawnAgents: true },
+						})
+						: os.spawnWorker({
+							...baseReq,
+							role: "worker",
+							canSpawn: false,
+							toolScope: { ...sharedScope, canSpawn: false, spawnAgents: false },
+						});
 				}),
 			);
 

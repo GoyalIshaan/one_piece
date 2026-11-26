@@ -1,4 +1,4 @@
-import type { QuotaErrorClass } from "./driver.ts";
+import type { DriverKind, QuotaErrorClass } from "./driver.ts";
 import {
 	type AgentRecord,
 	type AgentStatus,
@@ -6,6 +6,7 @@ import {
 	type BoardPost,
 	type ClaimedTaskRecord,
 	type EvidenceLevel,
+	type Exclusive,
 	type Finding,
 	type FindingSubmission,
 	type ProviderQuotaRecord,
@@ -344,4 +345,195 @@ export function transitionSupersedePost(target: BoardPost, replacementId: string
 	if (target.id === replacementId) return { ok: false, reason: "self_supersede" };
 	if (target.supersededBy) return { ok: false, reason: "already_superseded" };
 	return { ok: true, updated: { ...target, supersededBy: replacementId } };
+}
+
+// --- 7. BoardPost Epistemic Promotion State Machine ---
+// Invariant: A superseded draft can NEVER be promoted to global visibility, and an already-promoted post is idempotent.
+
+export type PromotedBoardPost = BoardPost & { readonly visibility: "global" };
+
+export type PromotePostOutcome = Exclusive<
+	| { readonly ok: true; readonly updated: PromotedBoardPost }
+	| { readonly ok: false; readonly reason: "already_superseded" | "already_promoted" }
+>;
+
+export function transitionPromotePost(
+	target: BoardPost,
+	opts: { labels?: Record<string, string> } = {},
+): PromotePostOutcome {
+	if (target.supersededBy) {
+		return { ok: false, reason: "already_superseded" };
+	}
+	if (target.visibility === "global" && target.labels?.["os:promoted"] === "true") {
+		return { ok: false, reason: "already_promoted" };
+	}
+	const nextLabels: Record<string, string> = {
+		...(target.labels ?? {}),
+		...(opts.labels ?? {}),
+		"os:promoted": "true",
+	};
+	return {
+		ok: true,
+		updated: {
+			...target,
+			visibility: "global",
+			labels: nextLabels,
+		},
+	};
+}
+
+// --- 8. Driver Slot Permit State Machine (Prevents double-release & unpark-after-release) ---
+// Invariant: `released` is terminal absorbing; illegal `{ released: true, parked: true }` is unrepresentable.
+
+export type SlotPermitState = "held" | "parked" | "released";
+export type SlotPermitEvent = "park" | "unpark" | "release";
+
+export interface SlotPermitTransition {
+	readonly next: SlotPermitState;
+	readonly runningDelta: -1 | 0 | 1;
+	readonly shouldDispatch: boolean;
+}
+
+export function transitionSlotPermit(current: SlotPermitState, event: SlotPermitEvent): SlotPermitTransition {
+	switch (current) {
+		case "held":
+			switch (event) {
+				case "park":
+					return { next: "parked", runningDelta: -1, shouldDispatch: true };
+				case "unpark":
+					return { next: "held", runningDelta: 0, shouldDispatch: false };
+				case "release":
+					return { next: "released", runningDelta: -1, shouldDispatch: true };
+				default:
+					return assertNever(event, "Unhandled SlotPermitEvent");
+			}
+		case "parked":
+			switch (event) {
+				case "park":
+					return { next: "parked", runningDelta: 0, shouldDispatch: false };
+				case "unpark":
+					return { next: "held", runningDelta: 1, shouldDispatch: false };
+				case "release":
+					return { next: "released", runningDelta: 0, shouldDispatch: true };
+				default:
+					return assertNever(event, "Unhandled SlotPermitEvent");
+			}
+		case "released":
+			return { next: "released", runningDelta: 0, shouldDispatch: false };
+		default:
+			return assertNever(current, "Unhandled SlotPermitState");
+	}
+}
+
+// --- 9. Monotonic Green-Trunk Ratchet State Machine ---
+// Invariant: `base` never carries a findingId/score; `accepted` always carries a concrete findingId and
+// NEVER downgrades back to `partial` or `base`.
+
+export type TrunkRatchetState = Exclusive<
+	| { readonly phase: "base"; readonly sha: string }
+	| { readonly phase: "partial"; readonly sha: string; readonly findingId: string; readonly score?: number }
+	| { readonly phase: "accepted"; readonly sha: string; readonly findingId: string; readonly score?: number }
+>;
+
+export function transitionTrunkRatchet(
+	current: TrunkRatchetState,
+	advance: { readonly sha: string; readonly finding: Finding },
+): TrunkRatchetState {
+	const nextScore =
+		typeof advance.finding.score === "number"
+			? Math.max(current.score ?? Number.NEGATIVE_INFINITY, advance.finding.score)
+			: current.score;
+
+	if (advance.finding.status === "accepted") {
+		return {
+			phase: "accepted",
+			sha: advance.sha,
+			findingId: advance.finding.id,
+			...(nextScore !== undefined ? { score: nextScore } : {}),
+		};
+	}
+
+	// Never downgrade an already-accepted trunk to partial!
+	if (current.phase === "accepted") {
+		return {
+			phase: "accepted",
+			sha: advance.sha,
+			findingId: current.findingId,
+			...(nextScore !== undefined ? { score: nextScore } : {}),
+		};
+	}
+
+	return {
+		phase: "partial",
+		sha: advance.sha,
+		findingId: advance.finding.id,
+		...(nextScore !== undefined ? { score: nextScore } : {}),
+	};
+}
+
+// --- 10. Physics Concurrency Governor Window State Machine ---
+// Invariant: `fixed` drivers NEVER carry or mutate AIMD window/streak counters.
+
+export type DriverWindowState = Exclusive<
+	| { readonly mode: "fixed"; readonly kind: DriverKind; readonly fixedLimit: number }
+	| {
+		readonly mode: "physics";
+		readonly kind: DriverKind;
+		readonly hardMax?: number;
+		readonly window: number;
+		readonly consecutiveSuccesses: number;
+	}
+>;
+
+export type DriverWindowEvent =
+	| { readonly type: "success"; readonly scaleUpAfter: number; readonly hostHasHeadroom: boolean }
+	| { readonly type: "rate_limit" };
+
+export function transitionDriverWindow(
+	current: DriverWindowState,
+	event: DriverWindowEvent,
+): { readonly next: DriverWindowState; readonly prevWindow: number; readonly nextWindow: number; readonly changed: boolean } {
+	if (current.mode === "fixed") {
+		return { next: current, prevWindow: current.fixedLimit, nextWindow: current.fixedLimit, changed: false };
+	}
+
+	switch (event.type) {
+		case "success": {
+			const nextStreak = current.consecutiveSuccesses + 1;
+			if (nextStreak < event.scaleUpAfter) {
+				return {
+					next: { ...current, consecutiveSuccesses: nextStreak },
+					prevWindow: current.window,
+					nextWindow: current.window,
+					changed: false,
+				};
+			}
+			const resetState: DriverWindowState = { ...current, consecutiveSuccesses: 0 };
+			if (!event.hostHasHeadroom) {
+				return { next: resetState, prevWindow: current.window, nextWindow: current.window, changed: false };
+			}
+			const nextRaw = current.window + 1;
+			const nextWindow = current.hardMax !== undefined ? Math.min(nextRaw, current.hardMax) : nextRaw;
+			if (nextWindow <= current.window) {
+				return { next: resetState, prevWindow: current.window, nextWindow: current.window, changed: false };
+			}
+			return {
+				next: { ...resetState, window: nextWindow },
+				prevWindow: current.window,
+				nextWindow,
+				changed: true,
+			};
+		}
+		case "rate_limit": {
+			const nextWindow = Math.max(1, Math.floor(current.window / 2));
+			return {
+				next: { ...current, window: nextWindow, consecutiveSuccesses: 0 },
+				prevWindow: current.window,
+				nextWindow,
+				changed: nextWindow !== current.window,
+			};
+		}
+		default:
+			return assertNever(event, "Unhandled DriverWindowEvent");
+	}
 }

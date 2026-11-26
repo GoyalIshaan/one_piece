@@ -9,7 +9,7 @@ export function assertNever(value: never, context = "Unexpected variant"): never
 	throw new Error(`${context}: ${JSON.stringify(value)}`);
 }
 
-export type Role = "planner" | "worker" | "explorer" | "integrator" | "reviewer" | "leaf" | "root" | (string & {});
+export type Role = "planner" | "worker" | "explorer" | "integrator" | "reviewer" | "leaf" | "root";
 
 export type TerminalAgentStatus = "done" | "stalled" | "failed" | "stopped";
 export type AgentStatus = "pending" | "running" | "parked" | TerminalAgentStatus;

@@ -17,6 +17,7 @@ import {
 	type EventBus,
 	newId,
 	type ToolDefinition,
+	transitionPromotePost,
 	transitionSupersedePost,
 } from "@one-piece/core";
 import {
@@ -411,17 +412,11 @@ export class SwarmBoardService implements BoardService {
 	promote(postId: string, input: { actorId: string; labels?: Record<string, string>; reason?: string }): BoardPost | undefined {
 		const existing = this.bus.store.get("posts", postId);
 		if (!existing) return undefined;
-		const nextLabels: Record<string, string> = {
-			...(existing.labels ?? {}),
-			...(input.labels ?? {}),
-			"os:promoted": "true",
-		};
-		const updated: BoardPost = {
-			...existing,
-			visibility: "global",
-			labels: nextLabels,
-		};
+		const outcome = transitionPromotePost(existing, { labels: input.labels });
+		if (!outcome.ok) return undefined;
+		const updated = outcome.updated;
 		this.bus.save("posts", updated, input.actorId);
+		const nextLabels = updated.labels ?? {};
 		const novelty = nextLabels["os:novelty"] !== undefined ? Number(nextLabels["os:novelty"]) : undefined;
 		const broadcastProb = nextLabels["os:broadcast_prob"] !== undefined ? Number(nextLabels["os:broadcast_prob"]) : undefined;
 		const crossoverProb = nextLabels["os:crossover_prob"] !== undefined ? Number(nextLabels["os:crossover_prob"]) : undefined;

@@ -4,22 +4,33 @@ import {
 	type BoardPost,
 	type BoardPostLabelResult,
 	type BoardWaitResult,
+	type CompletionPassResult,
+	type DriverWindowState,
 	type Finding,
 	type FindingSubmission,
+	type IntegrateBranchResult,
 	type MergeTrunkResult,
+	type PromotePostOutcome,
 	type ProviderQuotaRecord,
 	type Report,
 	type Run,
+	type SlotPermitState,
+	type SpawnWorkerRequest,
 	type TaskRecord,
 	type TopologyOutcome,
 	transitionAgentRecord,
 	transitionClaimTask,
+	transitionDriverWindow,
 	transitionFinding,
+	transitionPromotePost,
 	transitionQuotaRecord,
 	transitionReleaseTask,
 	transitionRenewTask,
 	transitionRun,
+	transitionSlotPermit,
 	transitionSupersedePost,
+	transitionTrunkRatchet,
+	type TrunkRatchetState,
 	type VerificationReceipt,
 	type WorkerTurnResult,
 } from "../src/index.ts";
@@ -256,6 +267,122 @@ describe("core state machines (runtime invariants + compile-time proofs)", () =>
 			expect(sup1.updated.supersededBy).toBe("post-2");
 			expect(transitionSupersedePost(sup1.updated, "post-3")).toEqual({ ok: false, reason: "already_superseded" });
 		}
+	});
+
+	it("enforces SlotPermit, TrunkRatchet, PromotePost, and DriverWindow state machine transitions", () => {
+		// 1. SlotPermitState: absorbing released state prevents double-release & unpark-after-release
+		let permit: SlotPermitState = "held";
+		const p1 = transitionSlotPermit(permit, "park");
+		expect(p1).toEqual({ next: "parked", runningDelta: -1, shouldDispatch: true });
+		permit = p1.next;
+
+		// Double park is a safe no-op
+		expect(transitionSlotPermit(permit, "park")).toEqual({ next: "parked", runningDelta: 0, shouldDispatch: false });
+
+		// Unpark restores slot
+		const p2 = transitionSlotPermit(permit, "unpark");
+		expect(p2).toEqual({ next: "held", runningDelta: 1, shouldDispatch: false });
+		permit = p2.next;
+
+		// Release from held transitions to absorbing released
+		const p3 = transitionSlotPermit(permit, "release");
+		expect(p3).toEqual({ next: "released", runningDelta: -1, shouldDispatch: true });
+		permit = p3.next;
+
+		// Late unpark/park/release after release are all safe zero-delta no-ops
+		expect(transitionSlotPermit(permit, "unpark")).toEqual({ next: "released", runningDelta: 0, shouldDispatch: false });
+		expect(transitionSlotPermit(permit, "park")).toEqual({ next: "released", runningDelta: 0, shouldDispatch: false });
+		expect(transitionSlotPermit(permit, "release")).toEqual({ next: "released", runningDelta: 0, shouldDispatch: false });
+
+		// Release directly from parked frees waiters without double-decrementing running count
+		expect(transitionSlotPermit("parked", "release")).toEqual({ next: "released", runningDelta: 0, shouldDispatch: true });
+
+		// 2. TrunkRatchetState: monotonic progression, accepted never downgrades to partial
+		const baseFinding: Finding = {
+			id: "fnd-part",
+			runId: "run-1",
+			authorAgentId: "agt-1",
+			claim: "partial",
+			summary: "partial",
+			evidence: [],
+			level: "empirical",
+			status: "needs_work",
+			score: 0.4,
+			submissions: [],
+			rounds: [],
+			buildsOn: [],
+			createdAt: 100,
+			updatedAt: 100,
+		};
+		const acceptedFinding: Finding = {
+			...baseFinding,
+			id: "fnd-acc",
+			status: "accepted",
+			score: 0.9,
+		};
+		const lowerFinding: Finding = {
+			...baseFinding,
+			id: "fnd-low",
+			status: "needs_work",
+			score: 0.2,
+		};
+
+		let ratchet: TrunkRatchetState = { phase: "base", sha: "sha-0" };
+		ratchet = transitionTrunkRatchet(ratchet, { sha: "sha-1", finding: baseFinding });
+		expect(ratchet).toEqual({ phase: "partial", sha: "sha-1", findingId: "fnd-part", score: 0.4 });
+
+		ratchet = transitionTrunkRatchet(ratchet, { sha: "sha-2", finding: acceptedFinding });
+		expect(ratchet).toEqual({ phase: "accepted", sha: "sha-2", findingId: "fnd-acc", score: 0.9 });
+
+		// Monotonic invariant: an accepted ratchet NEVER downgrades to partial or lowers score
+		ratchet = transitionTrunkRatchet(ratchet, { sha: "sha-3", finding: lowerFinding });
+		expect(ratchet).toEqual({ phase: "accepted", sha: "sha-3", findingId: "fnd-acc", score: 0.9 });
+
+		// 3. PromotePostOutcome: superseded posts cannot be promoted; already-promoted is idempotent
+		const draft: BoardPost = {
+			id: "post-a",
+			runId: "run-1",
+			topic: "insight",
+			visibility: "subtree",
+			subtreeId: "sub-1",
+			authorAgentId: "agt-1",
+			summary: "found invariant",
+			body: "details",
+			createdAt: 100,
+		};
+		const supPost: BoardPost = { ...draft, supersededBy: "post-b" };
+		expect(transitionPromotePost(supPost)).toEqual({ ok: false, reason: "already_superseded" });
+
+		const prom1 = transitionPromotePost(draft, { labels: { "os:novelty": "0.900" } });
+		expect(prom1.ok).toBe(true);
+		if (prom1.ok) {
+			expect(prom1.updated.visibility).toBe("global");
+			expect(prom1.updated.labels?.["os:promoted"]).toBe("true");
+			expect(transitionPromotePost(prom1.updated)).toEqual({ ok: false, reason: "already_promoted" });
+		}
+
+		// 4. DriverWindowState: fixed drivers ignore AIMD; physics drivers scale additively and halve on 429
+		const fixed: DriverWindowState = { mode: "fixed", kind: "pi-in-process", fixedLimit: 3 };
+		expect(transitionDriverWindow(fixed, { type: "rate_limit" })).toEqual({
+			next: fixed,
+			prevWindow: 3,
+			nextWindow: 3,
+			changed: false,
+		});
+
+		let dyn: DriverWindowState = { mode: "physics", kind: "codex-exec", hardMax: 8, window: 4, consecutiveSuccesses: 0 };
+		const s1 = transitionDriverWindow(dyn, { type: "success", scaleUpAfter: 2, hostHasHeadroom: true });
+		expect(s1.changed).toBe(false);
+		dyn = s1.next;
+
+		const s2 = transitionDriverWindow(dyn, { type: "success", scaleUpAfter: 2, hostHasHeadroom: true });
+		expect(s2.changed).toBe(true);
+		expect(s2.nextWindow).toBe(5);
+		dyn = s2.next;
+
+		const rl = transitionDriverWindow(dyn, { type: "rate_limit" });
+		expect(rl.changed).toBe(true);
+		expect(rl.nextWindow).toBe(2);
 	});
 
 	it("proves illegal states are unrepresentable at compile time", () => {
@@ -503,6 +630,80 @@ describe("core state machines (runtime invariants + compile-time proofs)", () =>
 		// @ts-expect-error TopologyOutcome nomination requires both nominatedFindingId and nominatedRevision
 		const _badTopoHalfNom: TopologyOutcome = { status: "done", summary: "ok", nominatedFindingId: "fnd-1" };
 
+		// 11. Two-role SpawnWorkerRequest compile-time invariant (workers can NEVER spawn)
+		// @ts-expect-error leaf worker forbids canSpawn: true
+		const _badWorkerCanSpawn: SpawnWorkerRequest = { role: "worker", canSpawn: true };
+		// @ts-expect-error leaf worker forbids toolScope.spawnAgents: true
+		const _badWorkerSpawnAgents: SpawnWorkerRequest = { role: "worker", toolScope: { spawnAgents: true } };
+
+		// 12. IntegrateBranchResult & CompletionPassResult impossible boolean combinations
+		// @ts-expect-error merged branch cannot simultaneously be rolledBack
+		const _badIntegrateMergedRollback: IntegrateBranchResult = {
+			outcome: "merged",
+			merged: true,
+			repaired: false,
+			rolledBack: true,
+			commitSha: "abc",
+			conflictFiles: [],
+			mergedBranches: ["b1"],
+		};
+		// @ts-expect-error merged branch requires commitSha
+		const _badIntegrateMergedNoSha: IntegrateBranchResult = {
+			outcome: "merged",
+			merged: true,
+			repaired: false,
+			rolledBack: false,
+			conflictFiles: [],
+			mergedBranches: ["b1"],
+		};
+		// @ts-expect-error conflict_unresolved requires non-empty conflictFiles tuple
+		const _badIntegrateEmptyConflict: IntegrateBranchResult = {
+			outcome: "conflict_unresolved",
+			merged: false,
+			repaired: false,
+			rolledBack: false,
+			conflictFiles: [],
+			mergedBranches: [],
+		};
+		// @ts-expect-error improved completion pass cannot be rolledBack and requires finding
+		const _badCompletionImprovedRollback: CompletionPassResult = {
+			outcome: "improved",
+			improved: true,
+			rolledBack: true,
+			accepted: true,
+			bestGreenSha: "abc",
+		};
+
+		// 13. TrunkRatchetState, DriverWindowState, and PromotePostOutcome invariants
+		// @ts-expect-error base ratchet forbids findingId
+		const _badRatchetBaseFinding: TrunkRatchetState = { phase: "base", sha: "abc", findingId: "fnd-1" };
+		// @ts-expect-error accepted ratchet requires findingId
+		const _badRatchetAcceptedNoId: TrunkRatchetState = { phase: "accepted", sha: "abc" };
+		// @ts-expect-error fixed driver window forbids AIMD window/consecutiveSuccesses
+		const _badWindowFixedAimd: DriverWindowState = {
+			mode: "fixed",
+			kind: "codex-exec",
+			fixedLimit: 2,
+			window: 4,
+			consecutiveSuccesses: 1,
+		};
+		const promotedSample: BoardPost & { readonly visibility: "global" } = {
+			id: "p1",
+			runId: "r1",
+			topic: "t",
+			visibility: "global",
+			authorAgentId: "a1",
+			summary: "s",
+			body: "b",
+			createdAt: 0,
+		};
+		// @ts-expect-error failed PromotePostOutcome forbids updated post
+		const _badPromoteFailUpdated: PromotePostOutcome = {
+			ok: false,
+			reason: "already_superseded",
+			updated: promotedSample,
+		};
+
 		// Silence unused-variable warnings while proving every type assertion compiled
 		expect([
 			_badQuotaCooldown,
@@ -530,6 +731,16 @@ describe("core state machines (runtime invariants + compile-time proofs)", () =>
 			_badLabelNotFound,
 			_badWaitMatchedEmpty,
 			_badTopoHalfNom,
+			_badWorkerCanSpawn,
+			_badWorkerSpawnAgents,
+			_badIntegrateMergedRollback,
+			_badIntegrateMergedNoSha,
+			_badIntegrateEmptyConflict,
+			_badCompletionImprovedRollback,
+			_badRatchetBaseFinding,
+			_badRatchetAcceptedNoId,
+			_badWindowFixedAimd,
+			_badPromoteFailUpdated,
 		]).toBeDefined();
 	});
 });

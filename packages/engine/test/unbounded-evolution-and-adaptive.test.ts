@@ -11,7 +11,7 @@ import {
 	type WorkerSpawnSpec,
 } from "@one-piece/core";
 import { DriverQuotaRouter, MockDecisionClient } from "@one-piece/drivers";
-import { adaptiveTopology, evolutionTopology, SwarmOS } from "../src/index.ts";
+import { adaptiveTopology, type CheckpointOutcome, evolutionTopology, SwarmOS } from "../src/index.ts";
 
 function initTempGitRepo(): string {
 	const dir = mkdtempSync(join(tmpdir(), "onepiece-v3-evo-"));
@@ -247,5 +247,18 @@ describe("v3 Unbounded Evolution, First-Principles Bound Analyst & Jev Adaptive 
 			rmSync(repo, { recursive: true, force: true });
 			rmSync(runDir, { recursive: true, force: true });
 		}
+	});
+
+	it("proves CheckpointOutcome illegal combinations are unrepresentable at compile time", () => {
+		// @ts-expect-error stopping requires an explicit trigger
+		const _badStopNoTrigger: CheckpointOutcome = { shouldStop: true, reason: "done" };
+		// @ts-expect-error stopping forbids steeringNote
+		const _badStopWithSteer: CheckpointOutcome = {
+			shouldStop: true,
+			trigger: "approaching_bound",
+			reason: "done",
+			steeringNote: "keep going",
+		};
+		expect([_badStopNoTrigger, _badStopWithSteer]).toBeDefined();
 	});
 });

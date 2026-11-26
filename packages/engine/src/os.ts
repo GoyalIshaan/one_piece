@@ -141,11 +141,10 @@ export class SwarmOS implements SwarmOsApi {
 	private readonly startedAt: number;
 	private readonly networkOffWorkers: boolean;
 	private readonly autoHandoffOnSecondCompaction: boolean;
-	private enableFieldGuide: boolean;
 	private readonly fieldGuideMaxLines: number;
-	private baseEnvProbe: string;
-	private fieldGuideWave = 0;
-	private frozenFieldGuideSnapshot = "";
+	private fieldGuideState:
+		| { readonly status: "disabled"; readonly cachedProbe?: string; readonly wave: number }
+		| { readonly status: "enabled"; readonly baseEnvProbe: string; readonly wave: number; readonly snapshot: string };
 	private readonly triggers: TriggerEngine;
 	private readonly closeout: CloseoutController;
 	private readonly spawnedChildren = new Map<
@@ -182,9 +181,16 @@ export class SwarmOS implements SwarmOsApi {
 	>();
 	private readonly workAbort = new AbortController();
 	private readonly closeoutAbort = new AbortController();
-	private wallReserveTimer?: ReturnType<typeof setTimeout>;
-	private wallHardTimer?: ReturnType<typeof setTimeout>;
-	private closeoutGraceTimer?: ReturnType<typeof setTimeout>;
+	private wallBudgetState:
+		| { readonly phase: "unbounded" }
+		| {
+			readonly phase: "active";
+			readonly reserveTimer: ReturnType<typeof setTimeout>;
+			readonly hardTimer: ReturnType<typeof setTimeout>;
+		}
+		| { readonly phase: "closeout_grace"; readonly graceTimer: ReturnType<typeof setTimeout> }
+		| { readonly phase: "expired" }
+		| { readonly phase: "disposed" } = { phase: "unbounded" };
 	private lifecycle:
 		| { readonly kind: "ready" }
 		| { readonly kind: "executing"; readonly topology: string }
@@ -211,17 +217,17 @@ export class SwarmOS implements SwarmOsApi {
 		this.startedAt = Date.now();
 		this.networkOffWorkers = cfg.networkOffWorkers ?? false;
 		this.autoHandoffOnSecondCompaction = cfg.autoHandoffOnSecondCompaction ?? true;
-		this.enableFieldGuide = cfg.enableFieldGuide ?? true;
 		this.fieldGuideMaxLines = cfg.fieldGuideMaxLines ?? DEFAULT_FIELD_GUIDE_MAX_LINES;
 		this.fieldGuidePath = join(this.runDir, "field-guide", "index.md");
 
 		this.worktrees = new GitWorktreeManager(cfg.workspace, this.runDir, this.runId);
-		this.baseEnvProbe = this.enableFieldGuide
-			? probeWorkspaceEnvironment(cfg.workspace, this.worktrees.baseSha)
-			: "";
-		if (this.enableFieldGuide) {
-			this.frozenFieldGuideSnapshot = enforceLineBudget(this.baseEnvProbe, this.fieldGuideMaxLines);
-			writeFieldGuideFile(this.fieldGuidePath, this.frozenFieldGuideSnapshot);
+		if (cfg.enableFieldGuide ?? true) {
+			const baseEnvProbe = probeWorkspaceEnvironment(cfg.workspace, this.worktrees.baseSha);
+			const snapshot = enforceLineBudget(baseEnvProbe, this.fieldGuideMaxLines);
+			writeFieldGuideFile(this.fieldGuidePath, snapshot);
+			this.fieldGuideState = { status: "enabled", baseEnvProbe, wave: 0, snapshot };
+		} else {
+			this.fieldGuideState = { status: "disabled", wave: 0 };
 		}
 		this.artifacts = new FileArtifactStore(this.runId, this.runDir, this.bus);
 		this.board = new SwarmBoardService(this.bus);
@@ -312,7 +318,8 @@ export class SwarmOS implements SwarmOsApi {
 		this.triggers.start();
 		if (this.wallSeconds && this.wallSeconds > 0) {
 			const reserveMs = Math.max(1_000, Math.floor(this.wallSeconds * (1 - this.reservePct) * 1000));
-			this.wallReserveTimer = setTimeout(() => {
+			const reserveTimer = setTimeout(() => {
+				if (this.wallBudgetState.phase !== "active") return;
 				const { next, changed } = transitionRun(this.currentRun, { type: "enter_closing", reason: "Wall-clock reserve reached", now: Date.now() });
 				if (changed) {
 					this.currentRun = next;
@@ -320,25 +327,33 @@ export class SwarmOS implements SwarmOsApi {
 					this.bus.emit(this.runId, "run.closing", { reason: "Wall-clock reserve reached", reservePct: this.reservePct });
 				}
 			}, reserveMs);
-			this.wallReserveTimer.unref?.();
+			reserveTimer.unref?.();
 
 			// Hard wall-clock cutoff: abort active LLM turns via workAbort, while keeping closeoutAbort
 			// alive for a bounded non-preemptible grace window so mechanical assembly & verification succeed.
 			const hardMs = Math.max(reserveMs + 1_000, Math.ceil(this.wallSeconds * 1000));
-			this.wallHardTimer = setTimeout(() => {
+			const hardTimer = setTimeout(() => {
+				if (this.wallBudgetState.phase !== "active") return;
+				clearTimeout(this.wallBudgetState.reserveTimer);
 				if (!this.workAbort.signal.aborted) {
 					this.workAbort.abort(new Error(`Wall-clock limit (${this.wallSeconds}s) exceeded`));
 				}
-				if (!this.closeoutAbort.signal.aborted && !this.closeoutGraceTimer) {
-					this.closeoutGraceTimer = setTimeout(() => {
+				if (!this.closeoutAbort.signal.aborted) {
+					const graceTimer = setTimeout(() => {
+						if (this.wallBudgetState.phase !== "closeout_grace") return;
+						this.wallBudgetState = { phase: "expired" };
 						if (!this.closeoutAbort.signal.aborted) {
 							this.closeoutAbort.abort(new Error(`Closeout grace (${this.closeoutGraceMs}ms) exceeded`));
 						}
 					}, Math.max(1_000, this.closeoutGraceMs));
-					this.closeoutGraceTimer.unref?.();
+					graceTimer.unref?.();
+					this.wallBudgetState = { phase: "closeout_grace", graceTimer };
+				} else {
+					this.wallBudgetState = { phase: "expired" };
 				}
 			}, hardMs);
-			this.wallHardTimer.unref?.();
+			hardTimer.unref?.();
+			this.wallBudgetState = { phase: "active", reserveTimer, hardTimer };
 		}
 	}
 
@@ -446,30 +461,49 @@ export class SwarmOS implements SwarmOsApi {
 	}
 
 	fieldGuideSnapshot(): string {
-		return this.enableFieldGuide ? this.frozenFieldGuideSnapshot : "";
+		return this.fieldGuideState.status === "enabled" ? this.fieldGuideState.snapshot : "";
 	}
 
 	setFieldGuideEnabled(enabled: boolean): void {
-		this.enableFieldGuide = enabled;
-		if (enabled && !this.baseEnvProbe) {
-			this.baseEnvProbe = probeWorkspaceEnvironment(this.worktrees.repoRoot, this.worktrees.baseSha);
-			this.frozenFieldGuideSnapshot = enforceLineBudget(this.baseEnvProbe, this.fieldGuideMaxLines);
-			writeFieldGuideFile(this.fieldGuidePath, this.frozenFieldGuideSnapshot);
+		if (!enabled) {
+			if (this.fieldGuideState.status === "enabled") {
+				this.fieldGuideState = {
+					status: "disabled",
+					cachedProbe: this.fieldGuideState.baseEnvProbe,
+					wave: this.fieldGuideState.wave,
+				};
+			}
+			return;
+		}
+		if (this.fieldGuideState.status === "disabled") {
+			const baseEnvProbe =
+				this.fieldGuideState.cachedProbe ??
+				probeWorkspaceEnvironment(this.worktrees.repoRoot, this.worktrees.baseSha);
+			const snapshot = enforceLineBudget(baseEnvProbe, this.fieldGuideMaxLines);
+			writeFieldGuideFile(this.fieldGuidePath, snapshot);
+			this.fieldGuideState = {
+				status: "enabled",
+				baseEnvProbe,
+				wave: this.fieldGuideState.wave,
+				snapshot,
+			};
 		}
 	}
 
 	async consolidateFieldGuide(opts: { mode?: "deterministic" | "llm" } = {}): Promise<{ lines: number; bytes: number; path: string }> {
-		if (!this.enableFieldGuide) {
+		if (this.fieldGuideState.status === "disabled") {
 			return { lines: 0, bytes: 0, path: this.fieldGuidePath };
 		}
-		this.fieldGuideWave += 1;
+		const baseEnvProbe = this.fieldGuideState.baseEnvProbe;
+		const nextWave = this.fieldGuideState.wave + 1;
+		this.fieldGuideState = { ...this.fieldGuideState, wave: nextWave };
 		const mode = opts.mode ?? "deterministic";
 		let markdown = buildDeterministicFieldGuide({
 			runId: this.runId,
 			runDir: this.runDir,
-			baseProbe: this.baseEnvProbe,
+			baseProbe: baseEnvProbe,
 			store: this.store,
-			wave: this.fieldGuideWave,
+			wave: nextWave,
 			maxLines: this.fieldGuideMaxLines,
 		});
 
@@ -501,7 +535,7 @@ export class SwarmOS implements SwarmOsApi {
 					].join("\n"),
 				});
 				try {
-					const res = await consolidator.runTurn(`Draft Field Guide (Wave ${this.fieldGuideWave}):\n\n${markdown}`, {
+					const res = await consolidator.runTurn(`Draft Field Guide (Wave ${nextWave}):\n\n${markdown}`, {
 						signal: this.workAbort.signal,
 					});
 					if (res.status === "completed" && res.finalText.trim().length > 20) {
@@ -515,7 +549,14 @@ export class SwarmOS implements SwarmOsApi {
 			}
 		}
 
-		this.frozenFieldGuideSnapshot = markdown;
+		if (this.fieldGuideState.status === "enabled") {
+			this.fieldGuideState = {
+				status: "enabled",
+				baseEnvProbe,
+				wave: nextWave,
+				snapshot: markdown,
+			};
+		}
 		const { lines, bytes } = writeFieldGuideFile(this.fieldGuidePath, markdown);
 		// Mirror to active worktrees on disk (without mutating live workers' KV system prompts).
 		for (const active of this.activeHandles.values()) {
@@ -526,7 +567,7 @@ export class SwarmOS implements SwarmOsApi {
 			bytes,
 			mode,
 			path: this.fieldGuidePath,
-			wave: this.fieldGuideWave,
+			wave: nextWave,
 		});
 		return { lines, bytes, path: this.fieldGuidePath };
 	}
@@ -806,46 +847,65 @@ export class SwarmOS implements SwarmOsApi {
 							const childSubtree = childRole === "planner" ? `${parentSubtree}/${childHandle}` : parentSubtree;
 
 							const childAbort = new AbortController();
-							let liveHandle: WorkerHandle | undefined;
+							type SpawnedChildPhase =
+								| { readonly status: "spawning"; readonly cancelRequested: boolean; readonly pendingSteers: string[] }
+								| { readonly status: "running"; readonly handle: WorkerHandle }
+								| { readonly status: "settled" };
+							let childPhase: SpawnedChildPhase = { status: "spawning", cancelRequested: false, pendingSteers: [] };
 							const childIdPlaceholder = newId("agt");
 							let resolvedAgentId = childIdPlaceholder;
 
 							const childPromise = (async () => {
-								const child = await this.spawnWorker({
-									role: childRole,
+								const sharedChildReq = {
 									handle: childHandle,
 									parentAgentId: ctx.agentId,
 									subtreeId: childSubtree,
 									depth: parentDepth + 1,
 									baseRef,
-									canSpawn: childRole === "planner",
 									passiveSnapshotOnExit: true,
 									cacheKeyPrefix: `${this.runId}:recursive-${childRole}`,
-									toolScope: {
-										board: "read-write",
-										artifacts: true,
-										findings: true,
-										tasks: false,
-										nominate: false,
-										scheduler: "auto",
-										canSpawn: childRole === "planner",
-										spawnAgents: childRole === "planner",
-										passiveSnapshotOnExit: true,
-										subtreeId: childSubtree,
-										defaultPostVisibility: childRole === "planner" ? "global" : "subtree",
-									},
-									systemPrompt:
-										childRole === "planner"
-											? [
-												"You are a recursive Planner managing a search subtree in an isolated git worktree.",
-												"You may solve directly, spawn parallel or sequential child Planners/Workers via `spawn_agents` + `await_agents`, and publish discoveries/hypotheses/dead-ends to Board v2 (`board_publish`) so sibling Planners learn from your branch.",
-											].join("\n")
-											: [
-												"You are a focused leaf Worker in an isolated git worktree (cannot spawn sub-agents).",
-												"Implement and verify your assigned task cleanly, and publish key discoveries, counterexamples, or dead-ends via `board_publish(kind=...)`.",
-											].join("\n"),
-								});
-								liveHandle = child;
+								};
+								const sharedChildScope = {
+									board: "read-write" as const,
+									artifacts: true,
+									findings: true,
+									tasks: false,
+									nominate: false,
+									scheduler: "auto" as const,
+									passiveSnapshotOnExit: true,
+									subtreeId: childSubtree,
+								};
+								const child = childRole === "planner"
+									? await this.spawnWorker({
+										...sharedChildReq,
+										role: "planner",
+										canSpawn: true,
+										toolScope: {
+											...sharedChildScope,
+											canSpawn: true,
+											spawnAgents: true,
+											defaultPostVisibility: "global",
+										},
+										systemPrompt: [
+											"You are a recursive Planner managing a search subtree in an isolated git worktree.",
+											"You may solve directly, spawn parallel or sequential child Planners/Workers via `spawn_agents` + `await_agents`, and publish discoveries/hypotheses/dead-ends to Board v2 (`board_publish`) so sibling Planners learn from your branch.",
+										].join("\n"),
+									})
+									: await this.spawnWorker({
+										...sharedChildReq,
+										role: "worker",
+										canSpawn: false,
+										toolScope: {
+											...sharedChildScope,
+											canSpawn: false,
+											spawnAgents: false,
+											defaultPostVisibility: "subtree",
+										},
+										systemPrompt: [
+											"You are a focused leaf Worker in an isolated git worktree (cannot spawn sub-agents).",
+											"Implement and verify your assigned task cleanly, and publish key discoveries, counterexamples, or dead-ends via `board_publish(kind=...)`.",
+										].join("\n"),
+									});
 								resolvedAgentId = child.agent.id;
 								const entry = this.spawnedChildren.get(childIdPlaceholder);
 								if (entry && resolvedAgentId !== childIdPlaceholder) {
@@ -854,9 +914,24 @@ export class SwarmOS implements SwarmOsApi {
 									this.spawnedChildren.delete(childIdPlaceholder);
 								}
 								try {
+									if ((childPhase.status === "spawning" && childPhase.cancelRequested) || childAbort.signal.aborted) {
+										return {
+											agentId: child.agent.id,
+											handle: child.agent.handle,
+											role: childRole,
+											status: "interrupted",
+											branch: child.branch,
+											summary: `Child ${child.agent.handle} cancelled before first turn.`,
+										};
+									}
+									const queuedSteers = childPhase.status === "spawning" ? childPhase.pendingSteers : [];
+									childPhase = { status: "running", handle: child };
 									const pulse = this.board.digest(this.runId, { subtreeId: childSubtree });
 									const pathHint = ownedPaths.length ? `\nOwned paths: ${ownedPaths.join(", ")}` : "";
-									const fullPrompt = `${pulse}\n\n${childPrompt}${pathHint}`;
+									const steerHint = queuedSteers.length
+										? `\n\nParent steering updates received before start:\n${queuedSteers.map((s) => `- ${s}`).join("\n")}`
+										: "";
+									const fullPrompt = `${pulse}\n\n${childPrompt}${pathHint}${steerHint}`;
 									const combined = AbortSignal.any([this.workAbort.signal, childAbort.signal]);
 									const turnRes = await child.runTurn(fullPrompt, { signal: combined });
 									const wipSha = turnRes.workspaceSnapshot?.wipSha ?? this.worktrees.commitWip(child.workspace, `${child.agent.handle}: child work`);
@@ -885,6 +960,7 @@ export class SwarmOS implements SwarmOsApi {
 										summary: err instanceof Error ? err.message : String(err),
 									};
 								} finally {
+									childPhase = { status: "settled" };
 									await child.close().catch(() => {});
 								}
 							})();
@@ -897,11 +973,34 @@ export class SwarmOS implements SwarmOsApi {
 								subtreeId: childSubtree,
 								promise: childPromise,
 								cancel: () => {
-									childAbort.abort(new Error(`Cancelled by parent ${ctx.agentId}`));
-									void liveHandle?.interrupt?.().catch(() => {});
+									switch (childPhase.status) {
+										case "spawning":
+											childPhase = { status: "spawning", cancelRequested: true, pendingSteers: [] };
+											childAbort.abort(new Error(`Cancelled by parent ${ctx.agentId}`));
+											break;
+										case "running":
+											childAbort.abort(new Error(`Cancelled by parent ${ctx.agentId}`));
+											void childPhase.handle.interrupt?.().catch(() => {});
+											break;
+										case "settled":
+											break;
+										default:
+											assertNever(childPhase, "Unhandled SpawnedChildPhase");
+									}
 								},
 								steer: async (msg: string) => {
-									await liveHandle?.steer?.(msg);
+									switch (childPhase.status) {
+										case "spawning":
+											if (!childPhase.cancelRequested) childPhase.pendingSteers.push(msg);
+											break;
+										case "running":
+											await childPhase.handle.steer?.(msg);
+											break;
+										case "settled":
+											break;
+										default:
+											assertNever(childPhase, "Unhandled SpawnedChildPhase");
+									}
 								},
 							});
 							spawnedMeta.push({ agentId: childIdPlaceholder, role: childRole, handle: childHandle, subtreeId: childSubtree });
@@ -1117,8 +1216,8 @@ export class SwarmOS implements SwarmOsApi {
 					artifacts: this.artifacts,
 					readOnly: opts.readOnly,
 					networkOff: this.networkOffWorkers,
-					deniedReadPaths: (opts as ToolScope & { deniedReadPaths?: readonly string[] }).deniedReadPaths ?? this.runDeniedReadPaths,
-					editFormat: (opts as ToolScope & { editFormat?: "search_replace" | "apply_patch" }).editFormat,
+					deniedReadPaths: opts.deniedReadPaths ?? this.runDeniedReadPaths,
+					editFormat: opts.editFormat,
 				}),
 			);
 		}
@@ -1177,14 +1276,14 @@ export class SwarmOS implements SwarmOsApi {
 					deniedReadPaths: effectiveDeniedReadPaths,
 					includeWorkspaceTools: req.toolScope?.includeWorkspaceTools ?? driverKind === "pi-in-process",
 					...(driverKind === "pi-in-process" && isOpenAiEditModel(modelHint) ? { editFormat: "apply_patch" as const } : {}),
-				} as ToolScope);
+				});
 		};
 
 		if (req.toolScope?.extendedTools?.length) {
 			materializeToolSchemas(workspace, req.toolScope.extendedTools);
 		}
-		if (this.enableFieldGuide && this.frozenFieldGuideSnapshot && !req.readOnly && req.role !== "reviewer") {
-			mirrorFieldGuideToWorktree(workspace, this.frozenFieldGuideSnapshot);
+		if (this.fieldGuideState.status === "enabled" && this.fieldGuideState.snapshot && !req.readOnly && req.role !== "reviewer") {
+			mirrorFieldGuideToWorktree(workspace, this.fieldGuideState.snapshot);
 		}
 
 		const staticSkills = this.skills.staticPromptFor(req.role, req.skills);
@@ -1196,8 +1295,8 @@ export class SwarmOS implements SwarmOsApi {
 			: "";
 		// Inject immutable KV-cache-safe wave Field Guide snapshot for non-reviewer roles (never leaks generator state to blind reviewers).
 		const fieldGuideBlock =
-			this.enableFieldGuide && this.frozenFieldGuideSnapshot && req.role !== "reviewer" && req.handle !== "dreamer"
-				? this.frozenFieldGuideSnapshot.trim()
+			this.fieldGuideState.status === "enabled" && this.fieldGuideState.snapshot && req.role !== "reviewer" && req.handle !== "dreamer"
+				? this.fieldGuideState.snapshot.trim()
 				: "";
 		const composedSystemPrompt = [req.systemPrompt, fieldGuideBlock, staticSkills, onDemandCatalog, extendedToolsHint]
 			.filter((s): s is string => Boolean(s && s.trim()))
@@ -1975,12 +2074,29 @@ export class SwarmOS implements SwarmOsApi {
 		};
 	}
 
+	private clearWallBudgetTimers(): void {
+		switch (this.wallBudgetState.phase) {
+			case "active":
+				clearTimeout(this.wallBudgetState.reserveTimer);
+				clearTimeout(this.wallBudgetState.hardTimer);
+				break;
+			case "closeout_grace":
+				clearTimeout(this.wallBudgetState.graceTimer);
+				break;
+			case "unbounded":
+			case "expired":
+			case "disposed":
+				break;
+			default:
+				assertNever(this.wallBudgetState, "Unhandled wallBudgetState");
+		}
+		this.wallBudgetState = { phase: "disposed" };
+	}
+
 	async dispose(): Promise<void> {
 		if (this.lifecycle.kind === "disposed") return;
 		this.lifecycle = { kind: "disposed" };
-		if (this.wallReserveTimer) clearTimeout(this.wallReserveTimer);
-		if (this.wallHardTimer) clearTimeout(this.wallHardTimer);
-		if (this.closeoutGraceTimer) clearTimeout(this.closeoutGraceTimer);
+		this.clearWallBudgetTimers();
 		this.triggers.stop();
 		this.workAbort.abort();
 		this.closeoutAbort.abort();

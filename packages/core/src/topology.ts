@@ -263,10 +263,18 @@ export interface ToolScope {
 	extendedTools?: ToolDefinition[];
 	/** Include local workspace tools (automatically true for `pi-in-process`). */
 	includeWorkspaceTools?: boolean;
+	/** OS-injected Seatbelt read-deny paths propagated into workspace tools. */
+	deniedReadPaths?: readonly string[];
+	/** Preferred edit tool format for in-process drivers. */
+	editFormat?: "search_replace" | "apply_patch";
 }
 
-export interface SpawnWorkerRequest {
-	role: Role;
+export type WorkerToolScope = Omit<ToolScope, "canSpawn" | "spawnAgents"> & {
+	readonly canSpawn?: false;
+	readonly spawnAgents?: false;
+};
+
+interface SpawnWorkerRequestBase {
 	/** Optional OS-assigned readable handle (e.g. "peer-1", "integrator") shown on board posts. */
 	handle?: string;
 	taskId?: string;
@@ -301,15 +309,29 @@ export interface SpawnWorkerRequest {
 	maxTurns?: number;
 	/** Explicit tool menu exposed to this worker via MCP / in-process bridge. */
 	tools?: ToolDefinition[];
-	/** Declarative topology/role tool scoping (preferred over full 12-tool default menu). */
-	toolScope?: ToolScope;
 	/** Explicit curated skill names to pre-bind into this worker's static prompt. */
 	skills?: string[];
 	/** Stable KV prompt cache key shared across sibling workers of the same role. */
 	cacheKeyPrefix?: string;
-	/** Explicitly opt into async recursive spawning (default false to prevent Double-Harness Collision). */
-	canSpawn?: boolean;
 }
+
+/**
+ * Compile-time two-role spawn permission invariant:
+ * - `role: "worker"` CANNOT set `canSpawn: true` or `toolScope.spawnAgents: true`!
+ * - Non-worker roles (e.g. `"planner"`, `"root"`) may opt into recursive spawning.
+ */
+export type SpawnWorkerRequest = SpawnWorkerRequestBase & (
+	| {
+		readonly role: "worker";
+		readonly canSpawn?: false;
+		readonly toolScope?: WorkerToolScope;
+	}
+	| {
+		readonly role: Exclude<Role, "worker">;
+		readonly canSpawn?: boolean;
+		readonly toolScope?: ToolScope;
+	}
+);
 
 export interface WorkerHandle {
 	readonly agent: AgentRecord;
@@ -351,15 +373,46 @@ export interface IntegrateBranchInput {
 	readonly closeoutSignal?: AbortSignal;
 }
 
-export interface IntegrateBranchResult {
-	readonly merged: boolean;
-	readonly repaired: boolean;
-	readonly rolledBack: boolean;
-	readonly commitSha?: string;
-	readonly conflictFiles: readonly string[];
-	readonly finding?: Finding;
-	readonly mergedBranches: readonly string[];
-}
+export type IntegrateBranchResult = Exclusive<
+	| {
+		readonly outcome: "merged";
+		readonly merged: true;
+		readonly repaired: boolean;
+		readonly rolledBack: false;
+		readonly commitSha: string;
+		readonly conflictFiles: readonly string[];
+		readonly finding?: Finding;
+		readonly mergedBranches: readonly string[];
+	}
+	| {
+		readonly outcome: "rolled_back";
+		readonly merged: false;
+		readonly repaired: false;
+		readonly rolledBack: true;
+		readonly conflictFiles: readonly string[];
+		readonly finding?: Finding;
+		readonly mergedBranches: readonly [];
+	}
+	| {
+		readonly outcome: "conflict_unresolved";
+		readonly merged: false;
+		readonly repaired: false;
+		readonly rolledBack: false;
+		readonly conflictFiles: readonly [string, ...string[]];
+		readonly finding?: Finding;
+		readonly mergedBranches: readonly [];
+	}
+	| {
+		readonly outcome: "failed";
+		readonly merged: false;
+		readonly repaired: false;
+		readonly rolledBack: false;
+		readonly reason: string;
+		readonly conflictFiles: readonly string[];
+		readonly finding?: Finding;
+		readonly mergedBranches: readonly [];
+	}
+>;
 
 export interface AssembleBranchesInput {
 	readonly branches: readonly IntegrationBranchCandidate[];
@@ -398,13 +451,32 @@ export interface CompletionPassInput {
 	readonly closeoutSignal?: AbortSignal;
 }
 
-export interface CompletionPassResult {
-	readonly improved: boolean;
-	readonly rolledBack: boolean;
-	readonly accepted: boolean;
-	readonly bestGreenSha: string;
-	readonly finding?: Finding;
-}
+export type CompletionPassResult = Exclusive<
+	| {
+		readonly outcome: "improved";
+		readonly improved: true;
+		readonly rolledBack: false;
+		readonly accepted: boolean;
+		readonly bestGreenSha: string;
+		readonly finding: Finding;
+	}
+	| {
+		readonly outcome: "rolled_back";
+		readonly improved: false;
+		readonly rolledBack: true;
+		readonly accepted: boolean;
+		readonly bestGreenSha: string;
+		readonly finding?: Finding;
+	}
+	| {
+		readonly outcome: "unchanged";
+		readonly improved: false;
+		readonly rolledBack: false;
+		readonly accepted: boolean;
+		readonly bestGreenSha: string;
+		readonly finding?: Finding;
+	}
+>;
 
 export interface IntegrationService {
 	readonly bestGreenSha: string;
