@@ -795,4 +795,76 @@ describe("RSI Harness Upgrades: Field Guide, Semantic Auto-Repair, Fail-Closed T
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	it("invokes elastic-phase Phase-4 integrator to complete unmerged lanes even when public smoke test passes (RSI-9)", async () => {
+		const root = mkdtempSync(join(tmpdir(), "rsi9-missing-lanes-"));
+		try {
+			const seed = join(root, "seed");
+			mkdirSync(seed, { recursive: true });
+			writeFileSync(join(seed, "lane1.txt"), "todo\n");
+			writeFileSync(join(seed, "lane2.txt"), "todo\n");
+
+			let integratorPrompt = "";
+			const drv = new MockDriver("rsi9-drv", async (spec, prompt) => {
+				if (spec.role === "planner") {
+					return {
+						status: "completed",
+						finalText: JSON.stringify({
+							lanes: [
+								{ title: "Lane 1", description: "Write L1 to lane1.txt", owned_paths: ["lane1.txt"], cross_contracts: [] },
+								{ title: "Lane 2", description: "Write L2 to lane2.txt", owned_paths: ["lane2.txt"], cross_contracts: [] },
+							],
+						}),
+					};
+				}
+				if (spec.role === "integrator") {
+					integratorPrompt = prompt;
+					writeFileSync(join(spec.workspace, "lane2.txt"), "L2\n");
+					return { status: "completed", finalText: "completed missing lane 2" };
+				}
+				if (prompt.includes("Lane 1/2")) {
+					writeFileSync(join(spec.workspace, "lane1.txt"), "L1\n");
+					return { status: "completed", finalText: "done L1" };
+				}
+				// Lane 2 stalls with ZERO edits!
+				return { status: "interrupted", finalText: "" };
+			});
+
+			const store = new SqliteStore(join(root, "rsi9.db"));
+			const os = await SwarmOS.create({
+				runDir: join(root, "run"),
+				workspace: seed,
+				topology: "elastic-phase",
+				goal: { title: "Missing lane completion", text: "Write L1 and L2" },
+				// Public smoke test only checks lane1.txt (simulating lightweight smoke tests on benchmarks!)
+				verifier: {
+					name: "smoke",
+					version: "1.0.0",
+					scopes: ["deliverable"],
+					defaultScope: "deliverable",
+					async check({ workspace }) {
+						const ok = readFileSync(join(workspace, "lane1.txt"), "utf8").trim() === "L1";
+						return { status: ok ? "passed" : "failed", score: ok ? 1 : 0, message: ok ? "smoke passed" : "smoke failed" };
+					},
+				},
+				store,
+				router: new DriverQuotaRouter({
+					drivers: [{ driver: drv, config: { id: "rsi9-drv", kind: "codex-exec", maxConcurrent: 4 } }],
+					roles: { default: ["rsi9-drv"] },
+				}),
+			});
+			try {
+				await os.execute(createTopology("elastic-phase", { peers: 2, enableSemanticRepair: true }));
+				expect(integratorPrompt).toContain("Unmerged/missing planned lanes");
+				expect(integratorPrompt).toContain("Lane 2");
+				expect(readFileSync(join(os.worktrees.trunkPath, "lane1.txt"), "utf8").trim()).toBe("L1");
+				expect(readFileSync(join(os.worktrees.trunkPath, "lane2.txt"), "utf8").trim()).toBe("L2");
+			} finally {
+				await os.dispose();
+				store.close();
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
 });

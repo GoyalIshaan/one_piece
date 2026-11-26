@@ -182,6 +182,7 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 
 			const peerBranches: Array<{
 				handle: string;
+				laneIdx: number;
 				agentId: string;
 				driverId: string;
 				branch?: string;
@@ -292,6 +293,7 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 						if (hasCommits) {
 							peerBranches.push({
 								handle: worker.agent.handle,
+								laneIdx: idx,
 								agentId: worker.agent.id,
 								driverId: worker.agent.driverId,
 								branch: worker.branch,
@@ -332,6 +334,7 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 					reason: `Assembling ${peerBranches.length} committed branches onto isolated trunk`,
 				});
 
+				const mergedLaneIndices = new Set<number>();
 				const ordered = [...peerBranches].sort((a, b) => b.accepted - a.accepted || b.bestScore - a.bestScore);
 				for (const cand of ordered) {
 					if (!cand.branch) continue;
@@ -341,6 +344,7 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 					if (merged.ok) {
 						lastTrunkSha = merged.commitSha;
 						mergedCount += 1;
+						mergedLaneIndices.add(cand.laneIdx);
 						continue;
 					}
 					conflictCount += 1;
@@ -391,6 +395,7 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 								if (resMerge.ok) {
 									lastTrunkSha = resMerge.commitSha;
 									mergedCount += 1;
+									mergedLaneIndices.add(cand.laneIdx);
 									resolvedConflicts += 1;
 									os.bus.emit(os.runId, "peer.conflict_resolved", {
 										peerHandle: cand.handle,
@@ -420,9 +425,22 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 						verifySig,
 					);
 
-					// Semantic Integration Auto-Repair if verifier rejects assembled trunk OR cross-contract polish needed.
-					if (enableSemanticRepair && os.trust.verifier && trunkFinding.status !== "accepted" && !signal.aborted) {
-						const failReason = trunkFinding.rounds.at(-1)?.message ?? "Executable verifier rejected assembled trunk";
+					// Phase-4 Narrow Single-Writer Integration & Semantic Repair:
+					// Trigger if verifier rejects assembled trunk OR if planned parallel lanes failed to land
+					// (e.g. straggler workers left missing lanes even when lightweight public smoke tests passed!).
+					const missingLanes = !hasSeatConfigs
+						? lanes
+							.map((lane, idx) => ({ lane, idx }))
+							.filter(({ idx }) => !mergedLaneIndices.has(idx))
+						: [];
+					const needsRepairOrCompletion =
+						trunkFinding.status !== "accepted" || missingLanes.length > 0;
+
+					if (enableSemanticRepair && os.trust.verifier && needsRepairOrCompletion && !signal.aborted) {
+						const failReason =
+							trunkFinding.status !== "accepted"
+								? (trunkFinding.rounds.at(-1)?.message ?? "Executable verifier rejected assembled trunk")
+								: `${missingLanes.length}/${lanes.length} planned lanes did not land on trunk: ${missingLanes.map((m) => `lane-${m.idx + 1} (${m.lane.title})`).join(", ")}`;
 						if (enableDreaming) await os.consolidateFieldGuide?.();
 						const repairer = await os.spawnWorker({
 							role: "integrator",
@@ -442,44 +460,57 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 							},
 							systemPrompt: [
 								"You are the single-writer Integrator in Phase 4 (Narrow Integration & Semantic Repair).",
-								"All exploration lanes have been merged onto your workspace, but executable verification reported a failure (often cross-module semantic interference).",
-								"Inspect the failure carefully, fix the root cross-module interaction cleanly without reverting lane features, run tests, and exit.",
+								"Committed exploration lanes have been merged onto your workspace. Complete any missing/unmerged lanes and fix any cross-module semantic interference without reverting landed lane features, verify tests, and exit.",
 							].join("\n"),
 						});
 						let repaired = false;
 						let repairedSha: string | undefined;
 						try {
+							const missingBlock = missingLanes.length
+								? `Unmerged/missing planned lanes that STILL need implementation:\n${missingLanes.map((m) => `- lane-${m.idx + 1}: ${m.lane.title} — ${m.lane.description}`).join("\n")}`
+								: "";
 							const repairPrompt = [
 								`Goal: ${goal}`,
 								rubric ? `Rubric: ${rubric}` : "",
-								`Assembled trunk verifier failure:\n${failReason}`,
+								trunkFinding.status !== "accepted" ? `Assembled trunk verifier failure:\n${failReason}` : "",
+								missingBlock,
 								`Merged lanes:\n${peerBranches.map((b) => `- ${b.handle}: ${b.summary.slice(0, 180)}`).join("\n")}`,
-								"Fix the integration / semantic interference bug cleanly, run all tests, and leave the workspace ready to commit.",
+								"Complete all remaining requirements cleanly, resolve any cross-module semantic bugs, run tests, and leave the workspace ready to commit.",
 							].filter(Boolean).join("\n\n");
 							const repRes = await repairer.runTurn(repairPrompt, { signal });
 							const repWip = os.worktrees.commitWip(repairer.workspace, "elastic: semantic integration repair");
 							const repHead = os.worktrees.headSha(repairer.workspace);
-							if (repRes.status === "completed" && repairer.branch && (repWip || (repHead && repHead !== lastTrunkSha))) {
+							const repMadeChanges = Boolean(repWip) || (Boolean(repHead) && repHead !== lastTrunkSha);
+							if ((repRes.status === "completed" || repRes.status === "interrupted") && repairer.branch && repMadeChanges) {
+								const prevSha = lastTrunkSha;
+								const prevAccepted = trunkFinding.status === "accepted";
 								const repMerge = os.worktrees.mergeIntoTrunk(repairer.branch, {
 									message: "elastic: semantic integration repair",
 								});
 								if (repMerge.ok) {
-									trunkFinding = await os.trust.submitFinding(
+									const repVerifySig = signal.aborted ? new AbortController().signal : signal;
+									const nextFinding = await os.trust.submitFinding(
 										{
 											agentId: repairer.agent.id,
 											driverId: repairer.agent.driverId,
 											findingId: trunkFinding.id,
 											workspace: os.worktrees.trunkPath,
 											claim: `Elastic repaired integrated trunk (${repMerge.commitSha.slice(0, 8)})`,
-											summary: `Phase-4 semantic repair resolved trunk verifier failure cleanly.`,
+											summary: `Phase-4 narrow integration completed missing lanes / resolved trunk verifier failure cleanly.`,
 											level: "empirical",
 										},
-										signal,
+										repVerifySig,
 									);
-									if (trunkFinding.status === "accepted") {
+									if (nextFinding.status === "accepted") {
+										trunkFinding = nextFinding;
 										repaired = true;
 										repairedSha = repMerge.commitSha;
 										lastTrunkSha = repMerge.commitSha;
+									} else if (prevAccepted) {
+										// Monotonic guard: never let a broken completion regress a previously green trunk!
+										os.worktrees.resetTrunk?.(prevSha);
+									} else {
+										trunkFinding = nextFinding;
 									}
 								}
 							}
