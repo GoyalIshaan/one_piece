@@ -39,6 +39,7 @@ export interface WorktreeManager {
 	writeGitExclude(worktreePath: string, patterns: readonly string[]): void;
 	mergeIntoTrunk(branch: string, opts?: { message?: string }): MergeTrunkResult;
 	mergePreviewDiff(branch: string): { baseSha: string; trunkDiff: string; branchDiff: string };
+	resetTrunk?(ref: string): boolean;
 	remove(worktreePath: string): void;
 }
 
@@ -328,6 +329,12 @@ export interface SwarmOsApi {
 	spawnWorker(req: SpawnWorkerRequest): Promise<WorkerHandle>;
 	/** Record an explicit nomination for final run delivery. */
 	nominate(findingId: string, revision?: number, auto?: boolean): void;
+	/** Path to the run's line-budgeted stigmergic field guide (`.swarm/field-guide/index.md` source). */
+	readonly fieldGuidePath?: string;
+	/** Current immutable KV-cache-safe wave snapshot of the field guide. */
+	fieldGuideSnapshot?(): string;
+	/** Wave-boundary dreaming: consolidate board posts, verifier receipts, and handoffs into <= 80 lines. */
+	consolidateFieldGuide?(opts?: { mode?: "deterministic" | "llm" }): Promise<{ lines: number; bytes: number; path: string }>;
 }
 
 export interface TopologyPlugin {

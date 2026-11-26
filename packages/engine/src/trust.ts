@@ -74,6 +74,8 @@ export class TrustLayer implements TrustService {
 		}
 
 		const scope = input.scope ?? this.verifier?.defaultScope;
+		// When an executable verifier is installed, do not trust unverified self-reported scores before check execution.
+		const initialScore = this.verifier ? undefined : input.score;
 		const submission: FindingSubmission = {
 			revision,
 			claim: input.claim,
@@ -83,7 +85,7 @@ export class TrustLayer implements TrustService {
 			scope,
 			...snapshotState,
 			verifier: this.verifier ? { name: this.verifier.name, version: this.verifier.version } : undefined,
-			score: input.score,
+			score: initialScore,
 			checks: [],
 			at: now,
 		};
@@ -95,7 +97,7 @@ export class TrustLayer implements TrustService {
 				summary: input.summary,
 				evidence: input.evidence,
 				level: input.level,
-				score: input.score,
+				score: initialScore,
 				submission,
 				now,
 			})
@@ -110,7 +112,7 @@ export class TrustLayer implements TrustService {
 				evidence: input.evidence ?? [],
 				level: input.level,
 				status: "pending_review",
-				score: input.score,
+				score: initialScore,
 				submissions: [submission],
 				rounds: [],
 				buildsOn: input.buildsOn ?? [],
@@ -416,11 +418,16 @@ function parseReviewJson(text: string): { verdict: ReviewRound["verdict"]; confi
 			// Fall through to heuristic parsing.
 		}
 	}
+	// Fail-closed heuristic: NEVER default unparseable / ambiguous review text to "accepted".
 	const lower = text.toLowerCase();
 	const verdict: ReviewRound["verdict"] = lower.includes("reject")
 		? "rejected"
-		: lower.includes("needs_work") || lower.includes("needs work") || lower.includes("fail")
-			? "needs_work"
-			: "accepted";
-	return { verdict, confidence: 0.6, message: text.slice(0, 400) || "Blind review completed" };
+		: /\baccepted\b/.test(lower) && !/\b(not accepted|unaccepted|needs_work|needs work|fail)\b/.test(lower)
+			? "accepted"
+			: "needs_work";
+	return {
+		verdict,
+		confidence: verdict === "accepted" ? 0.55 : 0.4,
+		message: text.slice(0, 400) || "Blind review returned empty/unparseable verdict (fail-closed -> needs_work)",
+	};
 }

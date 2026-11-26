@@ -45,6 +45,14 @@ import { spillLargeOutput, workspaceTools } from "@one-piece/module-workspace";
 import { type PoolConfig, Scheduler, schedulerTools } from "@one-piece/scheduler";
 import { CloseoutController } from "./closeout.ts";
 import { createCodeModeTool } from "./codemode.ts";
+import {
+	buildDeterministicFieldGuide,
+	DEFAULT_FIELD_GUIDE_MAX_LINES,
+	enforceLineBudget,
+	mirrorFieldGuideToWorktree,
+	probeWorkspaceEnvironment,
+	writeFieldGuideFile,
+} from "./field-guide.ts";
 import { FileSkillRegistry, loadSkillTool } from "./skills.ts";
 import { TriggerEngine } from "./triggers.ts";
 import { TrustLayer } from "./trust.ts";
@@ -70,6 +78,10 @@ export interface SwarmOsConfig {
 	skillsDirs?: string[];
 	/** Automatically roll over bloated in-process sessions via .swarm/HANDOFF.md after 2 compactions (default true). */
 	autoHandoffOnSecondCompaction?: boolean;
+	/** Seed & inject KV-cache-safe wave-boundary Field Guide snapshots (default true). */
+	enableFieldGuide?: boolean;
+	/** Hard line ceiling for `.swarm/field-guide/index.md` (default 80). */
+	fieldGuideMaxLines?: number;
 	rawConfig?: Record<string, unknown>;
 	store: Store;
 	router: QuotaPoolRouter;
@@ -107,6 +119,7 @@ export class SwarmOS implements SwarmOsApi {
 	readonly router: QuotaPoolRouter;
 	readonly mcp: McpBusServer;
 	readonly skills: FileSkillRegistry;
+	readonly fieldGuidePath: string;
 
 	private currentRun: Run;
 	private readonly reservePct: number;
@@ -114,6 +127,11 @@ export class SwarmOS implements SwarmOsApi {
 	private readonly startedAt: number;
 	private readonly networkOffWorkers: boolean;
 	private readonly autoHandoffOnSecondCompaction: boolean;
+	private readonly enableFieldGuide: boolean;
+	private readonly fieldGuideMaxLines: number;
+	private readonly baseEnvProbe: string;
+	private fieldGuideWave = 0;
+	private frozenFieldGuideSnapshot = "";
 	private readonly triggers: TriggerEngine;
 	private readonly closeout: CloseoutController;
 	private readonly activeHandles = new Map<
@@ -146,8 +164,18 @@ export class SwarmOS implements SwarmOsApi {
 		this.startedAt = Date.now();
 		this.networkOffWorkers = cfg.networkOffWorkers ?? false;
 		this.autoHandoffOnSecondCompaction = cfg.autoHandoffOnSecondCompaction ?? true;
+		this.enableFieldGuide = cfg.enableFieldGuide ?? true;
+		this.fieldGuideMaxLines = cfg.fieldGuideMaxLines ?? DEFAULT_FIELD_GUIDE_MAX_LINES;
+		this.fieldGuidePath = join(this.runDir, "field-guide", "index.md");
 
 		this.worktrees = new GitWorktreeManager(cfg.workspace, this.runDir, this.runId);
+		this.baseEnvProbe = this.enableFieldGuide
+			? probeWorkspaceEnvironment(cfg.workspace, this.worktrees.baseSha)
+			: "";
+		if (this.enableFieldGuide) {
+			this.frozenFieldGuideSnapshot = enforceLineBudget(this.baseEnvProbe, this.fieldGuideMaxLines);
+			writeFieldGuideFile(this.fieldGuidePath, this.frozenFieldGuideSnapshot);
+		}
 		this.artifacts = new FileArtifactStore(this.runId, this.runDir, this.bus);
 		this.board = new SwarmBoardService(this.bus);
 		this.secrets = new LocalSecretBroker(this.runId, this.bus, { secrets: cfg.secrets ?? [] });
@@ -332,6 +360,83 @@ export class SwarmOS implements SwarmOsApi {
 			auto,
 			artifactSha256: sub?.artifactSha256,
 		});
+	}
+
+	fieldGuideSnapshot(): string {
+		return this.frozenFieldGuideSnapshot;
+	}
+
+	async consolidateFieldGuide(opts: { mode?: "deterministic" | "llm" } = {}): Promise<{ lines: number; bytes: number; path: string }> {
+		if (!this.enableFieldGuide) {
+			return { lines: 0, bytes: 0, path: this.fieldGuidePath };
+		}
+		this.fieldGuideWave += 1;
+		const mode = opts.mode ?? "deterministic";
+		let markdown = buildDeterministicFieldGuide({
+			runId: this.runId,
+			runDir: this.runDir,
+			baseProbe: this.baseEnvProbe,
+			store: this.store,
+			wave: this.fieldGuideWave,
+			maxLines: this.fieldGuideMaxLines,
+		});
+
+		if (mode === "llm" && !this.runAbort.signal.aborted && !this.isInCloseoutReserve()) {
+			try {
+				const consolidator = await this.spawnWorker({
+					role: "explorer",
+					handle: "dreamer",
+					workspace: this.worktrees.trunkPath,
+					readOnly: true,
+					canSpawn: false,
+					maxTier: "sidekick",
+					maxTurns: 1,
+					toolScope: {
+						board: "none",
+						artifacts: false,
+						findings: false,
+						tasks: false,
+						nominate: false,
+						scheduler: "never",
+						skills: false,
+						sidekick: false,
+						codeMode: false,
+						includeWorkspaceTools: false,
+					},
+					systemPrompt: [
+						`You are a wave-boundary Field Guide consolidator. Rewrite the draft Field Guide into <= ${this.fieldGuideMaxLines} crisp markdown lines.`,
+						"Keep build/test commands, verified wins, non-obvious invariants, and failed approaches to avoid. Drop stale or redundant lines. Output ONLY markdown.",
+					].join("\n"),
+				});
+				try {
+					const res = await consolidator.runTurn(`Draft Field Guide (Wave ${this.fieldGuideWave}):\n\n${markdown}`, {
+						signal: this.runAbort.signal,
+					});
+					if (res.status === "completed" && res.finalText.trim().length > 20) {
+						markdown = enforceLineBudget(res.finalText, this.fieldGuideMaxLines);
+					}
+				} finally {
+					await consolidator.close();
+				}
+			} catch {
+				// Fall back gracefully to deterministic consolidation.
+			}
+		}
+
+		this.frozenFieldGuideSnapshot = markdown;
+		const { lines, bytes } = writeFieldGuideFile(this.fieldGuidePath, markdown);
+		// Mirror to active worktrees on disk (without mutating live workers' KV system prompts).
+		for (const active of this.activeHandles.values()) {
+			mirrorFieldGuideToWorktree(active.workspace, markdown);
+		}
+		this.bus.emit(this.runId, "field_guide.updated", {
+			lines,
+			bytes,
+			mode,
+			path: this.fieldGuidePath,
+			wave: this.fieldGuideWave,
+		});
+		return { lines, bytes, path: this.fieldGuidePath };
 	}
 
 	private hasNonDefaultComputePools(): boolean {
@@ -694,6 +799,9 @@ export class SwarmOS implements SwarmOsApi {
 		if (req.toolScope?.extendedTools?.length) {
 			materializeToolSchemas(workspace, req.toolScope.extendedTools);
 		}
+		if (this.enableFieldGuide && this.frozenFieldGuideSnapshot && !req.readOnly && req.role !== "reviewer") {
+			mirrorFieldGuideToWorktree(workspace, this.frozenFieldGuideSnapshot);
+		}
 
 		const staticSkills = this.skills.staticPromptFor(req.role, req.skills);
 		const onDemandCatalog = req.toolScope?.skills !== false
@@ -702,7 +810,12 @@ export class SwarmOS implements SwarmOsApi {
 		const extendedToolsHint = req.toolScope?.extendedTools?.length
 			? "Extended tools are cataloged in `.swarm/tools/INDEX.md`; read `.swarm/tools/<name>.json` and invoke via `call_tool(name, arguments)`."
 			: "";
-		const composedSystemPrompt = [req.systemPrompt, staticSkills, onDemandCatalog, extendedToolsHint]
+		// Inject immutable KV-cache-safe wave Field Guide snapshot for non-reviewer roles (never leaks generator state to blind reviewers).
+		const fieldGuideBlock =
+			this.enableFieldGuide && this.frozenFieldGuideSnapshot && req.role !== "reviewer" && req.handle !== "dreamer"
+				? this.frozenFieldGuideSnapshot.trim()
+				: "";
+		const composedSystemPrompt = [req.systemPrompt, fieldGuideBlock, staticSkills, onDemandCatalog, extendedToolsHint]
 			.filter((s): s is string => Boolean(s && s.trim()))
 			.join("\n\n") || undefined;
 

@@ -99,8 +99,9 @@ export class GitWorktreeManager implements WorktreeManager {
 
 	writeGitExclude(worktreePath: string, patterns: readonly string[]): void {
 		try {
-			const gitDir = resolve(worktreePath, git(worktreePath, ["rev-parse", "--git-dir"]));
-			const infoDir = join(gitDir, "info");
+			// Linked git worktrees read exclude patterns from `--git-common-dir`/info/exclude, NOT per-worktree `--git-dir`!
+			const gitCommonDir = resolve(worktreePath, git(worktreePath, ["rev-parse", "--git-common-dir"]));
+			const infoDir = join(gitCommonDir, "info");
 			mkdirSync(infoDir, { recursive: true });
 			const excludeFile = join(infoDir, "exclude");
 			const current = existsSync(excludeFile) ? readFileSync(excludeFile, "utf8") : "";
@@ -209,6 +210,17 @@ export class GitWorktreeManager implements WorktreeManager {
 			branchDiff = "(branch diff unavailable)";
 		}
 		return { baseSha, trunkDiff, branchDiff };
+	}
+
+	resetTrunk(ref: string): boolean {
+		const trunk = this.trunkPath;
+		try {
+			git(trunk, ["reset", "--hard", ref]);
+			git(trunk, ["clean", "-fd"]);
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	remove(worktreePath: string): void {

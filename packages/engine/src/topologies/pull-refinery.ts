@@ -5,6 +5,8 @@ import { type JsonSchema, newId, type SwarmOsApi, type TaskRecord, type Topology
 export interface PullRefineryOptions {
 	concurrency?: number;
 	leaseTtlMs?: number;
+	/** Automatically invoke an impartial integrator when a clean git merge breaks the verifier (default true). */
+	enableSemanticRepair?: boolean;
 }
 
 const BACKLOG_SCHEMA: JsonSchema = {
@@ -113,6 +115,7 @@ function parseBacklog(text: string, fallbackGoal: string): BacklogItem[] {
 export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPlugin {
 	const concurrency = Math.max(1, opts.concurrency ?? 3);
 	const leaseTtlMs = opts.leaseTtlMs ?? 300_000;
+	const enableSemanticRepair = opts.enableSemanticRepair ?? true;
 
 	return {
 		name: "pull-refinery",
@@ -174,11 +177,11 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 
 			const enqueueRefinery = (task: TaskRecord, branch: string, authorAgentId: string, authorDriverId: string) => {
 				const job = mergeChain.then(async () => {
+					const prevTrunkSha = lastTrunkSha;
+					const previewBeforeMerge = os.worktrees.mergePreviewDiff(branch);
 					const merged = os.worktrees.mergeIntoTrunk(branch, { message: `refinery(${task.id}): ${task.title}` });
 					if (merged.ok) {
-						lastTrunkSha = merged.commitSha;
-						mergedBranches.push(branch);
-						await os.trust.submitFinding(
+						const finding = await os.trust.submitFinding(
 							{
 								agentId: authorAgentId,
 								driverId: authorDriverId,
@@ -190,12 +193,121 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 							},
 							signal,
 						);
+
+						// Monotonic green trunk ratchet: if an executable verifier rejects a clean Git merge
+						// (pure semantic interference!), attempt impartial repair or roll back trunk cleanly.
+						if (os.trust.verifier && finding.status !== "accepted") {
+							const failReason = finding.rounds.at(-1)?.message ?? "Executable verifier rejected merged trunk";
+							let repaired = false;
+							if (enableSemanticRepair && !signal.aborted) {
+								const repairer = await os.spawnWorker({
+									role: "integrator",
+									handle: "semantic-integrator",
+									baseRef: merged.commitSha,
+									canSpawn: false,
+									cacheKeyPrefix: `${os.runId}:refinery-semantic-repair`,
+									toolScope: {
+										board: "read",
+										artifacts: true,
+										findings: false,
+										tasks: false,
+										nominate: false,
+										scheduler: "never",
+										sidekick: false,
+										codeMode: false,
+									},
+									systemPrompt: [
+										"You are an impartial semantic-integration repair engineer for the Refinery merge queue.",
+										"Two branches merged cleanly in Git without text conflicts, yet the combined trunk failed executable verification.",
+										"Diagnose the cross-module semantic interference, preserve ALL merged features, fix the interaction cleanly, and verify.",
+									].join("\n"),
+								});
+								try {
+									const repairPrompt = [
+										`Goal: ${goal}`,
+										`Semantic regression after cleanly merging ticket ${task.id}: ${task.title}`,
+										`Verifier failure: ${failReason}`,
+										"",
+										`## Incoming branch diff (${previewBeforeMerge.baseSha.slice(0, 8)}..${branch})`,
+										"```diff",
+										previewBeforeMerge.branchDiff.slice(0, 8000),
+										"```",
+										"",
+										"Fix the cross-feature interaction in your workspace while keeping both existing trunk features and the new ticket working.",
+									].join("\n");
+									const repRes = await repairer.runTurn(repairPrompt, { signal });
+									const repWip = os.worktrees.commitWip(repairer.workspace, `refinery-semantic-repair(${task.id})`);
+									const repHead = os.worktrees.headSha(repairer.workspace);
+									const repChanged = Boolean(repWip) || (Boolean(repHead) && repHead !== merged.commitSha);
+									if (repRes.status === "completed" && repChanged && repairer.branch) {
+										const repMerge = os.worktrees.mergeIntoTrunk(repairer.branch, {
+											message: `refinery-semantic-repair(${task.id}): ${task.title}`,
+										});
+										if (repMerge.ok) {
+											const repFinding = await os.trust.submitFinding(
+												{
+													agentId: repairer.agent.id,
+													driverId: repairer.agent.driverId,
+													taskId: task.id,
+													findingId: finding.id,
+													workspace: os.worktrees.trunkPath,
+													claim: `Refinery repaired semantic regression for ${task.title} (${repMerge.commitSha.slice(0, 8)})`,
+													summary: `Impartial semantic repair reconciled cross-feature verifier failure on trunk.`,
+													level: "empirical",
+												},
+												signal,
+											);
+											if (repFinding.status === "accepted") {
+												repaired = true;
+												lastTrunkSha = repMerge.commitSha;
+												mergedBranches.push(branch, repairer.branch);
+												os.board.publish({
+													runId: os.runId,
+													authorAgentId: "refinery",
+													authorHandle: "refinery",
+													topic: "refinery",
+													summary: `Repaired semantic regression & merged ${task.id} -> trunk ${repMerge.commitSha.slice(0, 8)}`,
+													isOsActor: true,
+												});
+											}
+										}
+									}
+								} finally {
+									await repairer.close();
+								}
+							}
+							const rolledBack = !repaired && Boolean(os.worktrees.resetTrunk?.(prevTrunkSha));
+							os.bus.emit(
+								os.runId,
+								"refinery.semantic_regression",
+								{ taskId: task.id, branch, reason: failReason.slice(0, 300), repaired, rolledBack },
+								"refinery",
+							);
+							if (!repaired) {
+								os.board.publish({
+									runId: os.runId,
+									authorAgentId: "refinery",
+									authorHandle: "refinery",
+									topic: "refinery-conflict",
+									summary: `Semantic regression on ${task.id} (${branch}): ${failReason.slice(0, 220)}${rolledBack ? " [trunk rolled back]" : ""}`,
+									isOsActor: true,
+								});
+							}
+							await os.consolidateFieldGuide?.();
+							return;
+						}
+
+						lastTrunkSha = merged.commitSha;
+						mergedBranches.push(branch);
 						os.board.publish({
 							runId: os.runId,
 							authorAgentId: "refinery",
+							authorHandle: "refinery",
 							topic: "refinery",
 							summary: `Merged ${task.id} (${branch}) -> trunk ${merged.commitSha.slice(0, 8)}`,
+							isOsActor: true,
 						});
+						await os.consolidateFieldGuide?.();
 					} else {
 						const conflictFiles = merged.conflictFiles;
 						for (const relFile of conflictFiles) {
@@ -220,8 +332,9 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 							}
 						}
 
-						// Impartial third-party conflict resolver (neutral to both branches)
-						if (conflictFiles.length > 0 && !signal.aborted && !os.isInCloseoutReserve()) {
+						// Impartial third-party conflict resolver (neutral to both branches).
+						// Allowed during closeout reserve so finished work isn't dropped at the finish line.
+						if (conflictFiles.length > 0 && !signal.aborted) {
 							const preview = os.worktrees.mergePreviewDiff(branch);
 							const resolver = await os.spawnWorker({
 								role: "integrator",

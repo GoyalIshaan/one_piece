@@ -15,6 +15,8 @@ export interface SubstratePeersOptions {
 	peers?: number;
 	rounds?: number;
 	seatConfigs?: readonly SubstrateSeatConfig[];
+	/** Automatically run a 1-turn semantic repair integrator if assembled trunk fails verification (default true). */
+	enableSemanticRepair?: boolean;
 }
 
 /**
@@ -29,6 +31,7 @@ export interface SubstratePeersOptions {
 export function substratePeersTopology(opts: SubstratePeersOptions = {}): TopologyPlugin {
 	const peerCount = Math.max(2, opts.peers ?? opts.seatConfigs?.length ?? 3);
 	const rounds = Math.max(1, opts.rounds ?? 2);
+	const enableSemanticRepair = opts.enableSemanticRepair ?? true;
 
 	return {
 		name: "substrate-peers",
@@ -109,6 +112,10 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 							}
 						}),
 					);
+					// Wave-boundary dreaming: consolidate discoveries & failure receipts between rounds.
+					if (round < rounds && !signal.aborted) {
+						await os.consolidateFieldGuide?.();
+					}
 				}
 
 				// Closeout Option A: assemble committed peer branches onto isolated `trunk`
@@ -159,13 +166,13 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 							isOsActor: true,
 						});
 
-						// Impartial 1-turn conflict resolver fallback (Option A) when budget permits
+						// Impartial 1-turn conflict resolver fallback (Option A); allowed during closeout reserve so work isn't dropped.
 						let outcome: BranchAssemblyOutcome = {
 							kind: "conflict_unresolved",
 							conflictFiles: merged.conflictFiles,
 							reason: merged.error,
 						};
-						if (merged.conflictFiles.length > 0 && !signal.aborted && !os.isInCloseoutReserve()) {
+						if (merged.conflictFiles.length > 0 && !signal.aborted) {
 							const preview = os.worktrees.mergePreviewDiff(branch);
 							const resolver = await os.spawnWorker({
 								role: "integrator",
@@ -263,7 +270,7 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 					}
 
 					if (mergedCount > 0 && !signal.aborted) {
-						await os.trust.submitFinding(
+						const trunkFinding = await os.trust.submitFinding(
 							{
 								agentId: "substrate-trunk",
 								workspace: os.worktrees.trunkPath,
@@ -273,6 +280,81 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 							},
 							signal,
 						);
+
+						// If the assembled trunk merged cleanly in Git yet failed the executable verifier
+						// (semantic interference across peer branches!), run a 1-turn impartial repair integrator.
+						if (enableSemanticRepair && os.trust.verifier && trunkFinding.status !== "accepted" && !signal.aborted) {
+							const failReason = trunkFinding.rounds.at(-1)?.message ?? "Executable verifier rejected assembled trunk";
+							await os.consolidateFieldGuide?.();
+							const repairer = await os.spawnWorker({
+								role: "integrator",
+								handle: "trunk-repairer",
+								baseRef: lastTrunkSha,
+								canSpawn: false,
+								cacheKeyPrefix: `${os.runId}:substrate-trunk-repair`,
+								toolScope: {
+									board: "read",
+									artifacts: true,
+									findings: false,
+									tasks: false,
+									nominate: false,
+									scheduler: "never",
+									sidekick: false,
+									codeMode: false,
+								},
+								systemPrompt: [
+									"You are an impartial semantic-integration repair engineer.",
+									"Multiple peer branches were assembled onto trunk, yet executable verification failed.",
+									"Inspect the verifier failure, reconcile any cross-module semantic interference without discarding peer work, and verify.",
+								].join("\n"),
+							});
+							let repaired = false;
+							let repairedSha: string | undefined;
+							try {
+								const repairPrompt = [
+									`Goal: ${goal}`,
+									rubric ? `Rubric: ${rubric}` : "",
+									`Assembled trunk failed verification: ${failReason}`,
+									os.board.digest(os.runId),
+									"Diagnose and repair the cross-feature / integration issue in your workspace, run tests, and leave the workspace ready to commit.",
+								].filter(Boolean).join("\n\n");
+								const repRes = await repairer.runTurn(repairPrompt, { signal });
+								const repWip = os.worktrees.commitWip(repairer.workspace, "substrate-peers: semantic trunk repair");
+								const repHead = os.worktrees.headSha(repairer.workspace);
+								if (repRes.status === "completed" && repairer.branch && (repWip || (repHead && repHead !== lastTrunkSha))) {
+									const repMerge = os.worktrees.mergeIntoTrunk(repairer.branch, {
+										message: "substrate-peers: semantic trunk repair",
+									});
+									if (repMerge.ok) {
+										const repFinding = await os.trust.submitFinding(
+											{
+												agentId: repairer.agent.id,
+												driverId: repairer.agent.driverId,
+												findingId: trunkFinding.id,
+												workspace: os.worktrees.trunkPath,
+												claim: `Repaired assembled multi-peer trunk (${repMerge.commitSha.slice(0, 8)})`,
+												summary: `Impartial semantic repair fixed trunk verifier failure after ${mergedCount}-branch assembly.`,
+												level: "empirical",
+											},
+											signal,
+										);
+										if (repFinding.status === "accepted") {
+											repaired = true;
+											repairedSha = repMerge.commitSha;
+											lastTrunkSha = repMerge.commitSha;
+										}
+									}
+								}
+							} finally {
+								await repairer.close();
+							}
+							os.bus.emit(
+								os.runId,
+								"peer.trunk_repaired",
+								{ reason: failReason.slice(0, 300), repaired, commitSha: repairedSha },
+								"substrate-trunk",
+							);
+						}
 					}
 				}
 

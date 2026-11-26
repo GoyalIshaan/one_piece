@@ -12,6 +12,8 @@ interface ArchiveEntry {
 	branch: string;
 	score: number;
 	summary: string;
+	diffStat: string;
+	diffSha: string;
 	generation: number;
 }
 
@@ -47,15 +49,30 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 				if (signal.aborted || os.isInCloseoutReserve()) break;
 				os.bus.emit(os.runId, "phase.changed", { to: `evolution-gen-${gen}`, reason: `Generation ${gen}/${maxGenerations}, archive=${archive.length}` });
 
-				const sortedElites = [...archive].sort((a, b) => b.score - a.score);
+				// Deduplicate archive by diffSha so slots explore genuinely distinct basins rather than re-mutating clones.
+				const uniqueByBasin = new Map<string, ArchiveEntry>();
+				for (const entry of archive) {
+					const existing = uniqueByBasin.get(entry.diffSha);
+					if (!existing || entry.score > existing.score) {
+						uniqueByBasin.set(entry.diffSha, entry);
+					}
+				}
+				const sortedElites = [...uniqueByBasin.values()].sort((a, b) => b.score - a.score || b.generation - a.generation);
 				let genImproved = false;
 
 				await Promise.all(
 					Array.from({ length: popSize }, async (_, slot) => {
-						// Sample either global best (slot 0) or diverse elite (slot > 0)
-						const parent = sortedElites.length
-							? sortedElites[slot % Math.min(sortedElites.length, 3)]
-							: undefined;
+						// Diverse MAP-Elites parent selection + explicit crossover:
+						// - Slot 0: exploit global best elite
+						// - Slot 1 (when >= 2 distinct elites exist): crossover global best with 2nd distinct basin
+						// - Slot >= 2: explore diverse archive elite
+						const isCrossover = slot === 1 && sortedElites.length >= 2;
+						const parent = isCrossover
+							? sortedElites[0]
+							: sortedElites.length
+								? sortedElites[slot % Math.min(sortedElites.length, 4)]
+								: undefined;
+						const partner = isCrossover ? sortedElites[1] : undefined;
 
 						const worker = await os.spawnWorker({
 							role: "worker",
@@ -78,25 +95,42 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 						});
 
 						try {
-							const eliteSummary = sortedElites.slice(0, 3)
-								.map((e, i) => `${i + 1}. [score=${e.score.toFixed(4)}] ${e.summary.slice(0, 220)}`)
+							const eliteSummary = sortedElites.slice(0, 4)
+								.map((e, i) => `${i + 1}. [score=${e.score.toFixed(4)}, gen=${e.generation}, basin=${e.diffSha.slice(0, 8)}] ${e.summary.slice(0, 200)}`)
 								.join("\n");
+							const crossoverHint = partner
+								? [
+									`CROSSOVER ASSIGNMENT: Your worktree starts from Elite #1 (score=${parent!.score.toFixed(4)}).`,
+									`Combine its strengths with Elite #2's distinct basin (score=${partner.score.toFixed(4)}):`,
+									`Elite #2 summary: ${partner.summary.slice(0, 320)}`,
+									partner.diffStat ? `Elite #2 changed files:\n${partner.diffStat.slice(0, 500)}` : "",
+								].filter(Boolean).join("\n")
+								: "";
 							const negSummary = includeNegativeMemory && negativeMemory.length
-								? `\n\nPreviously failed ideas (avoid repeating verbatim):\n${negativeMemory.slice(-5).map((n) => `- ${n.idea.slice(0, 120)} -> Failed: ${n.failureReason.slice(0, 140)}`).join("\n")}`
+								? `\n\nPreviously failed ideas (avoid repeating verbatim):\n${negativeMemory.slice(-6).map((n) => `- ${n.idea.slice(0, 120)} -> Failed: ${n.failureReason.slice(0, 140)}`).join("\n")}`
 								: "";
 
+							const strategyDirective = isCrossover
+								? "Synthesize the best algorithmic ideas from Elite #1 and Elite #2 into a single stronger candidate, verify strictly, and call `report_finding`."
+								: slot === 0
+									? "Exploit the current best incumbent with a targeted, high-precision optimization, verify strictly, and call `report_finding`."
+									: "Explore a structurally DIFFERENT algorithmic strategy/basin from the top elite so the archive gains diversity, verify strictly, and call `report_finding`.";
+
 							const prompt = [
-								`Generation ${gen}/${maxGenerations}, Slot ${slot + 1}/${popSize}`,
+								`Generation ${gen}/${maxGenerations}, Slot ${slot + 1}/${popSize}${isCrossover ? " [CROSSOVER]" : slot === 0 ? " [EXPLOIT]" : " [EXPLORE]"}`,
 								`Goal: ${goal}`,
 								rubric ? `Rubric: ${rubric}` : "",
 								parent ? `Parent incumbent (score=${parent.score.toFixed(4)}): ${parent.summary.slice(0, 300)}` : "Starting from base repository seed.",
-								eliteSummary ? `Top verified archive elites:\n${eliteSummary}` : "",
+								crossoverHint,
+								eliteSummary ? `Top distinct verified archive elites (${sortedElites.length} basins):\n${eliteSummary}` : "",
 								negSummary,
-								"Make a focused mutation, verify correctness & performance, and call `report_finding`.",
+								strategyDirective,
 							].filter(Boolean).join("\n\n");
 
 							const res = await worker.runTurn(prompt, { signal });
 							os.worktrees.commitWip(worker.workspace, `evo-gen-${gen}-slot-${slot + 1}`);
+							const diffSha = os.worktrees.diffSha(worker.workspace);
+							const diffStat = os.worktrees.diffStat(worker.workspace, parent?.branch ?? os.worktrees.baseSha);
 
 							let finding: Finding | undefined = os.store
 								.list("findings", { runId: os.runId })
@@ -124,6 +158,8 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 									branch: worker.branch,
 									score,
 									summary: finding.summary,
+									diffStat,
+									diffSha,
 									generation: gen,
 								});
 								if (score > bestScore) {
@@ -143,6 +179,11 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 						}
 					}),
 				);
+
+				// Wave-boundary dreaming between generations.
+				if (gen < maxGenerations && !signal.aborted) {
+					await os.consolidateFieldGuide?.();
+				}
 
 				if (genImproved) staleGens = 0;
 				else staleGens += 1;
