@@ -113,9 +113,11 @@ export class CodexAppServerDriver implements WorkerDriver {
 		let stderrBuf = "";
 		let threadId: string | undefined = spec.resumeSessionId;
 		let resolvedModel: string | undefined = spec.model ?? this.config.model;
+		let threadTokenTotals = { input: 0, cached: 0, cacheWrite: 0, output: 0, reasoning: 0, total: 0 };
 		let activeTurn: {
 			turnId?: string;
 			chunks: string[];
+			startTotals: { input: number; cached: number; cacheWrite: number; output: number; reasoning: number; total: number };
 			usage?: WorkerTurnResult["usage"];
 			resolve: (res: WorkerTurnResult) => void;
 			startedAt: number;
@@ -208,6 +210,37 @@ export class CodexAppServerDriver implements WorkerDriver {
 						: undefined;
 					spec.onActivity?.({ type: "tool_result", name: toolName, isError, outputPreview, isMcp });
 				}
+			} else if (method === "thread/tokenUsage/updated") {
+				const tot = params.tokenUsage?.total;
+				if (tot && typeof tot === "object") {
+					const next = {
+						input: Number(tot.inputTokens ?? tot.input_tokens ?? 0) || 0,
+						cached: Number(tot.cachedInputTokens ?? tot.cached_input_tokens ?? 0) || 0,
+						cacheWrite: Number(tot.cacheWriteInputTokens ?? tot.cache_write_input_tokens ?? 0) || 0,
+						output: Number(tot.outputTokens ?? tot.output_tokens ?? 0) || 0,
+						reasoning: Number(tot.reasoningOutputTokens ?? tot.reasoning_output_tokens ?? 0) || 0,
+						total: Number(tot.totalTokens ?? tot.total_tokens ?? 0) || 0,
+					};
+					threadTokenTotals = next;
+					if (activeTurn) {
+						const base = activeTurn.startTotals;
+						const dIn = Math.max(0, next.input - base.input);
+						const dCached = Math.max(0, next.cached - base.cached);
+						const dCacheWrite = Math.max(0, next.cacheWrite - base.cacheWrite);
+						const dOut = Math.max(0, next.output - base.output);
+						const dReason = Math.max(0, next.reasoning - base.reasoning);
+						const dTotal = Math.max(0, next.total - base.total);
+						activeTurn.usage = {
+							inputTokens: dIn || undefined,
+							cachedTokens: dCached || undefined,
+							cacheWriteTokens: dCacheWrite || undefined,
+							outputTokens: dOut || undefined,
+							reasoningTokens: dReason || undefined,
+							totalTokens: dTotal || (dIn + dOut) || undefined,
+							durationMs: Date.now() - activeTurn.startedAt,
+						};
+					}
+				}
 			} else if ((method === "turn/completed" || method === "turn/failed" || method === "error") && activeTurn) {
 				const turn = activeTurn;
 				activeTurn = undefined;
@@ -227,11 +260,15 @@ export class CodexAppServerDriver implements WorkerDriver {
 					? {
 						inputTokens: Number(usageObj.input_tokens ?? usageObj.inputTokens ?? 0) || undefined,
 						cachedTokens: Number(usageObj.cached_input_tokens ?? usageObj.cachedTokens ?? 0) || undefined,
+						cacheWriteTokens: Number(usageObj.cache_write_input_tokens ?? usageObj.cacheWriteInputTokens ?? 0) || undefined,
 						outputTokens: Number(usageObj.output_tokens ?? usageObj.outputTokens ?? 0) || undefined,
 						reasoningTokens: Number(usageObj.reasoning_output_tokens ?? usageObj.reasoningTokens ?? 0) || undefined,
+						totalTokens: Number(usageObj.total_tokens ?? usageObj.totalTokens ?? 0) || undefined,
 						durationMs,
 					}
-					: { durationMs };
+					: turn.usage
+						? { ...turn.usage, durationMs }
+						: { durationMs };
 
 				if (quota) {
 					turn.resolve({ status: "rate_limited", finalText: turn.chunks.join(""), sessionId: threadId, model: resolvedModel, usage, quotaError: quota, error: errText });
@@ -329,7 +366,7 @@ export class CodexAppServerDriver implements WorkerDriver {
 					if (opts.timeoutMs) {
 						timer = setTimeout(onAbort, opts.timeoutMs);
 					}
-					activeTurn = { chunks: [], resolve: finish, startedAt };
+					activeTurn = { chunks: [], startTotals: { ...threadTokenTotals }, resolve: finish, startedAt };
 					const turnParams: Record<string, unknown> = {
 						threadId,
 						input: [{ type: "text", text: prompt }],
