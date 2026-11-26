@@ -242,10 +242,13 @@ export function runSandboxedEvalCommand(options: EvalSandboxOptions): Promise<Ev
 		});
 		const stdout = captureBounded(maxBytes);
 		const stderr = captureBounded(maxBytes);
-		let timedOut = false;
-		let settled = false;
+		type SandboxProcessState =
+			| { readonly kind: "running"; readonly timedOut: boolean }
+			| { readonly kind: "settled" };
+		let procState: SandboxProcessState = { kind: "running", timedOut: false };
 
 		const killTree = () => {
+			if (procState.kind === "settled") return;
 			try {
 				if (child.pid) process.kill(-child.pid, "SIGKILL");
 			} catch {
@@ -254,7 +257,8 @@ export function runSandboxedEvalCommand(options: EvalSandboxOptions): Promise<Ev
 		};
 
 		const timer = setTimeout(() => {
-			timedOut = true;
+			if (procState.kind === "settled") return;
+			procState = { kind: "running", timedOut: true };
 			killTree();
 		}, timeoutMs);
 
@@ -265,8 +269,9 @@ export function runSandboxedEvalCommand(options: EvalSandboxOptions): Promise<Ev
 		child.stderr?.setEncoding("utf8").on("data", (chunk: string) => stderr.append(chunk));
 		child.on("error", (err) => stderr.append(err.message));
 		child.on("close", (code) => {
-			if (settled) return;
-			settled = true;
+			if (procState.kind === "settled") return;
+			const wasTimedOut = procState.timedOut;
+			procState = { kind: "settled" };
 			clearTimeout(timer);
 			options.signal?.removeEventListener("abort", onAbort);
 			const wallClockMs = Date.now() - began;
@@ -280,7 +285,7 @@ export function runSandboxedEvalCommand(options: EvalSandboxOptions): Promise<Ev
 				stderr: cleanedStderr,
 				wallClockMs,
 				cpuSeconds,
-				timedOut,
+				timedOut: wasTimedOut,
 				sandboxed: true,
 			});
 		});

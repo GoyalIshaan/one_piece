@@ -17,6 +17,10 @@ export function killProcessTreeNow(child: ChildProcess, signal: NodeJS.Signals =
 	}
 }
 
+type KillTreeState =
+	| { readonly phase: "terminating"; readonly timer: ReturnType<typeof setTimeout> }
+	| { readonly phase: "settled" };
+
 /**
  * Gracefully terminate a detached subprocess tree: send `SIGTERM` first, wait up to `graceMs`
  * for exit, and escalate unconditionally to `SIGKILL` on the entire process group.
@@ -26,11 +30,10 @@ export function killProcessTree(child: ChildProcess, graceMs = 2_000): Promise<v
 		return Promise.resolve();
 	}
 	return new Promise<void>((resolve) => {
-		let settled = false;
 		const done = () => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
+			if (state.phase === "settled") return;
+			clearTimeout(state.timer);
+			state = { phase: "settled" };
 			child.removeListener("close", done);
 			child.removeListener("exit", done);
 			resolve();
@@ -43,6 +46,7 @@ export function killProcessTree(child: ChildProcess, graceMs = 2_000): Promise<v
 			done();
 		}, Math.max(50, graceMs));
 		timer.unref?.();
+		let state: KillTreeState = { phase: "terminating", timer };
 	});
 }
 
@@ -52,6 +56,11 @@ export interface TurnCancellationBinding {
 	/** Clean up listeners and timers once the turn settles. */
 	readonly dispose: () => void;
 }
+
+type CancellationState =
+	| { readonly phase: "armed"; readonly timeoutTimer?: ReturnType<typeof setTimeout> }
+	| { readonly phase: "cancelling"; readonly killGraceTimer: ReturnType<typeof setTimeout> }
+	| { readonly phase: "disposed"; readonly cancelled: boolean };
 
 /**
  * Unified abort + wall-timeout binder for both persistent RPC/ACP sessions and one-shot CLI turns.
@@ -67,14 +76,13 @@ export function bindTurnCancellation(
 		onCancel?: () => void;
 	},
 ): TurnCancellationBinding {
-	let cancelled = false;
-	let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-	let killGraceTimer: ReturnType<typeof setTimeout> | undefined;
+	let state: CancellationState = { phase: "armed" };
 	const graceMs = opts.graceMs ?? 3_000;
 
 	const trigger = () => {
-		if (cancelled) return;
-		cancelled = true;
+		if (state.phase !== "armed") return;
+		if (state.timeoutTimer) clearTimeout(state.timeoutTimer);
+		let killGraceTimer: ReturnType<typeof setTimeout>;
 		if (opts.onCancel) {
 			try {
 				opts.onCancel();
@@ -92,23 +100,31 @@ export function bindTurnCancellation(
 			}, Math.min(500, Math.max(50, graceMs)));
 			killGraceTimer.unref?.();
 		}
+		state = { phase: "cancelling", killGraceTimer };
 	};
 
 	if (opts.signal?.aborted) {
 		trigger();
 	} else {
 		opts.signal?.addEventListener("abort", trigger, { once: true });
-	}
-	if (opts.timeoutMs && opts.timeoutMs > 0) {
-		timeoutTimer = setTimeout(trigger, opts.timeoutMs);
-		timeoutTimer.unref?.();
+		if (opts.timeoutMs && opts.timeoutMs > 0 && state.phase === "armed") {
+			const timeoutTimer = setTimeout(trigger, opts.timeoutMs);
+			timeoutTimer.unref?.();
+			state = { phase: "armed", timeoutTimer };
+		}
 	}
 
 	return {
-		wasCancelled: () => cancelled,
+		wasCancelled: () => (state.phase === "cancelling" ? true : state.phase === "disposed" ? state.cancelled : false),
 		dispose: () => {
-			if (timeoutTimer) clearTimeout(timeoutTimer);
-			if (killGraceTimer) clearTimeout(killGraceTimer);
+			if (state.phase === "disposed") return;
+			if (state.phase === "armed") {
+				if (state.timeoutTimer) clearTimeout(state.timeoutTimer);
+				state = { phase: "disposed", cancelled: false };
+			} else {
+				clearTimeout(state.killGraceTimer);
+				state = { phase: "disposed", cancelled: true };
+			}
 			opts.signal?.removeEventListener("abort", trigger);
 		},
 	};

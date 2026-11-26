@@ -25,6 +25,10 @@ export interface OnePieceV2Config {
 	skillsDirs?: string[];
 	/** Automatically roll over in-process sessions via .swarm/HANDOFF.md on 2nd compaction (default true). */
 	autoHandoffOnSecondCompaction?: boolean;
+	/** Optional System-1 decision model config (e.g., TypeSafe Jev via TYPESAFE_API_KEY). */
+	decisionModel?: { provider: "jev" | "auto" | "none"; model?: string; baseUrl?: string };
+	/** Concurrency control mode: "physics" (AIMD + RAM/CPU/disk backpressure) or "fixed" (static maxConcurrent). */
+	concurrencyMode?: "physics" | "fixed";
 	dataDir: string;
 }
 
@@ -132,6 +136,8 @@ export function loadConfig(
 		cleanWorkerEnv,
 		skillsDirs: file.skillsDirs,
 		autoHandoffOnSecondCompaction: file.autoHandoffOnSecondCompaction ?? true,
+		decisionModel: file.decisionModel ?? { provider: "auto" },
+		concurrencyMode: file.concurrencyMode ?? "physics",
 		dataDir: resolve(projectDir, file.dataDir ?? ".one_piece"),
 	};
 }

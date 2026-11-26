@@ -1,15 +1,18 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type {
-	AssembleBranchesInput,
-	AssembleBranchesResult,
-	CompletionPassInput,
-	CompletionPassResult,
-	Finding,
-	IntegrateBranchInput,
-	IntegrateBranchResult,
-	IntegrationService,
-	SwarmOsApi,
+import {
+	type AssembleBranchesInput,
+	type AssembleBranchesResult,
+	assertNever,
+	type CompletionPassInput,
+	type CompletionPassResult,
+	type Finding,
+	type IntegrateBranchInput,
+	type IntegrateBranchResult,
+	type IntegrationService,
+	type SwarmOsApi,
+	transitionTrunkRatchet,
+	type TrunkRatchetState,
 } from "@one-piece/core";
 
 /**
@@ -21,36 +24,49 @@ import type {
  */
 export class IntegrationPipeline implements IntegrationService {
 	private readonly os: SwarmOsApi;
-	private _bestGreenSha: string;
-	private _bestGreenScore: number | undefined;
-	private _bestGreenAccepted = false;
-	private _bestGreenFindingId: string | undefined;
+	private ratchet: TrunkRatchetState;
 	private readonly _mergedBranches: string[] = [];
 	private readonly conflictCounts = new Map<string, number>();
 
 	constructor(os: SwarmOsApi) {
 		this.os = os;
-		this._bestGreenSha = os.worktrees.baseSha;
+		this.ratchet = { phase: "base", sha: os.worktrees.baseSha };
 	}
 
 	get bestGreenSha(): string {
-		return this._bestGreenSha;
+		return this.ratchet.sha;
 	}
 
 	get bestGreenScore(): number | undefined {
-		return this._bestGreenScore;
+		return this.ratchet.phase === "base" ? undefined : this.ratchet.score;
 	}
 
 	get bestGreenAccepted(): boolean {
-		return this._bestGreenAccepted;
+		return this.ratchet.phase === "accepted";
 	}
 
 	get bestGreenFindingId(): string | undefined {
-		return this._bestGreenFindingId;
+		return this.ratchet.phase === "accepted" ? this.ratchet.findingId : undefined;
 	}
 
 	get mergedBranches(): readonly string[] {
 		return [...this._mergedBranches];
+	}
+
+	private advanceRatchetSha(sha: string): void {
+		switch (this.ratchet.phase) {
+			case "base":
+				this.ratchet = { phase: "base", sha };
+				break;
+			case "partial":
+				this.ratchet = { ...this.ratchet, sha };
+				break;
+			case "accepted":
+				this.ratchet = { ...this.ratchet, sha };
+				break;
+			default:
+				assertNever(this.ratchet, "Unhandled TrunkRatchetState");
+		}
 	}
 
 	private resolveVerifySignal(closeoutSignal?: AbortSignal): AbortSignal {
@@ -85,14 +101,7 @@ export class IntegrationPipeline implements IntegrationService {
 	}
 
 	private recordGreenAdvance(commitSha: string, finding: Finding, branches: readonly string[]): void {
-		this._bestGreenSha = commitSha;
-		if (finding.status === "accepted") {
-			this._bestGreenAccepted = true;
-			this._bestGreenFindingId = finding.id;
-		}
-		if (typeof finding.score === "number") {
-			this._bestGreenScore = Math.max(this._bestGreenScore ?? -Infinity, finding.score);
-		}
+		this.ratchet = transitionTrunkRatchet(this.ratchet, { sha: commitSha, finding });
 		for (const b of branches) this._mergedBranches.push(b);
 	}
 
@@ -100,7 +109,7 @@ export class IntegrationPipeline implements IntegrationService {
 		const actorName = input.actorName ?? "refinery";
 		const cachePrefix = input.cachePrefix ?? `${this.os.runId}:${actorName}`;
 		const verifySig = this.resolveVerifySignal(input.closeoutSignal);
-		const prevGreenSha = this._bestGreenSha;
+		const prevGreenSha = this.bestGreenSha;
 		const previewBeforeMerge = this.os.worktrees.mergePreviewDiff(input.branch);
 		const merged = this.os.worktrees.mergeIntoTrunk(input.branch, {
 			message: `${actorName}(${input.task?.id ?? input.label}): ${input.task?.title ?? input.label}`,
@@ -116,18 +125,18 @@ export class IntegrationPipeline implements IntegrationService {
 					claim: `Refinery merged ${input.task?.title ?? input.label} (${merged.commitSha.slice(0, 8)})`,
 					summary: `Serialized merge of ${input.branch} onto isolated trunk worktree succeeded cleanly.`,
 					level: "empirical",
-					buildsOn: this._bestGreenFindingId ? [this._bestGreenFindingId] : undefined,
+					buildsOn: this.bestGreenFindingId ? [this.bestGreenFindingId] : undefined,
 				},
 				verifySig,
 			);
 
 			const newScore = typeof finding.score === "number" ? finding.score : undefined;
 			const strictlyAdvancedFromUnaccepted =
-				!this._bestGreenAccepted &&
+				!this.bestGreenAccepted &&
 				newScore !== undefined &&
-				newScore > (this._bestGreenScore ?? 0) + 1e-9;
+				newScore > (this.bestGreenScore ?? 0) + 1e-9;
 			const binaryPartialProgress =
-				!this._bestGreenAccepted &&
+				!this.bestGreenAccepted &&
 				newScore === undefined &&
 				input.totalExpectedBranches !== undefined &&
 				this._mergedBranches.length + 1 < input.totalExpectedBranches;
@@ -242,14 +251,38 @@ export class IntegrationPipeline implements IntegrationService {
 					});
 				}
 				await this.os.consolidateFieldGuide?.();
+				if (repaired && repCommitSha) {
+					return {
+						outcome: "merged",
+						merged: true,
+						repaired: true,
+						rolledBack: false,
+						commitSha: repCommitSha,
+						conflictFiles: [],
+						finding: repFinding ?? finding,
+						mergedBranches: addedBranches,
+					};
+				}
+				if (rolledBack) {
+					return {
+						outcome: "rolled_back",
+						merged: false,
+						repaired: false,
+						rolledBack: true,
+						conflictFiles: [],
+						finding: repFinding ?? finding,
+						mergedBranches: [],
+					};
+				}
 				return {
-					merged: repaired,
-					repaired,
-					rolledBack,
-					commitSha: repCommitSha,
+					outcome: "failed",
+					merged: false,
+					repaired: false,
+					rolledBack: false,
+					reason: failReason,
 					conflictFiles: [],
 					finding: repFinding ?? finding,
-					mergedBranches: addedBranches,
+					mergedBranches: [],
 				};
 			}
 
@@ -264,6 +297,7 @@ export class IntegrationPipeline implements IntegrationService {
 			});
 			await this.os.consolidateFieldGuide?.();
 			return {
+				outcome: "merged",
 				merged: true,
 				repaired: false,
 				rolledBack: false,
@@ -340,13 +374,13 @@ export class IntegrationPipeline implements IntegrationService {
 								claim: `Refinery resolved conflict & merged ${input.task?.title ?? input.label} (${resolved.commitSha.slice(0, 8)})`,
 								summary: `Neutral resolver reconciled conflicts in ${conflictFiles.join(", ")} cleanly on trunk.`,
 								level: "empirical",
-								buildsOn: this._bestGreenFindingId ? [this._bestGreenFindingId] : undefined,
+								buildsOn: this.bestGreenFindingId ? [this.bestGreenFindingId] : undefined,
 							},
 							this.resolveVerifySignal(input.closeoutSignal),
 						);
 						const resRegressedGreenTrunk =
 							Boolean(this.os.trust.verifier) &&
-							this._bestGreenAccepted &&
+							this.bestGreenAccepted &&
 							resFinding.status !== "accepted";
 						if (resRegressedGreenTrunk) {
 							const rolledBack = Boolean(this.os.worktrees.resetTrunk?.(prevGreenSha));
@@ -365,10 +399,23 @@ export class IntegrationPipeline implements IntegrationService {
 								summary: `Conflict resolution regressed green trunk on ${input.task?.id ?? input.label} (${input.branch}): ${failReason.slice(0, 220)}${rolledBack ? " [trunk rolled back]" : ""}`,
 								isOsActor: true,
 							});
+							if (rolledBack) {
+								return {
+									outcome: "rolled_back",
+									merged: false,
+									repaired: false,
+									rolledBack: true,
+									conflictFiles,
+									finding: resFinding,
+									mergedBranches: [],
+								};
+							}
 							return {
+								outcome: "failed",
 								merged: false,
 								repaired: false,
-								rolledBack,
+								rolledBack: false,
+								reason: failReason,
 								conflictFiles,
 								finding: resFinding,
 								mergedBranches: [],
@@ -391,6 +438,7 @@ export class IntegrationPipeline implements IntegrationService {
 						});
 						await this.os.consolidateFieldGuide?.();
 						return {
+							outcome: "merged",
 							merged: true,
 							repaired: true,
 							rolledBack: false,
@@ -414,11 +462,24 @@ export class IntegrationPipeline implements IntegrationService {
 			summary: `Merge conflict for ${input.task?.id ?? input.label} (${input.branch}): ${conflictFiles.join(", ") || merged.error}`,
 			isOsActor: true,
 		});
+		if (conflictFiles.length > 0) {
+			const [firstConflict, ...restConflicts] = conflictFiles;
+			return {
+				outcome: "conflict_unresolved",
+				merged: false,
+				repaired: false,
+				rolledBack: false,
+				conflictFiles: [firstConflict!, ...restConflicts],
+				mergedBranches: [],
+			};
+		}
 		return {
+			outcome: "failed",
 			merged: false,
 			repaired: false,
 			rolledBack: false,
-			conflictFiles,
+			reason: merged.error || "Merge failed without conflict markers",
+			conflictFiles: [],
 			mergedBranches: [],
 		};
 	}
@@ -438,7 +499,7 @@ export class IntegrationPipeline implements IntegrationService {
 				message: `${input.actorName}: merge ${cand.handle} (${cand.branch})`,
 			});
 			if (merged.ok) {
-				this._bestGreenSha = merged.commitSha;
+				this.advanceRatchetSha(merged.commitSha);
 				this._mergedBranches.push(cand.branch);
 				mergedCount += 1;
 				if (cand.laneIdx !== undefined) mergedLaneIndices.add(cand.laneIdx);
@@ -464,7 +525,7 @@ export class IntegrationPipeline implements IntegrationService {
 
 			if (input.enableConflictResolution !== false && merged.conflictFiles.length > 0 && !input.signal.aborted) {
 				const preview = this.os.worktrees.mergePreviewDiff(cand.branch);
-				const baseBeforeResolve = this._bestGreenSha;
+				const baseBeforeResolve = this.bestGreenSha;
 				const resolver = await this.os.spawnWorker({
 					role: "integrator",
 					handle: `${input.actorName}-resolver`,
@@ -503,7 +564,7 @@ export class IntegrationPipeline implements IntegrationService {
 							message: `${input.actorName}: resolved ${cand.handle} conflict`,
 						});
 						if (resMerge.ok) {
-							this._bestGreenSha = resMerge.commitSha;
+							this.advanceRatchetSha(resMerge.commitSha);
 							this._mergedBranches.push(cand.branch, resolver.branch);
 							mergedCount += 1;
 							resolvedConflicts += 1;
@@ -535,13 +596,7 @@ export class IntegrationPipeline implements IntegrationService {
 				},
 				this.resolveVerifySignal(input.closeoutSignal),
 			);
-			if (trunkFinding.status === "accepted") {
-				this._bestGreenAccepted = true;
-				this._bestGreenFindingId = trunkFinding.id;
-			}
-			if (typeof trunkFinding.score === "number") {
-				this._bestGreenScore = Math.max(this._bestGreenScore ?? -Infinity, trunkFinding.score);
-			}
+			this.ratchet = transitionTrunkRatchet(this.ratchet, { sha: this.bestGreenSha, finding: trunkFinding });
 
 			if (input.enableSemanticRepair && this.os.trust.verifier && trunkFinding.status !== "accepted" && !input.signal.aborted) {
 				const failReason = trunkFinding.rounds.at(-1)?.message ?? "Executable verifier rejected assembled trunk";
@@ -552,12 +607,12 @@ export class IntegrationPipeline implements IntegrationService {
 					cachePrefix: `${input.cachePrefix}-repair`,
 					failReason,
 					previousFinding: trunkFinding,
-					baseSha: this._bestGreenSha,
+					baseSha: this.bestGreenSha,
 					consolidateBefore: input.consolidateAfterRepair,
 					signal: input.signal,
 					closeoutSignal: input.closeoutSignal,
 				});
-				if (repaired.finding && repaired.improved) {
+				if (repaired.improved) {
 					trunkFinding = repaired.finding;
 				}
 				this.os.bus.emit(
@@ -578,17 +633,17 @@ export class IntegrationPipeline implements IntegrationService {
 			mergedLaneIndices,
 			conflictCount,
 			resolvedConflicts,
-			trunkAccepted: trunkFinding?.status === "accepted" || this._bestGreenAccepted,
-			bestGreenSha: this._bestGreenSha,
+			trunkAccepted: trunkFinding?.status === "accepted" || this.bestGreenAccepted,
+			bestGreenSha: this.bestGreenSha,
 			trunkFinding,
 		};
 	}
 
 	async runCompletionPass(input: CompletionPassInput): Promise<CompletionPassResult> {
-		const prevAccepted = input.previousFinding?.status === "accepted" || this._bestGreenAccepted;
+		const prevAccepted = input.previousFinding?.status === "accepted" || this.bestGreenAccepted;
 		const prevScore = typeof input.previousFinding?.score === "number"
 			? input.previousFinding.score
-			: (this._bestGreenScore ?? -Infinity);
+			: (this.bestGreenScore ?? -Infinity);
 		const prevSha = input.baseSha;
 
 		if (input.consolidateBefore) {
@@ -673,9 +728,20 @@ export class IntegrationPipeline implements IntegrationService {
 							},
 							input.actorName,
 						);
+						if (rolledBack) {
+							return {
+								outcome: "rolled_back",
+								improved: false,
+								rolledBack: true,
+								accepted: prevAccepted,
+								bestGreenSha: prevSha,
+								finding: input.previousFinding,
+							};
+						}
 						return {
+							outcome: "unchanged",
 							improved: false,
-							rolledBack,
+							rolledBack: false,
 							accepted: prevAccepted,
 							bestGreenSha: prevSha,
 							finding: input.previousFinding,
@@ -684,6 +750,7 @@ export class IntegrationPipeline implements IntegrationService {
 
 					this.recordGreenAdvance(repMerge.commitSha, repFinding, [repairer.branch]);
 					return {
+						outcome: "improved",
 						improved: true,
 						rolledBack: false,
 						accepted: repFinding.status === "accepted",
@@ -694,6 +761,7 @@ export class IntegrationPipeline implements IntegrationService {
 			}
 
 			return {
+				outcome: "unchanged",
 				improved: false,
 				rolledBack: false,
 				accepted: prevAccepted,

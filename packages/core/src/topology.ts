@@ -1,3 +1,4 @@
+import type { DecisionModelClient } from "./decision.ts";
 import type { DriverPoolSelection, DriverTier, McpConnectionInfo, QuotaPoolRouter, WorkerSession, WorkerTurnResult } from "./driver.ts";
 import type { EventBus } from "./events.ts";
 import type { FindingVerifier, ResourceScheduler, SecretBroker } from "./services.ts";
@@ -6,6 +7,8 @@ import type {
 	AgentRecord,
 	ArtifactRecord,
 	BoardPost,
+	BoardPostKind,
+	BoardVisibility,
 	EvidenceLevel,
 	Exclusive,
 	Finding,
@@ -110,6 +113,9 @@ export interface BoardPublishInput {
 	authorAgentId: string;
 	authorHandle?: string;
 	topic: string;
+	kind?: BoardPostKind;
+	subtreeId?: string;
+	visibility?: BoardVisibility;
 	summary: string;
 	body?: string;
 	board?: string;
@@ -131,6 +137,9 @@ export interface BoardQueryOptions {
 	offset?: number;
 	board?: string;
 	topic?: string;
+	kind?: BoardPostKind;
+	subtreeId?: string;
+	visibility?: BoardVisibility;
 	threadId?: string;
 	labels?: readonly string[];
 	afterSeq?: number;
@@ -176,6 +185,8 @@ export interface BoardWaitOptions {
 	afterSeq?: number;
 	board?: string;
 	topic?: string;
+	kind?: BoardPostKind;
+	visibility?: BoardVisibility;
 	threadId?: string;
 	labels?: readonly string[];
 	minPosts?: number;
@@ -208,7 +219,9 @@ export interface BoardService {
 	visit(postId: string): { post: BoardPost; citedBy: BoardPost[]; replies?: BoardPost[]; newestId?: string; cursor?: number } | undefined;
 	thread(postId: string, opts?: { latest?: number }): BoardThreadView | undefined;
 	label(postId: string, input: BoardLabelInput): BoardPostLabelResult;
-	digest(runId: string, board?: string): string;
+	/** Promote a subtree-local epistemic post to global visibility with OS curation labels. */
+	promote?(postId: string, input: { actorId: string; labels?: Record<string, string>; reason?: string }): BoardPost | undefined;
+	digest(runId: string, boardOrOpts?: string | { board?: string; subtreeId?: string }): string;
 	wait(runId: string, opts?: BoardWaitOptions): Promise<BoardWaitResult>;
 	recent(runId: string, limit?: number): BoardPost[];
 }
@@ -228,6 +241,14 @@ export interface ToolScope {
 	scheduler?: "auto" | "always" | "never";
 	/** Explicitly opt into async recursive spawning (`spawn_task`). */
 	canSpawn?: boolean;
+	/** Expose first-class recursive Planner spawning tools (`spawn_agents`, `await_agents`, `steer_or_cancel_agent`). Strictly denied for `role === "worker"`. */
+	spawnAgents?: boolean;
+	/** Automatically capture & verify a passive snapshot whenever a worker exits with new commits. */
+	passiveSnapshotOnExit?: boolean;
+	/** Subtree ID for scoped board publishing & digests. */
+	subtreeId?: string;
+	/** Default visibility stamped onto agent board posts ("subtree" for workers, "global" for top planners). */
+	defaultPostVisibility?: BoardVisibility;
 	/** Read-only worker flag. */
 	readOnly?: boolean;
 	/** Expose `load_skill` when on-demand skills exist (default true). */
@@ -242,14 +263,28 @@ export interface ToolScope {
 	extendedTools?: ToolDefinition[];
 	/** Include local workspace tools (automatically true for `pi-in-process`). */
 	includeWorkspaceTools?: boolean;
+	/** OS-injected Seatbelt read-deny paths propagated into workspace tools. */
+	deniedReadPaths?: readonly string[];
+	/** Preferred edit tool format for in-process drivers. */
+	editFormat?: "search_replace" | "apply_patch";
 }
 
-export interface SpawnWorkerRequest {
-	role: Role;
+export type WorkerToolScope = Omit<ToolScope, "canSpawn" | "spawnAgents"> & {
+	readonly canSpawn?: false;
+	readonly spawnAgents?: false;
+};
+
+interface SpawnWorkerRequestBase {
 	/** Optional OS-assigned readable handle (e.g. "peer-1", "integrator") shown on board posts. */
 	handle?: string;
 	taskId?: string;
 	parentAgentId?: string;
+	/** Subtree root identifier propagated to children for scoped Board v2 digests. */
+	subtreeId?: string;
+	/** Recursive depth in the Planner/Worker search forest (0 = root). */
+	depth?: number;
+	/** Automatically commit WIP and submit passive verification snapshot on turn exit when edits exist. */
+	passiveSnapshotOnExit?: boolean;
 	preferredDriverId?: string;
 	avoidDrivers?: readonly string[];
 	/** Minimum capability tier for driver selection (e.g. "frontier"). */
@@ -274,15 +309,29 @@ export interface SpawnWorkerRequest {
 	maxTurns?: number;
 	/** Explicit tool menu exposed to this worker via MCP / in-process bridge. */
 	tools?: ToolDefinition[];
-	/** Declarative topology/role tool scoping (preferred over full 12-tool default menu). */
-	toolScope?: ToolScope;
 	/** Explicit curated skill names to pre-bind into this worker's static prompt. */
 	skills?: string[];
 	/** Stable KV prompt cache key shared across sibling workers of the same role. */
 	cacheKeyPrefix?: string;
-	/** Explicitly opt into async recursive spawning (default false to prevent Double-Harness Collision). */
-	canSpawn?: boolean;
 }
+
+/**
+ * Compile-time two-role spawn permission invariant:
+ * - `role: "worker"` CANNOT set `canSpawn: true` or `toolScope.spawnAgents: true`!
+ * - Non-worker roles (e.g. `"planner"`, `"root"`) may opt into recursive spawning.
+ */
+export type SpawnWorkerRequest = SpawnWorkerRequestBase & (
+	| {
+		readonly role: "worker";
+		readonly canSpawn?: false;
+		readonly toolScope?: WorkerToolScope;
+	}
+	| {
+		readonly role: Exclude<Role, "worker">;
+		readonly canSpawn?: boolean;
+		readonly toolScope?: ToolScope;
+	}
+);
 
 export interface WorkerHandle {
 	readonly agent: AgentRecord;
@@ -324,15 +373,46 @@ export interface IntegrateBranchInput {
 	readonly closeoutSignal?: AbortSignal;
 }
 
-export interface IntegrateBranchResult {
-	readonly merged: boolean;
-	readonly repaired: boolean;
-	readonly rolledBack: boolean;
-	readonly commitSha?: string;
-	readonly conflictFiles: readonly string[];
-	readonly finding?: Finding;
-	readonly mergedBranches: readonly string[];
-}
+export type IntegrateBranchResult = Exclusive<
+	| {
+		readonly outcome: "merged";
+		readonly merged: true;
+		readonly repaired: boolean;
+		readonly rolledBack: false;
+		readonly commitSha: string;
+		readonly conflictFiles: readonly string[];
+		readonly finding?: Finding;
+		readonly mergedBranches: readonly string[];
+	}
+	| {
+		readonly outcome: "rolled_back";
+		readonly merged: false;
+		readonly repaired: false;
+		readonly rolledBack: true;
+		readonly conflictFiles: readonly string[];
+		readonly finding?: Finding;
+		readonly mergedBranches: readonly [];
+	}
+	| {
+		readonly outcome: "conflict_unresolved";
+		readonly merged: false;
+		readonly repaired: false;
+		readonly rolledBack: false;
+		readonly conflictFiles: readonly [string, ...string[]];
+		readonly finding?: Finding;
+		readonly mergedBranches: readonly [];
+	}
+	| {
+		readonly outcome: "failed";
+		readonly merged: false;
+		readonly repaired: false;
+		readonly rolledBack: false;
+		readonly reason: string;
+		readonly conflictFiles: readonly string[];
+		readonly finding?: Finding;
+		readonly mergedBranches: readonly [];
+	}
+>;
 
 export interface AssembleBranchesInput {
 	readonly branches: readonly IntegrationBranchCandidate[];
@@ -371,13 +451,32 @@ export interface CompletionPassInput {
 	readonly closeoutSignal?: AbortSignal;
 }
 
-export interface CompletionPassResult {
-	readonly improved: boolean;
-	readonly rolledBack: boolean;
-	readonly accepted: boolean;
-	readonly bestGreenSha: string;
-	readonly finding?: Finding;
-}
+export type CompletionPassResult = Exclusive<
+	| {
+		readonly outcome: "improved";
+		readonly improved: true;
+		readonly rolledBack: false;
+		readonly accepted: boolean;
+		readonly bestGreenSha: string;
+		readonly finding: Finding;
+	}
+	| {
+		readonly outcome: "rolled_back";
+		readonly improved: false;
+		readonly rolledBack: true;
+		readonly accepted: boolean;
+		readonly bestGreenSha: string;
+		readonly finding?: Finding;
+	}
+	| {
+		readonly outcome: "unchanged";
+		readonly improved: false;
+		readonly rolledBack: false;
+		readonly accepted: boolean;
+		readonly bestGreenSha: string;
+		readonly finding?: Finding;
+	}
+>;
 
 export interface IntegrationService {
 	readonly bestGreenSha: string;
@@ -412,6 +511,10 @@ export interface SwarmOsApi {
 	readonly closeoutSignal?: AbortSignal;
 	/** Shared OS-level mechanical merge, conflict resolution, semantic repair, and monotonic ratchet pipeline. */
 	readonly integration?: IntegrationService;
+	/** Optional System-1 calibrated Decision Model client (e.g., TypeSafe Jev) for routing, triage, and stopping gates. */
+	readonly decisionClient?: DecisionModelClient;
+	/** Toggle Wave-1 / subsequent Field Guide prompt injection dynamically (e.g., from Meta-Router). */
+	setFieldGuideEnabled?(enabled: boolean): void;
 	run(): Run;
 	/** Check remaining wall-clock/token/USD fraction (0..1); returns true once reserve threshold is reached. */
 	isInCloseoutReserve(): boolean;

@@ -4,6 +4,7 @@ import { elasticPhaseTopology } from "./elastic-phase.ts";
 import { evolutionTopology } from "./evolution.ts";
 import { hierarchyTopology } from "./hierarchy.ts";
 import { pullRefineryTopology } from "./pull-refinery.ts";
+import { recursivePlannersTopology } from "./recursive-planners.ts";
 import { singleTopology } from "./single.ts";
 import { substratePeersTopology } from "./substrate-peers.ts";
 
@@ -11,7 +12,10 @@ export {
 	adaptiveTopology,
 	classifyAdaptiveRegime,
 	inspectWorkspaceStructure,
+	resolveAdaptiveExecutionPlan,
 	type AdaptiveClassification,
+	type AdaptiveDelegateName,
+	type AdaptiveExecutionPlan,
 	type AdaptiveRegime,
 	type AdaptiveTopologyOptions,
 	type WorkspaceStructureMetrics,
@@ -20,10 +24,19 @@ export { elasticPhaseTopology, type ElasticPhaseOptions } from "./elastic-phase.
 export { evolutionTopology, type EvolutionTopologyOptions } from "./evolution.ts";
 export { hierarchyTopology, type HierarchyTopologyOptions } from "./hierarchy.ts";
 export { pullRefineryTopology, type PullRefineryOptions } from "./pull-refinery.ts";
+export { recursivePlannersTopology, type RecursivePlannersOptions } from "./recursive-planners.ts";
 export { singleTopology, type SingleTopologyOptions } from "./single.ts";
 export { substratePeersTopology, type SubstratePeersOptions, type SubstrateSeatConfig } from "./substrate-peers.ts";
 
-export type TopologyName = "single" | "hierarchy" | "pull-refinery" | "substrate-peers" | "evolution" | "elastic-phase" | "adaptive";
+export type TopologyName =
+	| "single"
+	| "hierarchy"
+	| "pull-refinery"
+	| "substrate-peers"
+	| "evolution"
+	| "elastic-phase"
+	| "recursive-planners"
+	| "adaptive";
 
 export const TOPOLOGY_NAMES: readonly TopologyName[] = [
 	"single",
@@ -32,6 +45,7 @@ export const TOPOLOGY_NAMES: readonly TopologyName[] = [
 	"substrate-peers",
 	"evolution",
 	"elastic-phase",
+	"recursive-planners",
 	"adaptive",
 ];
 
@@ -49,6 +63,8 @@ export function createTopology(name: string, options: Record<string, unknown> = 
 			return evolutionTopology(options);
 		case "elastic-phase":
 			return elasticPhaseTopology(options);
+		case "recursive-planners":
+			return recursivePlannersTopology(options);
 		case "adaptive":
 			return adaptiveTopology(options);
 		default:

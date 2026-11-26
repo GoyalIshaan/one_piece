@@ -166,8 +166,12 @@ export interface DriverConfig {
 	binary?: string;
 	/** Default model ID for this driver (optional; uses CLI default if omitted). */
 	model?: string;
-	/** Max concurrent workers allowed on this subscription/provider (default 2 for subs). */
+	/** Max concurrent workers allowed on this subscription/provider (default 2 for subs in fixed mode; initial floor in physics mode). */
 	maxConcurrent?: number;
+	/** Optional hard upper ceiling on concurrent workers even under physics AIMD scaling. */
+	hardMaxConcurrent?: number;
+	/** Per-driver concurrency mode override ("physics" | "fixed"). */
+	concurrencyMode?: "physics" | "fixed";
 	/** Keep consumer subscription billing by unsetting API key env vars (default true for CLIs). */
 	subscriptionMode?: boolean;
 	/** Isolate CLI workers from personal MCPs, plugins, hooks, and ambient skills (default true for CLIs). */
@@ -183,6 +187,10 @@ export interface DriverConfig {
 export interface DriverPoolSelection {
 	driver: WorkerDriver;
 	release: () => void;
+	/** Temporarily yield concurrency permit while a parent Planner sleeps in `await_agents` (prevents recursive deadlock). */
+	park?: () => void;
+	/** Re-claim concurrency permit after waking from `await_agents`. */
+	unpark?: () => void;
 	/** Milliseconds spent waiting for a concurrency permit. */
 	waitedMs?: number;
 }
@@ -216,5 +224,5 @@ export interface QuotaPoolRouter {
 	/** Clear cooldown state after a successful turn. */
 	reportSuccess(driverId: string): void;
 	/** Current quota/cooldown status snapshot for all registered drivers. */
-	status(): Array<{ driverId: string; kind: DriverKind; state: "healthy" | "cooldown" | "drained"; cooldownUntil?: number; running: number; waiting: number }>;
+	status(): Array<{ driverId: string; kind: DriverKind; state: "healthy" | "cooldown" | "drained"; cooldownUntil?: number; running: number; waiting: number; effectiveLimit?: number }>;
 }

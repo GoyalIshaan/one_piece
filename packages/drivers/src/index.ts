@@ -11,10 +11,27 @@ export { buildCliEnv, classifyQuotaError, probeCliBinary } from "./classify.ts";
 export { prepareCleanCodexHome, prepareCleanGrokHome } from "./cli-home.ts";
 export { buildStructuredAnchorMessages, estimateMessageTokens, extractFailedApproaches, maybeCompactSession, microCompactMessages } from "./compaction.ts";
 export { CodexAppServerDriver, CodexExecDriver } from "./codex.ts";
+export {
+	createDecisionClientFromEnv,
+	JevDecisionClient,
+	loadEnvKey,
+	MockDecisionClient,
+	type DecisionFactoryOptions,
+	type JevClientOptions,
+	type MockDecisionHandler,
+} from "./decision.ts";
 export { GeminiCliDriver } from "./gemini.ts";
 export { GrokAcpDriver, GrokCliDriver } from "./grok.ts";
 export { synthesizeHandoffFile, type HandoffInput } from "./handoff.ts";
 export { PiInProcessDriver } from "./pi.ts";
+export {
+	defaultHostPhysicsProbe,
+	PhysicsConcurrencyGovernor,
+	type GovernorScaleEvent,
+	type HostPhysicsProbe,
+	type HostPhysicsSnapshot,
+	type PhysicsGovernorOptions,
+} from "./physics-governor.ts";
 export { DriverQuotaRouter, type QuotaRouterOptions } from "./quota-router.ts";
 export { normalizeStrictJsonSchema } from "./schema.ts";
 export { bindTurnCancellation, killProcessTree, killProcessTreeNow, type TurnCancellationBinding } from "./supervisor.ts";

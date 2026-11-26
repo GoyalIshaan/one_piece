@@ -13,6 +13,8 @@ export interface SubstratePeersOptions {
 	seatConfigs?: readonly SubstrateSeatConfig[];
 	/** Automatically run a 1-turn semantic repair integrator if assembled trunk fails verification (default true). */
 	enableSemanticRepair?: boolean;
+	/** Allow peers to act as Planner-capable peers that can dynamically spawn child Planners/Workers (default false for classic flat peers). */
+	allowPeerSpawning?: boolean;
 }
 
 /**
@@ -36,25 +38,17 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 			os.bus.emit(os.runId, "phase.changed", { to: "peer-explore", reason: `Launching ${peerCount} peers over Board v2 substrate` });
 
 			const isSharded = Boolean(opts.seatConfigs && opts.seatConfigs.length > 0);
+			const peerSpawning = Boolean(opts.allowPeerSpawning && !isSharded);
 			const handles = await Promise.all(
 				Array.from({ length: peerCount }, (_, idx) => {
 					const seatCfg = opts.seatConfigs?.[idx];
-					return os.spawnWorker({
-						role: "worker",
-						handle: seatCfg?.handle ?? `peer-${idx + 1}`,
-						canSpawn: false,
+					const peerHandle = seatCfg?.handle ?? `peer-${idx + 1}`;
+					const baseReq = {
+						handle: peerHandle,
+						subtreeId: peerHandle,
+						depth: 0,
 						deniedReadPaths: seatCfg?.deniedReadPaths,
 						cacheKeyPrefix: `${os.runId}:substrate-peer`,
-						toolScope: {
-							board: "read-write",
-							artifacts: true,
-							// On privately sharded tasks, a single 1/N seat cannot satisfy the full N-seat verifier;
-							// hide report_finding so peers don't waste turns retrying partial rejections before trunk assembly.
-							findings: !isSharded,
-							tasks: false,
-							nominate: false,
-							scheduler: "auto",
-						},
 						systemPrompt: [
 							"You are a peer engineer in a flat ScaleMAS substrate swarm working in an isolated git worktree.",
 							"Coordinate cleanly with peers using the 4 shared board tools:",
@@ -66,7 +60,32 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 								? "Cite useful peer post IDs via `parent_ids`, write ONLY your seat deliverable cleanly, and exit once verified — trunk assembly verifies the combined N-seat output."
 								: "Cite useful peer post IDs via `parent_ids`, avoid overwriting peers' files unnecessarily, and call `report_finding` when your worktree has a verified deliverable.",
 						].join("\n"),
-					});
+					};
+					const sharedScope = {
+						board: "read-write" as const,
+						artifacts: true,
+						// On privately sharded tasks, a single 1/N seat cannot satisfy the full N-seat verifier;
+						// hide report_finding so peers don't waste turns retrying partial rejections before trunk assembly.
+						findings: !isSharded,
+						tasks: false,
+						nominate: false,
+						scheduler: "auto" as const,
+						subtreeId: peerHandle,
+						defaultPostVisibility: "global" as const,
+					};
+					return peerSpawning
+						? os.spawnWorker({
+							...baseReq,
+							role: "planner",
+							canSpawn: true,
+							toolScope: { ...sharedScope, canSpawn: true, spawnAgents: true },
+						})
+						: os.spawnWorker({
+							...baseReq,
+							role: "worker",
+							canSpawn: false,
+							toolScope: { ...sharedScope, canSpawn: false, spawnAgents: false },
+						});
 				}),
 			);
 

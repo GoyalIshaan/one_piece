@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createDecisionClientFromEnv } from "@one-piece/drivers";
 import { createMockAdapter } from "./adapters/mock.ts";
 import { createCliV2Router, createV2Adapter } from "./adapters/v2.ts";
 import { runTaskCalibration } from "./calibration.ts";
@@ -134,8 +135,21 @@ async function main(): Promise<void> {
 		const topology = parseFlag(rest, "--topology") ?? "pull-refinery";
 		const swarmTopologies = topologiesArg ? topologiesArg.split(",").map((s) => s.trim()).filter(Boolean) : [topology];
 		const driversArg = parseFlag(rest, "--drivers") ?? "codex";
-		const enableFieldGuide = !rest.includes("--no-field-guide");
+		const explicitNoFieldGuide = rest.includes("--no-field-guide");
+		const explicitFieldGuide = rest.includes("--field-guide");
+		const enableFieldGuide = !explicitNoFieldGuide;
 		const enableSemanticRepair = !rest.includes("--no-semantic-repair");
+		const decisionArg = (parseFlag(rest, "--decision-model") ?? "none") as "jev" | "auto" | "none";
+		const concurrencyMode = (parseFlag(rest, "--concurrency") ?? "fixed") as "physics" | "fixed";
+		const generationsRaw = parseFlag(rest, "--generations");
+		const generations = generationsRaw === "unbounded"
+			? ("unbounded" as const)
+			: generationsRaw !== undefined
+				? Number(generationsRaw)
+				: undefined;
+		const estimateBounds = rest.includes("--bound-analyst") ? true : undefined;
+		const checkpointPolicy = (parseFlag(rest, "--checkpoint-policy") ?? "coalesce") as "coalesce" | "interactive";
+		const decisionClient = createDecisionClientFromEnv({ provider: decisionArg, cwd: REPO_ROOT });
 
 		const arms: ArmSpec[] = [];
 		for (const rung of rungs) {
@@ -157,10 +171,17 @@ async function main(): Promise<void> {
 		const adapter =
 			adapterArg === "v2"
 				? createV2Adapter({
-						router: createCliV2Router(driversArg.split(",")),
+						router: createCliV2Router(driversArg.split(","), { concurrencyMode }),
 						task,
 						enableFieldGuide,
-						topologyOptions: { enableSemanticRepair },
+						decisionClient,
+						topologyOptions: {
+							enableSemanticRepair,
+							...(explicitNoFieldGuide ? { enableFieldGuideOverride: false } : explicitFieldGuide ? { enableFieldGuideOverride: true } : {}),
+							...(generations !== undefined ? { generations } : {}),
+							...(estimateBounds !== undefined ? { estimateBounds } : {}),
+							checkpointPolicy,
+						},
 					})
 				: createMockAdapter({
 						mode: adapterArg === "mock:reference" ? "reference" : "starter",

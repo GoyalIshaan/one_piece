@@ -9,7 +9,7 @@ import {
 	runCommand,
 } from "@one-piece/core";
 import { startDashboard } from "@one-piece/dashboard";
-import { createDriver, DriverQuotaRouter } from "@one-piece/drivers";
+import { createDecisionClientFromEnv, createDriver, DriverQuotaRouter } from "@one-piece/drivers";
 import { createTopology, SwarmOS, TOPOLOGY_NAMES } from "@one-piece/engine";
 import { McpBusServer } from "@one-piece/mcp-bus";
 import { KEYCHAIN_SERVICE } from "@one-piece/module-secrets";
@@ -149,6 +149,14 @@ async function cmdRun(projectDir: string, args: string[], flags: Record<string, 
 		drivers,
 		roles: cfg.roles,
 		runId,
+		concurrencyMode: (flags.concurrency?.[0] as "physics" | "fixed" | undefined) ?? cfg.concurrencyMode ?? "physics",
+		physics: { worktreeRoot: cfg.dataDir },
+	});
+	const decisionClient = createDecisionClientFromEnv({
+		provider: (flags["decision-model"]?.[0] as "jev" | "auto" | "none" | undefined) ?? cfg.decisionModel?.provider ?? "auto",
+		model: cfg.decisionModel?.model,
+		baseUrl: cfg.decisionModel?.baseUrl,
+		cwd: projectDir,
 	});
 
 	const os = await SwarmOS.create({
@@ -170,6 +178,7 @@ async function cmdRun(projectDir: string, args: string[], flags: Record<string, 
 		networkOffWorkers: cfg.networkOffWorkers,
 		skillsDirs: cfg.skillsDirs,
 		autoHandoffOnSecondCompaction: cfg.autoHandoffOnSecondCompaction,
+		decisionClient,
 		store,
 		router,
 	});

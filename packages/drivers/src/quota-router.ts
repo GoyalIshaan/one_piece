@@ -8,9 +8,12 @@ import {
 	type QuotaErrorClass,
 	type QuotaPoolRouter,
 	type Role,
+	type SlotPermitState,
 	transitionQuotaRecord,
+	transitionSlotPermit,
 	type WorkerDriver,
 } from "@one-piece/core";
+import { PhysicsConcurrencyGovernor, type PhysicsGovernorOptions } from "./physics-governor.ts";
 
 const TIER_RANK: Record<DriverTier, number> = {
 	sidekick: 0,
@@ -23,6 +26,10 @@ export interface QuotaRouterOptions {
 	roles: Record<string, string[]>;
 	bus?: EventBus;
 	runId?: string;
+	/** Concurrency scaling mode: "fixed" preserves static maxConcurrent; "physics" enables AIMD + RAM/CPU/disk backpressure. */
+	concurrencyMode?: "physics" | "fixed";
+	/** Optional physics governor tuning (e.g., worktreeRoot, probe override for testing). */
+	physics?: PhysicsGovernorOptions;
 	now?: () => number;
 }
 
@@ -63,6 +70,7 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 	private readonly states = new Map<string, ProviderQuotaRecord>();
 	private readonly waiters: PoolWaiter[] = [];
 	private readonly roles: Record<string, string[]>;
+	private readonly governor: PhysicsConcurrencyGovernor;
 	private bus?: EventBus;
 	private runId?: string;
 	private readonly now: () => number;
@@ -73,8 +81,15 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 		this.bus = opts.bus;
 		this.runId = opts.runId;
 		this.now = opts.now ?? Date.now;
+		const resolvedMode = opts.concurrencyMode ?? opts.physics?.mode ?? (opts.drivers.some((d) => d.config.concurrencyMode === "physics") ? "physics" : "fixed");
+		this.governor = new PhysicsConcurrencyGovernor({
+			...opts.physics,
+			mode: resolvedMode,
+			now: this.now,
+		});
 		for (const entry of opts.drivers) {
 			const maxConcurrent = Math.max(1, entry.config.maxConcurrent ?? (entry.config.kind === "pi-in-process" ? 4 : 2));
+			this.governor.registerDriver(entry.driver.id, entry.config);
 			this.driverMap.set(entry.driver.id, {
 				driver: entry.driver,
 				config: entry.config,
@@ -189,14 +204,17 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 	private pickFreeDriver(eligibleIds: readonly string[]): string | undefined {
 		const withFreeSlots = eligibleIds.filter((id) => {
 			const d = this.driverMap.get(id);
-			return d !== undefined && d.running < d.maxConcurrent;
+			if (!d) return false;
+			const limit = this.governor.effectiveLimit(id, d.running);
+			return d.running < limit;
 		});
 		if (!withFreeSlots.length) return undefined;
 
 		const utilOf = (id: string): number => {
 			const d = this.driverMap.get(id)!;
 			const w = Math.max(0.01, d.config.weight ?? 1);
-			return d.running / d.maxConcurrent / w;
+			const limit = Math.max(1, this.governor.effectiveLimit(id, d.running));
+			return d.running / limit / w;
 		};
 		const minUtil = Math.min(...withFreeSlots.map(utilOf));
 		const tiedPool = withFreeSlots.filter((id) => utilOf(id) <= minUtil + 1e-9);
@@ -218,14 +236,24 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 	private grantSlot(driverId: string, waitedMs: number): DriverPoolSelection {
 		const entry = this.driverMap.get(driverId)!;
 		entry.running += 1;
-		let released = false;
-		const release = () => {
-			if (released) return;
-			released = true;
-			entry.running = Math.max(0, entry.running - 1);
-			this.dispatchWaiters();
+		let permitState: SlotPermitState = "held";
+		const apply = (event: "park" | "unpark" | "release") => {
+			const res = transitionSlotPermit(permitState, event);
+			permitState = res.next;
+			if (res.runningDelta !== 0) {
+				entry.running = Math.max(0, entry.running + res.runningDelta);
+			}
+			if (res.shouldDispatch) {
+				this.dispatchWaiters();
+			}
 		};
-		return { driver: entry.driver, release, waitedMs };
+		return {
+			driver: entry.driver,
+			park: () => apply("park"),
+			unpark: () => apply("unpark"),
+			release: () => apply("release"),
+			waitedMs,
+		};
 	}
 
 	private dispatchWaiters(): void {
@@ -291,8 +319,17 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 	reportQuotaError(driverId: string, error: QuotaErrorClass): void {
 		const record = this.states.get(driverId);
 		if (!record) return;
+		if (error.kind === "transient_rpm" || error.kind === "window_exhausted") {
+			const scaled = this.governor.onRateLimit(driverId, error.kind);
+			if (scaled && this.bus && this.runId) {
+				this.bus.emit(this.runId, "governor.scaled", scaled);
+			}
+		}
 		const { next, changed, emitted } = transitionQuotaRecord(record, { type: "quota_error", error, now: this.now() });
-		if (!changed) return;
+		if (!changed) {
+			this.dispatchWaiters();
+			return;
+		}
 		this.states.set(driverId, next);
 		this.persistState(next);
 		if (this.bus && this.runId) {
@@ -308,10 +345,15 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 	reportSuccess(driverId: string): void {
 		const record = this.states.get(driverId);
 		if (!record) return;
+		const scaled = this.governor.onSuccess(driverId);
+		if (scaled && this.bus && this.runId) {
+			this.bus.emit(this.runId, "governor.scaled", scaled);
+		}
 		const { next, changed } = transitionQuotaRecord(record, { type: "success", now: this.now() });
-		if (!changed) return;
-		this.states.set(driverId, next);
-		this.persistState(next);
+		if (changed) {
+			this.states.set(driverId, next);
+			this.persistState(next);
+		}
 		this.dispatchWaiters();
 	}
 
@@ -336,6 +378,7 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 				cooldownUntil: rec.cooldownUntil,
 				running: entry.running,
 				waiting: waitingByDriver.get(driverId) ?? 0,
+				effectiveLimit: this.governor.effectiveLimit(driverId, entry.running),
 			};
 		});
 	}
