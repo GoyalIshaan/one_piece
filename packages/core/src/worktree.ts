@@ -4,6 +4,21 @@ import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync } f
 import { join, relative, resolve } from "node:path";
 import type { MergeTrunkResult, WorktreeHandle, WorktreeManager } from "./topology.ts";
 
+export const WORKTREE_EXCLUDE_PATTERNS: readonly string[] = [
+	".swarm/",
+	".gemini/settings.json",
+	".grok/config.toml",
+	".one_piece/",
+	"__pycache__/",
+	"*.pyc",
+	"*.pyo",
+	".pytest_cache/",
+	".mypy_cache/",
+	".ruff_cache/",
+	".DS_Store",
+	"*.egg-info/",
+];
+
 function git(cwd: string, args: string[]): string {
 	return execFileSync("git", args, {
 		cwd,
@@ -57,7 +72,14 @@ export class GitWorktreeManager implements WorktreeManager {
 						const rel = relative(resolvedSource, src);
 						if (!rel) return true;
 						const parts = rel.split(/[\\/]/);
-						return !parts.includes(".one_piece") && !parts.includes("node_modules") && !parts.includes(".git");
+						return (
+							!parts.includes(".one_piece") &&
+							!parts.includes("node_modules") &&
+							!parts.includes(".git") &&
+							!parts.includes("__pycache__") &&
+							!parts.includes(".pytest_cache") &&
+							!parts.includes(".DS_Store")
+						);
 					},
 				});
 			}
@@ -93,14 +115,15 @@ export class GitWorktreeManager implements WorktreeManager {
 			// Branch did not exist yet.
 		}
 		git(this.repoRoot, ["worktree", "add", "-b", branch, worktreePath, baseRef]);
-		this.writeGitExclude(worktreePath, [".swarm/", ".gemini/settings.json", ".grok/config.toml", ".one_piece/"]);
+		this.writeGitExclude(worktreePath, WORKTREE_EXCLUDE_PATTERNS);
 		return { path: worktreePath, branch, baseSha: baseRef };
 	}
 
 	writeGitExclude(worktreePath: string, patterns: readonly string[]): void {
 		try {
-			const gitDir = resolve(worktreePath, git(worktreePath, ["rev-parse", "--git-dir"]));
-			const infoDir = join(gitDir, "info");
+			// Linked git worktrees read exclude patterns from `--git-common-dir`/info/exclude, NOT per-worktree `--git-dir`!
+			const gitCommonDir = resolve(worktreePath, git(worktreePath, ["rev-parse", "--git-common-dir"]));
+			const infoDir = join(gitCommonDir, "info");
 			mkdirSync(infoDir, { recursive: true });
 			const excludeFile = join(infoDir, "exclude");
 			const current = existsSync(excludeFile) ? readFileSync(excludeFile, "utf8") : "";
@@ -117,9 +140,20 @@ export class GitWorktreeManager implements WorktreeManager {
 
 	commitWip(worktreePath: string, message: string): string | undefined {
 		try {
+			this.writeGitExclude(worktreePath, WORKTREE_EXCLUDE_PATTERNS);
 			const status = git(worktreePath, ["status", "--porcelain"]);
 			if (!status) return undefined;
 			git(worktreePath, ["add", "-A"]);
+			// Unstage any cached bytecode/harness artifacts if they were somehow tracked before exclude ran.
+			for (const junk of [".swarm", ".one_piece", ".gemini/settings.json", ".grok/config.toml"]) {
+				try {
+					git(worktreePath, ["reset", "-q", "HEAD", "--", junk]);
+				} catch {
+					// Not staged.
+				}
+			}
+			const staged = git(worktreePath, ["diff", "--cached", "--name-only"]);
+			if (!staged) return undefined;
 			git(worktreePath, [
 				"-c", "user.name=one-piece",
 				"-c", "user.email=one-piece@local",
@@ -139,6 +173,26 @@ export class GitWorktreeManager implements WorktreeManager {
 		}
 	}
 
+	treeSha(worktreePath: string): string | undefined {
+		try {
+			return git(worktreePath, ["rev-parse", "HEAD^{tree}"]);
+		} catch {
+			return undefined;
+		}
+	}
+
+	hasEditsSince(worktreePath: string, baseRef: string): boolean {
+		try {
+			const baseCommit = git(worktreePath, ["rev-parse", `${baseRef}^{commit}`]);
+			const headCommit = git(worktreePath, ["rev-parse", "HEAD"]);
+			if (headCommit !== baseCommit) return true;
+			return Boolean(git(worktreePath, ["status", "--porcelain"]));
+		} catch {
+			const headCommit = this.headSha(worktreePath);
+			return Boolean(headCommit && headCommit !== baseRef);
+		}
+	}
+
 	diffStat(worktreePath: string, baseRef = this.baseSha): string {
 		try {
 			const committed = git(worktreePath, ["diff", "--stat", `${baseRef}...HEAD`]);
@@ -151,10 +205,17 @@ export class GitWorktreeManager implements WorktreeManager {
 
 	diffSha(worktreePath: string): string {
 		try {
-			const head = git(worktreePath, ["rev-parse", "HEAD"]);
+			// Hash the git TREE object (`HEAD^{tree}`) rather than the commit SHA so byte-identical
+			// workspace states across different commit messages/timestamps yield the exact same digest.
+			let tree = "";
+			try {
+				tree = git(worktreePath, ["rev-parse", "HEAD^{tree}"]);
+			} catch {
+				tree = git(worktreePath, ["rev-parse", "HEAD"]);
+			}
 			const status = git(worktreePath, ["status", "--porcelain"]);
 			const diff = git(worktreePath, ["diff"]);
-			return createHash("sha256").update(head).update("\0").update(status).update("\0").update(diff).digest("hex").slice(0, 16);
+			return createHash("sha256").update(tree).update("\0").update(status).update("\0").update(diff).digest("hex").slice(0, 16);
 		} catch {
 			return "unknown";
 		}
@@ -209,6 +270,17 @@ export class GitWorktreeManager implements WorktreeManager {
 			branchDiff = "(branch diff unavailable)";
 		}
 		return { baseSha, trunkDiff, branchDiff };
+	}
+
+	resetTrunk(ref: string): boolean {
+		const trunk = this.trunkPath;
+		try {
+			git(trunk, ["reset", "--hard", ref]);
+			git(trunk, ["clean", "-fd"]);
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	remove(worktreePath: string): void {

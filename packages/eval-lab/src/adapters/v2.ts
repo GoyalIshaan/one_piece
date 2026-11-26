@@ -1,8 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
-	allowSandboxReads,
-	denySandboxReads,
 	type DriverConfig,
 	type FindingVerifier,
 	type QuotaPoolRouter,
@@ -25,6 +23,7 @@ export interface V2AdapterOptions {
 	/** Optional EvalTask so its `publicCheck` can be exposed to v2's online `TrustLayer` verifier. */
 	task?: EvalTask;
 	enableBlindReview?: boolean;
+	enableFieldGuide?: boolean;
 	reservePct?: number;
 	/** Optional overrides passed to `createTopology(name, options)`. */
 	topologyOptions?: Record<string, unknown>;
@@ -84,7 +83,6 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 			const began = Date.now();
 			const topologyName = resolveV2TopologyName(spec);
 			const denyPaths = [...spec.hiddenDenyPaths];
-			denySandboxReads(denyPaths);
 
 			let cumulativeTokens = 0;
 			const snapshotMeta = new Map<string, { atTokens: number; atWallMs: number }>();
@@ -97,6 +95,7 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 					runDir: spec.runDir,
 					workspace: spec.workspaceDir,
 					topology: topologyName,
+					deniedReadPaths: denyPaths,
 					goal: {
 						title: `${spec.taskId} (seed ${spec.seed})`,
 						text: spec.injectedPrompt ? `${spec.goal}\n\n${spec.injectedPrompt}` : spec.goal,
@@ -114,6 +113,7 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 					reservePct: options.reservePct ?? 0.12,
 					verifier: bridgePublicVerifier(options.task, spec),
 					enableBlindReview: options.enableBlindReview ?? false,
+					enableFieldGuide: options.enableFieldGuide ?? true,
 					networkOffWorkers: true,
 					rawConfig: {
 						evalLab: {
@@ -147,39 +147,45 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 				});
 
 				const n = Math.max(1, spec.swarmSize);
-				const totalSeats = spec.totalSeats ?? spec.privateShards?.length ?? n;
-				const shards = spec.privateShards ?? [];
+				const firstClassSeats = spec.seats;
+				const shards = firstClassSeats?.length ? firstClassSeats.map((s) => s.privateDir) : (spec.privateShards ?? []);
+				const totalSeats = spec.totalSeats ?? firstClassSeats?.length ?? shards.length ?? n;
 
 				const buildSeatPrompt = (seatIdx: number, shardDir: string, multiPeer: boolean): string => {
+					const seat = firstClassSeats?.[seatIdx];
+					if (seat) return multiPeer ? seat.prompt : seat.soloPrompt;
+					if (multiPeer && spec.seatPrompts?.[seatIdx]) return spec.seatPrompts[seatIdx]!;
+					if (!multiPeer) {
+						const soloPrompt =
+							spec.soloSeatPrompts?.[seatIdx] ??
+							(spec.soloSeatPrompts?.length === 1 && shards.length === 1 ? spec.soloSeatPrompts[0] : undefined);
+						if (soloPrompt) return soloPrompt;
+					}
 					const shardFile = join(shardDir, "shard.json");
 					if (!multiPeer) {
 						return [
 							`Seat assignment: You are Seat ${seatIdx} of ${totalSeats} (seats 0..${totalSeats - 1}).`,
-							`Your private shard file is at: ${shardFile}`,
+							`Your private shard directory is: ${shardDir} (primary file: ${shardFile})`,
 							"Other seats' private shards and hidden grading directories are kernel-denied by the sandbox.",
-							`Write your deliverable in your workspace (e.g. submissions/seat_${seatIdx}.json) using only information you can legally access.`,
+							`Write your deliverable in your workspace using only information you can legally access.`,
 						].join("\n");
 					}
 					return [
 						`Seat assignment: You are Seat ${seatIdx} of ${totalSeats} (seats 0..${totalSeats - 1}).`,
-						`Your private shard file is at: ${shardFile}`,
-						"Other seats' private shards are kernel-denied by the sandbox — coordinate with peers strictly via the shared message board!",
-						"Workflow:",
-						`1. Read ONLY your own shard at ${shardFile} and compute the sum of its \`values\` array.`,
-						`2. Immediately call \`board_publish(topic="shard-subtotal", summary="seat ${seatIdx} subtotal=<SUM>", body="...", labels={"seat": "${seatIdx}"})\`.`,
-						`3. Call \`board_wait(topic="shard-subtotal", min_posts=${totalSeats}, timeout_seconds=25)\` (call it again if it times out before all ${totalSeats} seats appear) until all ${totalSeats} seats have published their subtotals.`,
-						`4. Compute your offset = sum of subtotals for seats 0..${seatIdx - 1} (0 if seat 0), then compute your global prefix array and write ONLY \`submissions/seat_${seatIdx}.json\` as \`{"seat": ${seatIdx}, "prefix": [...]}\`.`,
-						`5. Verify your JSON file format (12 integers in \`prefix\`) and finish cleanly — the swarm will automatically assemble all ${totalSeats} seats onto trunk and run the full ${totalSeats}-seat verifier (no need to call \`report_finding\` on a partial 1/${totalSeats} workspace).`,
+						`Your private shard directory is: ${shardDir} (primary file: ${shardFile})`,
+						"Other seats' private shards are kernel-denied by the sandbox — coordinate with peers strictly via the shared message board (`board_publish`, `board_wait`, `board_search`, `board_visit`)!",
+						`Read ONLY your own shard, publish concise findings promptly, wait for all ${totalSeats} seats with \`board_wait\`, and write your seat deliverable cleanly in your worktree.`,
 					].join("\n");
 				};
 
+				const supportsSeatConfigs = topologyName === "substrate-peers" || topologyName === "elastic-phase" || topologyName === "adaptive";
 				const seatConfigs =
-					topologyName === "substrate-peers" && shards.length > 0
+					supportsSeatConfigs && shards.length > 0
 						? Array.from({ length: Math.max(2, n) }, (_, idx) => {
 							const myShard = shards[idx];
 							const siblingDenies = shards.filter((_, j) => j !== idx);
 							return {
-								handle: `seat-${idx}`,
+								handle: firstClassSeats?.[idx]?.handle ?? `seat-${idx}`,
 								deniedReadPaths: [...denyPaths, ...siblingDenies],
 								seatPrompt: myShard ? buildSeatPrompt(idx, myShard, true) : undefined,
 							};
@@ -192,7 +198,7 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 				const singleExtra =
 					topologyName === "single"
 						? {
-							handle: shards.length > 0 ? `seat-${singleSeatIdx}` : "solo",
+							handle: firstClassSeats?.[singleSeatIdx]?.handle ?? (shards.length > 0 ? `seat-${singleSeatIdx}` : "solo"),
 							deniedReadPaths: singleDeniedReads,
 							seatPrompt: singleShard ? buildSeatPrompt(singleSeatIdx, singleShard, false) : undefined,
 						}
@@ -278,7 +284,6 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 					modelIds: usedModels,
 				};
 			} finally {
-				allowSandboxReads(denyPaths);
 				if (os) await os.dispose();
 				store.close();
 			}

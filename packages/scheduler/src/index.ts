@@ -54,6 +54,7 @@ export interface SchedulerHost {
 	workspaceOf(agentId: string): string | undefined;
 	taskIdOf?(agentId: string): string | undefined;
 	signalOf?(agentId: string): AbortSignal | undefined;
+	deniedReadPathsOf?(agentId: string): readonly string[] | undefined;
 	availableBudget?(unit: string): number;
 	chargeUnits?(agentId: string, usage: Record<string, number>): void;
 	priorityOf?(job: Job): number;
@@ -169,8 +170,9 @@ export class Scheduler implements ResourceScheduler {
 		const cwd = previous ? this.jobDirectory(previous) : this.cwdOf(agentId, spec.cwd);
 		const signal = this.host.signalOf?.(agentId) ?? new AbortController().signal;
 		const hashes: Record<string, string> = Object.create(null);
+		const denied = this.host.deniedReadPathsOf?.(agentId);
 		await this.prepareOnHost(signal, async () => {
-			for (const path of spec.inputs ?? []) hashes[path] = await digestInput(cwd, path, signal);
+			for (const path of spec.inputs ?? []) hashes[path] = await digestInput(cwd, path, signal, denied);
 		});
 		return { cwd, hashes };
 	}
@@ -251,7 +253,8 @@ export class Scheduler implements ResourceScheduler {
 		const cwd = recovery ? this.existingDirectory(recovery.cwd) : this.cwdOf(agentId, spec.cwd);
 		if (snapshot && snapshot.cwd !== cwd) throw new Error("Job directory changed during input verification");
 		const resumesJobId = recovery?.jobId;
-		const inputHashes = snapshot?.hashes ?? Object.fromEntries((spec.inputs ?? []).map((path) => [path, digestInputSync(cwd, path)]));
+		const denied = this.host.deniedReadPathsOf?.(agentId);
+		const inputHashes = snapshot?.hashes ?? Object.fromEntries((spec.inputs ?? []).map((path) => [path, digestInputSync(cwd, path, denied)]));
 		const cacheKey = sha(JSON.stringify(["workspace-v2", this.host.runId, cwd, spec.pool, spec.command, inputHashes, spec.idempotencyKey ?? ""]));
 		const now = Date.now();
 		const taskId = this.host.taskIdOf?.(agentId);
@@ -442,6 +445,7 @@ export class Scheduler implements ResourceScheduler {
 					command: job.spec.gate,
 					cwd: this.jobDirectory(job),
 					profile: "job",
+					deniedReadPaths: this.host.deniedReadPathsOf?.(job.nodeId),
 					timeoutMs: 120_000,
 					signal: entry.abort.signal,
 					env: toolchain,
@@ -596,8 +600,9 @@ export class Scheduler implements ResourceScheduler {
 			const cwd = this.jobDirectory(job);
 			if (job.spec.compilerSmoke && !job.receipt?.toolchain) throw new Error("The required compiler smoke check has no saved toolchain");
 			if (job.workingDirectory !== undefined && job.workingDirectory !== cwd) throw new Error("Job directory changed after submission");
+			const denied = this.host.deniedReadPathsOf?.(job.nodeId);
 			for (const input of job.spec.inputs ?? []) {
-				const digest = await digestInput(cwd, input, entry.abort.signal);
+				const digest = await digestInput(cwd, input, entry.abort.signal, denied);
 				if (digest !== job.receipt?.inputHashes[input]) throw new Error(`Job input changed after submission: ${input}`);
 			}
 			entry.abort.signal.throwIfAborted();
@@ -628,6 +633,7 @@ export class Scheduler implements ResourceScheduler {
 					}),
 				cwd,
 				profile: pool.kind === "local" ? "job" : "worker",
+				deniedReadPaths: denied,
 				env: { ...env, ...job.receipt?.toolchain },
 				timeoutMs: Math.min((job.spec.timeoutSeconds ?? 600) * 1000, remainingMs),
 				signal: entry.abort.signal,

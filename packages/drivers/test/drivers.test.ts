@@ -12,7 +12,9 @@ import {
 	GeminiCliDriver,
 	GrokAcpDriver,
 	GrokCliDriver,
+	killProcessTree,
 	maybeCompactSession,
+	normalizeStrictJsonSchema,
 	prepareCleanCodexHome,
 	prepareCleanGrokHome,
 } from "../src/index.ts";
@@ -416,5 +418,203 @@ describe("drivers & 3-class quota classification", () => {
 		const fallback = await singleRouter.acquireForRole("worker", { minTier: "frontier" });
 		expect(fallback.driver.id).toBe("only");
 		fallback.release();
+	});
+
+	it("never hold-and-wait deadlocks when spawning N concurrent workers equal to aggregate multi-driver capacity", async () => {
+		const mkFake = (id: string) => ({
+			id,
+			kind: "codex-exec" as const,
+			capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema: false, supportsMcpHttp: false },
+			healthCheck: async () => ({ ok: true, driverId: id, kind: "codex-exec" as const }),
+			spawn: async () => ({ driverId: id, runTurn: async () => ({ status: "completed" as const, finalText: "" }), close: async () => {} }),
+		});
+
+		const router = new DriverQuotaRouter({
+			drivers: [
+				{ driver: mkFake("codex"), config: { id: "codex", kind: "codex-exec", maxConcurrent: 2 } },
+				{ driver: mkFake("gemini"), config: { id: "gemini", kind: "codex-exec", maxConcurrent: 2 } },
+			],
+			roles: { default: ["codex", "gemini"] },
+		});
+
+		// Repeatedly acquire 4 simultaneous permits across 2x2 capacity (would previously deadlock whenever rotation picked 3+ on one driver!)
+		for (let round = 0; round < 50; round++) {
+			const ac = new AbortController();
+			const timer = setTimeout(() => ac.abort(new Error("deadlock")), 500);
+			try {
+				const sels = await Promise.all(
+					Array.from({ length: 4 }, () => router.acquireForRole("worker", { signal: ac.signal })),
+				);
+				const counts = sels.reduce<Record<string, number>>((acc, s) => {
+					acc[s.driver.id] = (acc[s.driver.id] ?? 0) + 1;
+					return acc;
+				}, {});
+				expect(counts.codex).toBe(2);
+				expect(counts.gemini).toBe(2);
+				for (const s of sels) s.release();
+			} finally {
+				clearTimeout(timer);
+			}
+		}
+
+		// Also verify 2-worker waves ALWAYS split 1+1 across 2 equal-weight providers (least-loaded diversity, RSI-7)
+		for (let round = 0; round < 20; round++) {
+			const [a, b] = await Promise.all([router.acquireForRole("worker"), router.acquireForRole("worker")]);
+			expect(new Set([a.driver.id, b.driver.id]).size).toBe(2);
+			a.release();
+			b.release();
+		}
+
+		// Verify requireOutputSchema prefers supportsOutputSchema=true drivers and gracefully falls back when none exist (RSI-8)
+		const mkSchemaDrv = (id: string, supportsOutputSchema: boolean) => ({
+			id,
+			kind: "codex-exec" as const,
+			capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema, supportsMcpHttp: false },
+			healthCheck: async () => ({ ok: true, driverId: id, kind: "codex-exec" as const }),
+			spawn: async () => ({ driverId: id, runTurn: async () => ({ status: "completed" as const, finalText: "" }), close: async () => {} }),
+		});
+		const schemaRouter = new DriverQuotaRouter({
+			drivers: [
+				{ driver: mkSchemaDrv("no-schema", false), config: { id: "no-schema", kind: "codex-exec", maxConcurrent: 2 } },
+				{ driver: mkSchemaDrv("yes-schema", true), config: { id: "yes-schema", kind: "codex-exec", maxConcurrent: 2 } },
+			],
+			roles: { default: ["no-schema", "yes-schema"] },
+		});
+		for (let i = 0; i < 10; i++) {
+			const sel = await schemaRouter.acquireForRole("planner", { requireOutputSchema: true });
+			expect(sel.driver.id).toBe("yes-schema");
+			sel.release();
+		}
+		const fallbackRouter = new DriverQuotaRouter({
+			drivers: [{ driver: mkSchemaDrv("only-no-schema", false), config: { id: "only-no-schema", kind: "codex-exec", maxConcurrent: 2 } }],
+			roles: { default: ["only-no-schema"] },
+		});
+		const fb = await fallbackRouter.acquireForRole("planner", { requireOutputSchema: true });
+		expect(fb.driver.id).toBe("only-no-schema");
+		fb.release();
+	});
+
+	it("preserves accumulated token usage when a Codex app-server turn is interrupted (RSI-7)", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "op-codex-abort-usage-"));
+		try {
+			const fakeCodex = makeFakeBinary(
+				dir,
+				"fake-codex-abort",
+				`
+				const rl = require("node:readline").createInterface({ input: process.stdin });
+				rl.on("line", (line) => {
+					const msg = JSON.parse(line);
+					if (msg.method === "initialize") {
+						console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {} }));
+					} else if (msg.method === "thread/start") {
+						console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { thread: { id: "th-abort", model: "gpt-6.2-sol" } } }));
+					} else if (msg.method === "turn/start") {
+						console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {} }));
+						console.log(JSON.stringify({ jsonrpc: "2.0", method: "turn/started", params: { turn: { id: "t-1" } } }));
+						console.log(JSON.stringify({ jsonrpc: "2.0", method: "thread/tokenUsage/updated", params: { tokenUsage: { total: { inputTokens: 12000, cachedInputTokens: 4000, outputTokens: 850, reasoningOutputTokens: 200, totalTokens: 12850 } } } }));
+						// Deliberately stall until interrupted by timeoutMs/signal!
+					} else if (msg.method === "turn/interrupt") {
+						console.log(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: {} }));
+					}
+				});
+				`,
+			);
+			const drv = new CodexAppServerDriver({ id: "codex-abort", kind: "codex-app-server", binary: fakeCodex });
+			const sess = await drv.spawn({ runId: "r1", agentId: "a1", role: "worker", workspace: dir });
+			const res = await sess.runTurn("long task", { timeoutMs: 250 });
+			expect(res.status).toBe("interrupted");
+			expect(res.usage?.totalTokens).toBe(12850);
+			expect(res.usage?.inputTokens).toBe(12000);
+			expect(res.usage?.outputTokens).toBe(850);
+			expect(res.usage?.cachedTokens).toBe(4000);
+			expect(res.usage?.cacheReadReported).toBe(true);
+			expect(res.usage?.reasoningReported).toBe(true);
+			await sess.close();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("wakes queued pool waiters on whichever eligible driver frees first, enforces strictCapabilities, and prefers in-process drivers for control-plane roles", async () => {
+		const mk = (id: string, kind: "codex-exec" | "pi-in-process", supportsOutputSchema: boolean) => ({
+			id,
+			kind,
+			capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema, supportsMcpHttp: false },
+			healthCheck: async () => ({ ok: true, driverId: id, kind }),
+			spawn: async () => ({ driverId: id, runTurn: async () => ({ status: "completed" as const, finalText: "" }), close: async () => {} }),
+		});
+
+		// 1. Unified pool condition-queue: 2 drivers with maxConcurrent=1; occupy both, enqueue waiter, release driver B -> waiter wakes on B immediately!
+		const router = new DriverQuotaRouter({
+			drivers: [
+				{ driver: mk("drv-a", "codex-exec", true), config: { id: "drv-a", kind: "codex-exec", maxConcurrent: 1 } },
+				{ driver: mk("drv-b", "codex-exec", true), config: { id: "drv-b", kind: "codex-exec", maxConcurrent: 1 } },
+			],
+			roles: { default: ["drv-a", "drv-b"] },
+		});
+		const s1 = await router.acquireForRole("worker");
+		const s2 = await router.acquireForRole("worker");
+		expect(new Set([s1.driver.id, s2.driver.id]).size).toBe(2);
+
+		const pending3 = router.acquireForRole("worker");
+		// Release s2 (whichever driver it is) -> pending3 MUST immediately get s2's freed driver without waiting on s1!
+		const freedId = s2.driver.id;
+		s2.release();
+		const s3 = await pending3;
+		expect(s3.driver.id).toBe(freedId);
+		s1.release();
+		s3.release();
+
+		// 2. strictCapabilities throws when no driver supports outputSchema
+		const noSchemaRouter = new DriverQuotaRouter({
+			drivers: [{ driver: mk("plain", "codex-exec", false), config: { id: "plain", kind: "codex-exec", maxConcurrent: 1 } }],
+			roles: { default: ["plain"] },
+		});
+		await expect(
+			noSchemaRouter.acquireForRole("planner", { requireOutputSchema: true, strictCapabilities: true }),
+		).rejects.toThrow(/supports required outputSchema/);
+
+		// 3. preferInProcess routes planner/reviewer to pi-in-process when registered in role pool
+		const mixedRouter = new DriverQuotaRouter({
+			drivers: [
+				{ driver: mk("cli-slow", "codex-exec", true), config: { id: "cli-slow", kind: "codex-exec", maxConcurrent: 2 } },
+				{ driver: mk("api-fast", "pi-in-process", true), config: { id: "api-fast", kind: "pi-in-process", maxConcurrent: 2 } },
+			],
+			roles: { planner: ["cli-slow", "api-fast"] },
+		});
+		const planSel = await mixedRouter.acquireForRole("planner", { preferInProcess: true });
+		expect(planSel.driver.id).toBe("api-fast");
+		planSel.release();
+
+		// 4. Shared strict JSON schema normalizer handles nested objects, arrays, and unions
+		const normalized = normalizeStrictJsonSchema({
+			type: "object",
+			properties: {
+				items: {
+					type: "array",
+					items: {
+						anyOf: [
+							{ type: "object", properties: { a: { type: "string" }, b: { type: "number" } } },
+							{ type: "string" },
+						],
+					},
+				},
+			},
+		}) as any;
+		expect(normalized.additionalProperties).toBe(false);
+		expect(normalized.required).toEqual(["items"]);
+		expect(normalized.properties.items.items.anyOf[0].additionalProperties).toBe(false);
+		expect(normalized.properties.items.items.anyOf[0].required).toEqual(["a", "b"]);
+	});
+
+	it("reaps detached subprocess trees cleanly via killProcessTree", async () => {
+		const { spawn } = await import("node:child_process");
+		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			stdio: "ignore",
+			detached: true,
+		});
+		expect(child.pid).toBeGreaterThan(0);
+		await killProcessTree(child, 150);
+		expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
 	});
 });

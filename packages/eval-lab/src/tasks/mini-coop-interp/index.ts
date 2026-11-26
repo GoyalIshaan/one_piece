@@ -3,6 +3,7 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EvalTask, GradeReport, PreparedTask } from "../../contracts.ts";
+import { withCleanOverlay } from "../../overlay.ts";
 import { sha256Dir } from "../../sandbox.ts";
 
 interface InterpConfig {
@@ -691,6 +692,7 @@ export const miniCoopInterpTask: EvalTask = {
 	id: "mini-coop-interp",
 	title: "Mini Coupled Interpreter (Semantic Interference Canary)",
 	family: "coupled-swe",
+	tier: "proxy",
 	supportedN: [1, 2, 4],
 	defaultOptions: { coupling: "high" },
 	higherIsBetter: true,
@@ -721,22 +723,135 @@ export const miniCoopInterpTask: EvalTask = {
 		};
 	},
 
-	async publicCheck({ artifactDir }): Promise<{ passed: boolean; score: number; details: string }> {
-		const copy = mkdtempSync(join(tmpdir(), "eval-lab-interp-pub-"));
-		try {
-			cpSync(artifactDir, copy, { recursive: true, filter: (src) => !src.includes("/.git") });
-			execFileSync("python3", ["-B", "-m", "unittest", "discover", "-s", "tests"], {
-				cwd: copy,
-				encoding: "utf8",
-				timeout: 10_000,
-				stdio: ["ignore", "pipe", "pipe"],
-			});
-			return { passed: true, score: 1, details: "public smoke tests passed" };
-		} catch (error) {
-			return { passed: false, score: 0, details: `public tests failed: ${String(error).slice(0, 240)}` };
-		} finally {
-			rmSync(copy, { recursive: true, force: true });
-		}
+	async publicCheck({ artifactDir, seed, n, options }): Promise<{ passed: boolean; score: number; details: string }> {
+		const cfg = configFor(seed, n, options);
+		const authStarter = starterFiles(cfg);
+		const pubProbe = `import json, sys, unittest
+sys.path.insert(0, sys.argv[1])
+from interp import run, tokenize, parse, optimize
+from interp import builtins
+
+COUPLING = ${JSON.stringify(cfg.coupling)}
+K = ${cfg.featureCount}
+INT_MAX = ${cfg.intMax}
+checks = {}
+fails = []
+
+# 0. Authoritative public smoke unittest
+try:
+    suite = unittest.defaultTestLoader.discover("tests", pattern="test_public.py")
+    res = unittest.TextTestRunner(stream=open("/dev/null", "w")).run(suite)
+    assert res.wasSuccessful() and res.testsRun >= 1
+    smoke_ok = True
+except Exception as ex:
+    smoke_ok = False
+    fails.append(f"smoke: {ex}")
+
+if COUPLING == "low":
+    try:
+        assert builtins.clamp(5, 0, 3) == 3 and builtins.clamp(-1, 0, 3) == 0
+        checks["clamp"] = True
+    except Exception as ex:
+        checks["clamp"] = False
+        fails.append(f"clamp: {ex}")
+    try:
+        assert builtins.median3(9, 2, 5) == 5
+        checks["median3"] = True
+    except Exception as ex:
+        checks["median3"] = False
+        fails.append(f"median3: {ex}")
+    if K >= 4:
+        try:
+            assert builtins.gcd_safe(18, 24) == 6
+            checks["gcd_safe"] = True
+        except Exception as ex:
+            checks["gcd_safe"] = False
+            fails.append(f"gcd_safe: {ex}")
+        try:
+            assert builtins.pow_mod(2, 5, 13) == 6
+            checks["pow_mod"] = True
+        except Exception as ex:
+            checks["pow_mod"] = False
+            fails.append(f"pow_mod: {ex}")
+else:
+    # F1: Checked overflow raises OverflowError subclass
+    try:
+        trapped = False
+        try:
+            run(f"{INT_MAX} + 1")
+        except OverflowError:
+            trapped = True
+        assert trapped, "expected OverflowTrap"
+        checks["overflow"] = True
+    except Exception as ex:
+        checks["overflow"] = False
+        fails.append(f"overflow: {ex}")
+    # F2: Constant folding simplifies simple constant binop AST
+    try:
+        ast = optimize(parse(tokenize("2 + 3")))
+        assert ast == ("int", 5) or ast == ("lit", 5), f"not folded: {ast!r}"
+        checks["const_fold"] = True
+    except Exception as ex:
+        checks["const_fold"] = False
+        fails.append(f"const_fold: {ex}")
+    if K >= 4:
+        try:
+            assert run("None ?? 7") == 7 and run("4 ?? 7") == 4
+            checks["coalesce"] = True
+        except Exception as ex:
+            checks["coalesce"] = False
+            fails.append(f"coalesce: {ex}")
+        try:
+            raised = False
+            try:
+                run("True + 1")
+            except TypeError as te:
+                raised = "+" in str(te)
+            assert raised, "expected CoercionError with '+'"
+            checks["coercion"] = True
+        except Exception as ex:
+            checks["coercion"] = False
+            fails.append(f"coercion: {ex}")
+
+passed_n = sum(1 for v in checks.values() if v)
+score = round(passed_n / max(1, len(checks)), 6)
+passed = smoke_ok and passed_n == len(checks)
+print(json.dumps({
+    "passed": passed,
+    "score": score,
+    "details": f"public checks {passed_n}/{len(checks)} (smoke={smoke_ok})" + (f"; {'; '.join(fails[:4])}" if fails else ""),
+}))
+`;
+		return withCleanOverlay({
+			artifactDir,
+			prefix: "eval-lab-interp-pub-",
+			immutableFiles: {
+				"tests/test_public.py": authStarter["tests/test_public.py"]!,
+				"__pub_probe.py": pubProbe,
+			},
+			async run(overlayDir) {
+				try {
+					const out = execFileSync("python3", ["-B", join(overlayDir, "__pub_probe.py"), overlayDir], {
+						cwd: overlayDir,
+						encoding: "utf8",
+						timeout: 10_000,
+						stdio: ["ignore", "pipe", "pipe"],
+					});
+					const parsed = JSON.parse(out.trim().split("\n").at(-1) ?? "{}") as {
+						passed?: boolean;
+						score?: number;
+						details?: string;
+					};
+					return {
+						passed: Boolean(parsed.passed),
+						score: Number.isFinite(parsed.score) ? Number(parsed.score) : 0,
+						details: String(parsed.details ?? "public checks ran"),
+					};
+				} catch (error) {
+					return { passed: false, score: 0, details: `public tests failed: ${String(error).slice(0, 240)}` };
+				}
+			},
+		});
 	},
 
 	async grade({ artifactDir, hiddenDir }): Promise<GradeReport> {

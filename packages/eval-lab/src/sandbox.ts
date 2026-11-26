@@ -430,6 +430,11 @@ export function detectHarnessFaults(
 				message: `Run failed with ${turnEvents.length} turn(s) and ${callTokens} billed tokens${firstErr ? `: ${String(firstErr.data.error).slice(0, 240)}` : "."}`,
 				seq: firstErr?.seq,
 			});
+		} else if (receipt.status === "stopped" && turnEvents.length === 0 && modelCallEvents.length === 0 && callTokens === 0) {
+			faults.push({
+				code: "RUNNER_CRASH",
+				message: "Run stopped with 0 completed model turns and 0 tokens (likely spawn deadlock or startup abort).",
+			});
 		}
 	}
 

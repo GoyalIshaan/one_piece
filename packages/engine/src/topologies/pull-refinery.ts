@@ -1,19 +1,22 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { type JsonSchema, newId, type SwarmOsApi, type TaskRecord, type TopologyOutcome, type TopologyPlugin } from "@one-piece/core";
+import { IntegrationPipeline } from "../integration.ts";
 
 export interface PullRefineryOptions {
 	concurrency?: number;
 	leaseTtlMs?: number;
+	/** Automatically invoke an impartial integrator when a clean git merge breaks the verifier (default true). */
+	enableSemanticRepair?: boolean;
 }
 
 const BACKLOG_SCHEMA: JsonSchema = {
 	type: "object",
+	additionalProperties: false,
 	properties: {
 		tasks: {
 			type: "array",
 			items: {
 				type: "object",
+				additionalProperties: false,
 				properties: {
 					key: { type: "string" },
 					title: { type: "string" },
@@ -22,7 +25,7 @@ const BACKLOG_SCHEMA: JsonSchema = {
 					owned_paths: { type: "array", items: { type: "string" } },
 					acceptance_criteria: { type: "array", items: { type: "string" } },
 				},
-				required: ["key", "title", "description"],
+				required: ["key", "title", "description", "depends_on", "owned_paths", "acceptance_criteria"],
 			},
 		},
 	},
@@ -113,17 +116,19 @@ function parseBacklog(text: string, fallbackGoal: string): BacklogItem[] {
 export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPlugin {
 	const concurrency = Math.max(1, opts.concurrency ?? 3);
 	const leaseTtlMs = opts.leaseTtlMs ?? 300_000;
+	const enableSemanticRepair = opts.enableSemanticRepair ?? true;
 
 	return {
 		name: "pull-refinery",
 		description: "DAG backlog -> parallel lease-claiming CLI workers -> serialized CI-gated Refinery merge queue.",
-		async run(os: SwarmOsApi, { goal, rubric, signal }): Promise<TopologyOutcome> {
+		async run(os: SwarmOsApi, { goal, rubric, signal, closeoutSignal }): Promise<TopologyOutcome> {
 			// 1. Shard backlog
 			os.bus.emit(os.runId, "phase.changed", { to: "shard", reason: "Building leased task DAG" });
 			const planner = await os.spawnWorker({
 				role: "planner",
 				readOnly: true,
 				canSpawn: false,
+				requireOutputSchema: true,
 				cacheKeyPrefix: `${os.runId}:refinery-planner`,
 				toolScope: {
 					board: "read",
@@ -135,15 +140,15 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 					skills: false,
 				},
 				systemPrompt: [
-					"You are a backlog sharder. Split the goal into atomic, cleanly mergeable tickets with disjoint owned_paths and concrete acceptance_criteria so parallel workers do not collide.",
+					"You are a fast backlog sharder. Read ONLY the spec doc (SPEC.md / FEATURES.md / TASK.md — layout is already in the Field Guide) and split the goal into atomic, cleanly mergeable tickets with disjoint owned_paths and concrete acceptance_criteria so parallel workers do not collide.",
 					'Respond ONLY with JSON: {"tasks":[{"key":"t1","title":"...","description":"...","depends_on":[],"owned_paths":["src/a.ts"],"acceptance_criteria":["..."]}]}',
 				].join("\n"),
 			});
 			let items: BacklogItem[];
 			try {
 				const res = await planner.runTurn(
-					`Goal: ${goal}\n${rubric ? `Rubric: ${rubric}\n` : ""}Produce 2 to 6 atomic tasks with clean module boundaries.`,
-					{ signal, outputSchema: BACKLOG_SCHEMA },
+					`Goal: ${goal}\n${rubric ? `Rubric: ${rubric}\n` : ""}Be fast (at most 2 file reads). Produce 2 to ${Math.max(2, Math.min(6, concurrency))} parallel atomic tasks with clean module boundaries.`,
+					{ signal, outputSchema: BACKLOG_SCHEMA, timeoutMs: 55_000 },
 				);
 				items = parseBacklog(res.finalText, goal);
 			} finally {
@@ -166,154 +171,27 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 				tasks.push(created);
 			}
 
-			// 2. Serialized Refinery merge queue (single-threaded trunk writer + neutral conflict resolver + megafile guard)
+			// 2. Serialized Refinery merge queue delegating to shared OS IntegrationPipeline
+			const integration = os.integration ?? new IntegrationPipeline(os);
 			let mergeChain: Promise<void> = Promise.resolve();
-			const mergedBranches: string[] = [];
-			const conflictCounts = new Map<string, number>();
-			let lastTrunkSha = os.worktrees.baseSha;
 
 			const enqueueRefinery = (task: TaskRecord, branch: string, authorAgentId: string, authorDriverId: string) => {
 				const job = mergeChain.then(async () => {
-					const merged = os.worktrees.mergeIntoTrunk(branch, { message: `refinery(${task.id}): ${task.title}` });
-					if (merged.ok) {
-						lastTrunkSha = merged.commitSha;
-						mergedBranches.push(branch);
-						await os.trust.submitFinding(
-							{
-								agentId: authorAgentId,
-								driverId: authorDriverId,
-								taskId: task.id,
-								workspace: os.worktrees.trunkPath,
-								claim: `Refinery merged ${task.title} (${merged.commitSha.slice(0, 8)})`,
-								summary: `Serialized merge of ${branch} onto isolated trunk worktree succeeded cleanly.`,
-								level: "empirical",
-							},
-							signal,
-						);
-						os.board.publish({
-							runId: os.runId,
-							authorAgentId: "refinery",
-							topic: "refinery",
-							summary: `Merged ${task.id} (${branch}) -> trunk ${merged.commitSha.slice(0, 8)}`,
-						});
-					} else {
-						const conflictFiles = merged.conflictFiles;
-						for (const relFile of conflictFiles) {
-							const nextCount = (conflictCounts.get(relFile) ?? 0) + 1;
-							conflictCounts.set(relFile, nextCount);
-							let lineCount = 0;
-							const absFile = join(os.worktrees.trunkPath, relFile);
-							if (existsSync(absFile)) {
-								try {
-									lineCount = readFileSync(absFile, "utf8").split("\n").length;
-								} catch {
-									// Ignore unreadable file.
-								}
-							}
-							if (nextCount >= 2 || lineCount > 800) {
-								os.board.publish({
-									runId: os.runId,
-									authorAgentId: "refinery",
-									topic: "megafile-hotspot",
-									summary: `Hotspot file ${relFile} (${lineCount} lines, ${nextCount} merge conflicts) — consider decomposing into smaller modules.`,
-								});
-							}
-						}
-
-						// Impartial third-party conflict resolver (neutral to both branches)
-						if (conflictFiles.length > 0 && !signal.aborted && !os.isInCloseoutReserve()) {
-							const preview = os.worktrees.mergePreviewDiff(branch);
-							const resolver = await os.spawnWorker({
-								role: "integrator",
-								baseRef: lastTrunkSha,
-								canSpawn: false,
-								cacheKeyPrefix: `${os.runId}:refinery-resolver`,
-								toolScope: {
-									board: "read",
-									artifacts: true,
-									findings: false,
-									tasks: false,
-									nominate: false,
-									scheduler: "never",
-									sidekick: false,
-									codeMode: false,
-								},
-								systemPrompt: [
-									"You are an impartial merge-conflict resolver for the Refinery merge queue.",
-									"Your workspace starts at current trunk HEAD. Apply the incoming branch's intended changes cleanly alongside trunk's changes in the conflicting files without dropping either side's functionality.",
-								].join("\n"),
-							});
-							try {
-								const resolvePrompt = [
-									`Resolve merge conflict for ticket ${task.id}: ${task.title}`,
-									`Ticket description: ${task.description}`,
-									...(task.acceptanceCriteria?.length
-										? [`Acceptance criteria:\n${task.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}`]
-										: []),
-									`Conflicting files: ${conflictFiles.join(", ")}`,
-									``,
-									`## Trunk diff since merge-base (${preview.baseSha.slice(0, 8)}..HEAD)`,
-									"```diff",
-									preview.trunkDiff,
-									"```",
-									``,
-									`## Incoming branch diff since merge-base (${preview.baseSha.slice(0, 8)}..${branch})`,
-									"```diff",
-									preview.branchDiff,
-									"```",
-									``,
-									`Edit the workspace files cleanly so both trunk and incoming changes work together, then exit.`,
-								].join("\n");
-								const resolveRes = await resolver.runTurn(resolvePrompt, { signal });
-								const resolverWip = os.worktrees.commitWip(resolver.workspace, `refinery-resolve(${task.id}): ${task.title}`);
-								const resolvedHead = os.worktrees.headSha(resolver.workspace);
-								const resolverMadeChanges = Boolean(resolverWip) || (Boolean(resolvedHead) && resolvedHead !== lastTrunkSha);
-								if (resolveRes.status === "completed" && resolverMadeChanges && resolver.branch) {
-									const resolved = os.worktrees.mergeIntoTrunk(resolver.branch, {
-										message: `refinery-resolve(${task.id}): ${task.title}`,
-									});
-									if (resolved.ok) {
-										lastTrunkSha = resolved.commitSha;
-										mergedBranches.push(resolver.branch);
-										os.bus.emit(
-											os.runId,
-											"refinery.conflict_resolved",
-											{ taskId: task.id, branch, conflictFiles, commitSha: resolved.commitSha },
-											resolver.agent.id,
-										);
-										await os.trust.submitFinding(
-											{
-												agentId: resolver.agent.id,
-												driverId: resolver.agent.driverId,
-												taskId: task.id,
-												workspace: os.worktrees.trunkPath,
-												claim: `Refinery resolved conflict & merged ${task.title} (${resolved.commitSha.slice(0, 8)})`,
-												summary: `Neutral resolver reconciled conflicts in ${conflictFiles.join(", ")} cleanly on trunk.`,
-												level: "empirical",
-											},
-											signal,
-										);
-										os.board.publish({
-											runId: os.runId,
-											authorAgentId: "refinery",
-											topic: "refinery",
-											summary: `Resolved conflict & merged ${task.id} (${conflictFiles.join(", ")}) -> trunk ${resolved.commitSha.slice(0, 8)}`,
-										});
-										return;
-									}
-								}
-							} finally {
-								await resolver.close();
-							}
-						}
-
-						os.board.publish({
-							runId: os.runId,
-							authorAgentId: "refinery",
-							topic: "refinery-conflict",
-							summary: `Merge conflict on ${task.id} (${branch}; files: ${conflictFiles.join(", ") || "unknown"}): ${merged.error}`,
-						});
-					}
+					await integration.integrateBranch({
+						branch,
+						label: task.title,
+						task,
+						authorAgentId,
+						authorDriverId,
+						goal,
+						totalExpectedBranches: tasks.length,
+						enableConflictResolution: true,
+						enableSemanticRepair,
+						actorName: "refinery",
+						cachePrefix: `${os.runId}:refinery`,
+						signal,
+						closeoutSignal: closeoutSignal ?? os.closeoutSignal,
+					});
 				});
 				mergeChain = job.catch(() => {});
 				return job;
@@ -321,6 +199,7 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 
 			// 3. Pull-queue worker slots
 			os.bus.emit(os.runId, "phase.changed", { from: "shard", to: "pull-execute", reason: `Starting ${concurrency} pull-queue worker slots` });
+			const avoidDriversByTask = new Map<string, string[]>();
 			const runSlot = async (slotIdx: number): Promise<void> => {
 				while (!signal.aborted && !os.isInCloseoutReserve()) {
 					const ready = os.readyTasks();
@@ -353,7 +232,8 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 					}
 
 					const target = claimedTarget;
-					const branchBaseRef = lastTrunkSha;
+					const branchBaseRef = integration.bestGreenSha;
+					const avoidedDrivers = avoidDriversByTask.get(target.id);
 					let worker;
 					try {
 						worker = await os.spawnWorker({
@@ -361,6 +241,7 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 							taskId: target.id,
 							baseRef: branchBaseRef,
 							canSpawn: false,
+							...(avoidedDrivers?.length ? { avoidDrivers: avoidedDrivers } : {}),
 							cacheKeyPrefix: `${os.runId}:refinery-worker`,
 							toolScope: {
 								board: "read-write",
@@ -401,19 +282,47 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 						const criteriaBlock = target.acceptanceCriteria?.length
 							? `\nAcceptance criteria:\n${target.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}`
 							: "";
+						const remWall = os.remainingWallMs?.();
+						const priorRetries = avoidDriversByTask.get(target.id)?.length ?? 0;
+						const attemptTimeoutMs =
+							priorRetries === 0 && remWall !== undefined && remWall > 40_000
+								? Math.max(45_000, Math.min(125_000, Math.floor(remWall * 0.6)))
+								: undefined;
 						const res = await worker.runTurn(
 							`Worker slot #${slotIdx + 1} — Ticket ${target.id}: ${target.title}\n\n${target.description}${ownershipBlock}${criteriaBlock}\n\nGlobal goal: ${goal}`,
-							{ signal },
+							{ signal, ...(attemptTimeoutMs ? { timeoutMs: attemptTimeoutMs } : {}) },
 						);
-						const wip = os.worktrees.commitWip(worker.workspace, `ticket(${target.id}): ${target.title}`);
-						const headAfter = os.worktrees.headSha(worker.workspace);
-						const hasChanges = Boolean(wip) || (Boolean(headAfter) && headAfter !== branchBaseRef);
+						const wip = res.workspaceSnapshot?.wipSha ?? os.worktrees.commitWip(worker.workspace, `ticket(${target.id}): ${target.title}`);
+						const headAfter = res.workspaceSnapshot?.headSha ?? os.worktrees.headSha(worker.workspace);
+						const hasChanges = Boolean(res.workspaceSnapshot?.hasEdits) || Boolean(wip) || (Boolean(headAfter) && headAfter !== branchBaseRef);
+
+						// Cross-provider zero-diff straggler handoff: if a worker timed out on its first attempt
+						// with ZERO edits while wall budget remains, re-open the ticket avoiding that provider so
+						// an idle slot on another provider can finish it cleanly!
+						if (
+							res.status === "interrupted" &&
+							!hasChanges &&
+							priorRetries === 0 &&
+							!signal.aborted &&
+							!os.isInCloseoutReserve()
+						) {
+							const nextAvoid = [...(avoidDriversByTask.get(target.id) ?? []), worker.agent.driverId];
+							avoidDriversByTask.set(target.id, nextAvoid);
+							os.store.releaseTaskLease(target.id, claimedLeaseOwner, claimedFencingToken, "open", {
+								result: `Straggler timeout with 0 edits on ${worker.agent.driverId}; re-queued for cross-provider handoff.`,
+							});
+							os.bus.emit(os.runId, "task.ready", { taskId: target.id, title: target.title, reason: "straggler-handoff", avoidedDriver: worker.agent.driverId }, worker.agent.id);
+							continue;
+						}
+
 						const status = res.status === "completed" ? "done" : "blocked";
 						os.store.releaseTaskLease(target.id, claimedLeaseOwner, claimedFencingToken, status, {
 							result: res.finalText.slice(0, 800),
 						});
 						os.bus.emit(os.runId, "task.status", { taskId: target.id, status, result: res.finalText.slice(0, 400) }, worker.agent.id);
-						if (status === "done" && hasChanges && worker.branch) {
+						// Salvage committed WIP even if wall cutoff interrupted right after edits/tests;
+						// the Refinery's monotonic verifier ratchet ensures broken WIP is safely rolled back.
+						if ((status === "done" || res.status === "interrupted") && hasChanges && worker.branch) {
 							await enqueueRefinery(target, worker.branch, worker.agent.id, worker.agent.driverId);
 						}
 					} finally {
@@ -429,7 +338,7 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 			const doneCount = os.store.list("tasks", { runId: os.runId }).filter((t) => t.status === "done").length;
 			return {
 				status: signal.aborted ? "stopped" : doneCount > 0 ? "done" : "failed",
-				summary: `Pull-Refinery completed ${doneCount}/${tasks.length} tickets; merged ${mergedBranches.length} branches onto trunk (${lastTrunkSha.slice(0, 8)}).`,
+				summary: `Pull-Refinery completed ${doneCount}/${tasks.length} tickets; merged ${integration.mergedBranches.length} branches onto trunk (${integration.bestGreenSha.slice(0, 8)}).`,
 			};
 		},
 	};

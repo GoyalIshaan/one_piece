@@ -5,7 +5,7 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import {
 	type ArtifactStore,
 	type EventBus,
-	isOperatorArchivePath,
+	isPathBlocked,
 	runCommand,
 	type SecretBroker,
 	type ToolDefinition,
@@ -45,12 +45,12 @@ export function spillLargeOutput(
 	};
 }
 
-function grepTree(root: string, dir: string, regex: RegExp, maxMatches: number, out: string[]): void {
+function grepTree(root: string, dir: string, regex: RegExp, maxMatches: number, out: string[], deniedReadPaths?: readonly string[]): void {
 	if (out.length >= maxMatches) return;
 	for (const name of readdirSync(dir).sort()) {
 		if (SKIP.has(name)) continue;
 		const full = join(dir, name);
-		if (isOperatorArchivePath(full)) continue;
+		if (isPathBlocked(full, deniedReadPaths)) continue;
 		let st;
 		try {
 			st = statSync(full);
@@ -58,7 +58,7 @@ function grepTree(root: string, dir: string, regex: RegExp, maxMatches: number, 
 			continue;
 		}
 		if (st.isDirectory()) {
-			grepTree(root, full, regex, maxMatches, out);
+			grepTree(root, full, regex, maxMatches, out, deniedReadPaths);
 		} else if (st.isFile() && st.size <= 1024 * 1024) {
 			let raw: string;
 			try {
@@ -79,19 +79,19 @@ function grepTree(root: string, dir: string, regex: RegExp, maxMatches: number, 
 	}
 }
 
-function inside(root: string, target: string): string {
+function inside(root: string, target: string, deniedReadPaths?: readonly string[]): string {
 	const full = resolve(root, target);
 	const rel = relative(root, full);
 	if (rel.startsWith("..") || resolve(rel) === rel) throw new Error(`Path ${target} is outside workspace`);
-	if (isOperatorArchivePath(full)) throw new Error("Path is outside workspace");
+	if (isPathBlocked(full, deniedReadPaths)) throw new Error("Path is outside workspace");
 	return full;
 }
 
-function writePath(root: string, target: string): string {
-	const full = inside(root, target);
+function writePath(root: string, target: string, deniedReadPaths?: readonly string[]): string {
+	const full = inside(root, target, deniedReadPaths);
 	let existing = full;
 	while (!existsSync(existing)) existing = dirname(existing);
-	inside(realpathSync(root), realpathSync(existing));
+	inside(realpathSync(root), realpathSync(existing), deniedReadPaths);
 	return full;
 }
 
@@ -180,7 +180,7 @@ type StagedPatchOp =
  * Phase 1 parses, sandboxes, and validates EVERY file & hunk in memory (zero disk writes on any failure).
  * Phase 2 commits all validated operations to disk and verifies post-write SHA-256 hashes.
  */
-function applyPatchToWorkspace(workspace: string, patchText: string): { text: string; isError?: boolean } {
+function applyPatchToWorkspace(workspace: string, patchText: string, deniedReadPaths?: readonly string[]): { text: string; isError?: boolean } {
 	const rawLines = patchText.replace(/\r\n/g, "\n").split("\n");
 	const beginIdx = rawLines.findIndex((l) => l.trim() === "*** Begin Patch");
 	const endIdx = rawLines.findIndex((l, i) => i > beginIdx && l.trim() === "*** End Patch");
@@ -207,7 +207,7 @@ function applyPatchToWorkspace(workspace: string, patchText: string): { text: st
 		}
 		if (line.startsWith("*** Add File: ")) {
 			const relPath = line.slice("*** Add File: ".length).trim();
-			const full = writePath(workspace, relPath);
+			const full = writePath(workspace, relPath, deniedReadPaths);
 			if (readVirtual(full) !== null) return { text: `Patch failed: file already exists: ${relPath}`, isError: true };
 			i += 1;
 			const added: string[] = [];
@@ -224,7 +224,7 @@ function applyPatchToWorkspace(workspace: string, patchText: string): { text: st
 		}
 		if (line.startsWith("*** Delete File: ")) {
 			const relPath = line.slice("*** Delete File: ".length).trim();
-			const full = writePath(workspace, relPath);
+			const full = writePath(workspace, relPath, deniedReadPaths);
 			if (readVirtual(full) === null) {
 				return { text: `Patch failed: file not found to delete: ${relPath}`, isError: true };
 			}
@@ -235,7 +235,7 @@ function applyPatchToWorkspace(workspace: string, patchText: string): { text: st
 		}
 		if (line.startsWith("*** Update File: ")) {
 			const relPath = line.slice("*** Update File: ".length).trim();
-			const full = writePath(workspace, relPath);
+			const full = writePath(workspace, relPath, deniedReadPaths);
 			const existing = readVirtual(full);
 			if (existing === null) {
 				return { text: `Patch failed: file not found: ${relPath}`, isError: true };
@@ -317,15 +317,15 @@ function applyPatchToWorkspace(workspace: string, patchText: string): { text: st
 	return { text: summaries.join("\n") };
 }
 
-function listTree(root: string, dir: string, depth: number, out: string[]): void {
+function listTree(root: string, dir: string, depth: number, out: string[], deniedReadPaths?: readonly string[]): void {
 	if (out.length > 400) return;
 	for (const name of readdirSync(dir).sort()) {
 		if (SKIP.has(name)) continue;
 		const full = join(dir, name);
-		if (isOperatorArchivePath(full)) continue;
+		if (isPathBlocked(full, deniedReadPaths)) continue;
 		const stat = statSync(full);
 		out.push(`${relative(root, full)}${stat.isDirectory() ? "/" : ` (${stat.size} B)`}`);
-		if (stat.isDirectory() && depth > 0) listTree(root, full, depth - 1, out);
+		if (stat.isDirectory() && depth > 0) listTree(root, full, depth - 1, out, deniedReadPaths);
 	}
 }
 
@@ -363,6 +363,8 @@ export interface WorkspaceToolOptions {
 	maxInlineOutputBytes?: number;
 	readOnly?: boolean;
 	networkOff?: boolean;
+	/** Per-worker immutable paths blocked from reading (Seatbelt + host-side workspace tools). */
+	deniedReadPaths?: readonly string[];
 	maxCommandSeconds?: number;
 	defaultFileLines?: number;
 	/** File-editing tool format aligned to model family (default "search_replace"). */
@@ -393,7 +395,7 @@ export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
 			},
 			execute(args, ctx) {
 				if (!ctx.workspace) return { text: "No workspace attached", isError: true };
-				const full = inside(ctx.workspace, String(args.path ?? ""));
+				const full = inside(ctx.workspace, String(args.path ?? ""), opts.deniedReadPaths);
 				if (!existsSync(full) || !statSync(full).isFile()) {
 					return { text: `File not found: ${String(args.path ?? "")}`, isError: true };
 				}
@@ -417,11 +419,11 @@ export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
 			execute(args, ctx) {
 				if (!ctx.workspace) return { text: "No workspace attached", isError: true };
 				const base = ctx.workspace;
-				const target = inside(base, typeof args.path === "string" ? args.path : ".");
+				const target = inside(base, typeof args.path === "string" ? args.path : ".", opts.deniedReadPaths);
 				if (!existsSync(target)) return { text: `Path not found: ${typeof args.path === "string" ? args.path : "."}`, isError: true };
 				if (!statSync(target).isDirectory()) return { text: `Not a directory: ${typeof args.path === "string" ? args.path : "."}`, isError: true };
 				const out: string[] = [];
-				listTree(base, target, typeof args.depth === "number" ? Math.floor(args.depth) : 2, out);
+				listTree(base, target, typeof args.depth === "number" ? Math.floor(args.depth) : 2, out, opts.deniedReadPaths);
 				return { text: out.join("\n") || "(empty)" };
 			},
 		},
@@ -448,7 +450,7 @@ export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
 				} catch (error) {
 					return { text: `Invalid regex "${pattern}": ${error instanceof Error ? error.message : String(error)}`, isError: true };
 				}
-				const target = inside(ctx.workspace, typeof args.path === "string" ? args.path : ".");
+				const target = inside(ctx.workspace, typeof args.path === "string" ? args.path : ".", opts.deniedReadPaths);
 				if (!existsSync(target)) return { text: `Path not found: ${typeof args.path === "string" ? args.path : "."}`, isError: true };
 				const maxMatches = Math.min(200, Math.max(1, typeof args.max_matches === "number" ? Math.floor(args.max_matches) : 60));
 				const matches: string[] = [];
@@ -460,7 +462,7 @@ export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
 						if (regex.test(lines[i]!)) matches.push(`${rel}:${i + 1}:${lines[i]!.slice(0, 240)}`);
 					}
 				} else {
-					grepTree(ctx.workspace, target, regex, maxMatches, matches);
+					grepTree(ctx.workspace, target, regex, maxMatches, matches, opts.deniedReadPaths);
 				}
 				if (!matches.length) return { text: "(no matches)" };
 				const raw = matches.join("\n") + (matches.length >= maxMatches ? `\n[capped at ${maxMatches} matches]` : "");
@@ -502,6 +504,7 @@ export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
 							profile: "job",
 							isolatedWrites: true,
 							networkOff: true,
+							deniedReadPaths: opts.deniedReadPaths,
 							timeoutMs,
 							signal: ctx.signal,
 						});
@@ -537,7 +540,7 @@ export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
 				if (!ctx.workspace) return { text: "No workspace attached", isError: true };
 				const patch = typeof args.patch === "string" ? args.patch : "";
 				if (!patch.trim()) return { text: "patch must be a non-empty string", isError: true };
-				return applyPatchToWorkspace(ctx.workspace, patch);
+				return applyPatchToWorkspace(ctx.workspace, patch, opts.deniedReadPaths);
 			},
 		}
 		: {
@@ -558,7 +561,7 @@ export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
 				if (!ctx.workspace) return { text: "No workspace attached", isError: true };
 				const op = String(args.operation ?? "");
 				const relPath = String(args.path ?? "");
-				const full = writePath(ctx.workspace, relPath);
+				const full = writePath(ctx.workspace, relPath, opts.deniedReadPaths);
 
 				if (op === "create") {
 					if (typeof args.content !== "string") return { text: "create requires string content", isError: true };
@@ -625,6 +628,7 @@ export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
 					cwd: ctx.workspace,
 					profile: "worker",
 					networkOff: opts.networkOff,
+					deniedReadPaths: opts.deniedReadPaths,
 					env,
 					timeoutMs,
 					signal: ctx.signal,

@@ -16,6 +16,8 @@ import {
 } from "@one-piece/core";
 import { buildCliEnv, classifyQuotaError, probeCliBinary } from "./classify.ts";
 import { prepareCleanCodexHome } from "./cli-home.ts";
+import { normalizeStrictJsonSchema } from "./schema.ts";
+import { bindTurnCancellation, killProcessTreeNow } from "./supervisor.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -51,19 +53,6 @@ async function probeCodexHealth(driverId: string, kind: "codex-app-server" | "co
 		return { ...base, ok: loggedIn, detail: info || (loggedIn ? "logged in" : "Run 'codex login' to sign in") };
 	} catch (error) {
 		return { ...base, ok: false, detail: `Not logged in — run 'codex login' (${error instanceof Error ? error.message : String(error)})` };
-	}
-}
-
-function killTree(child: ChildProcess): void {
-	try {
-		if (child.pid) process.kill(-child.pid, "SIGKILL");
-		else child.kill("SIGKILL");
-	} catch {
-		try {
-			child.kill("SIGKILL");
-		} catch {
-			// Already exited.
-		}
 	}
 }
 
@@ -251,6 +240,9 @@ export class CodexAppServerDriver implements WorkerDriver {
 							outputTokens: dOut || undefined,
 							reasoningTokens: dReason || undefined,
 							totalTokens: dTotal || (dIn + dOut) || undefined,
+							cacheReadReported: tot.cachedInputTokens !== undefined || tot.cached_input_tokens !== undefined,
+							cacheWriteReported: tot.cacheWriteInputTokens !== undefined || tot.cache_write_input_tokens !== undefined,
+							reasoningReported: tot.reasoningOutputTokens !== undefined || tot.reasoning_output_tokens !== undefined,
 							durationMs: Date.now() - active.startedAt,
 						};
 					}
@@ -278,6 +270,9 @@ export class CodexAppServerDriver implements WorkerDriver {
 						outputTokens: Number(usageObj.output_tokens ?? usageObj.outputTokens ?? 0) || undefined,
 						reasoningTokens: Number(usageObj.reasoning_output_tokens ?? usageObj.reasoningTokens ?? 0) || undefined,
 						totalTokens: Number(usageObj.total_tokens ?? usageObj.totalTokens ?? 0) || undefined,
+						cacheReadReported: usageObj.cached_input_tokens !== undefined || usageObj.cachedTokens !== undefined,
+						cacheWriteReported: usageObj.cache_write_input_tokens !== undefined || usageObj.cacheWriteInputTokens !== undefined,
+						reasoningReported: usageObj.reasoning_output_tokens !== undefined || usageObj.reasoningTokens !== undefined,
 						durationMs,
 					}
 					: turn.usage
@@ -308,7 +303,8 @@ export class CodexAppServerDriver implements WorkerDriver {
 			sessionState = { kind: "closed" };
 			if (running) {
 				const quota = classifyQuotaError(errMsg);
-				const usage = { durationMs: Date.now() - running.startedAt };
+				const durationMs = Date.now() - running.startedAt;
+				const usage = running.usage ? { ...running.usage, durationMs } : { durationMs };
 				if (quota) {
 					running.resolve({ status: "rate_limited", finalText: running.chunks.join(""), sessionId: threadId, model: resolvedModel, usage, quotaError: quota, error: errMsg });
 				} else {
@@ -370,7 +366,9 @@ export class CodexAppServerDriver implements WorkerDriver {
 						}
 						if (running) {
 							if (sessionState.kind === "running") sessionState = { kind: "idle" };
-							finish({ status: "interrupted", finalText: running.chunks.join(""), sessionId: threadId, model: resolvedModel, usage: { durationMs: Date.now() - startedAt } });
+							const durationMs = Date.now() - startedAt;
+							const usage = running.usage ? { ...running.usage, durationMs } : { durationMs };
+							finish({ status: "interrupted", finalText: running.chunks.join(""), sessionId: threadId, model: resolvedModel, usage });
 						}
 					};
 					if (opts.signal?.aborted) {
@@ -388,7 +386,7 @@ export class CodexAppServerDriver implements WorkerDriver {
 					const turnParams: Record<string, unknown> = {
 						threadId,
 						input: [{ type: "text", text: prompt }],
-						...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
+						...(opts.outputSchema ? { outputSchema: normalizeStrictJsonSchema(opts.outputSchema) } : {}),
 					};
 					void sendRpc("turn/start", turnParams).catch((error) => {
 						if (sessionState.kind === "running") {
@@ -425,7 +423,7 @@ export class CodexAppServerDriver implements WorkerDriver {
 			async close(): Promise<void> {
 				sessionState = { kind: "closed" };
 				rl.close();
-				killTree(child);
+				killProcessTreeNow(child);
 			},
 		};
 	}
@@ -497,7 +495,7 @@ export class CodexExecDriver implements WorkerDriver {
 				if (opts.outputSchema) {
 					schemaDir = mkdtempSync(join(tmpdir(), "op-codex-schema-"));
 					schemaPath = join(schemaDir, "schema.json");
-					writeFileSync(schemaPath, JSON.stringify(opts.outputSchema, null, 2), "utf8");
+					writeFileSync(schemaPath, JSON.stringify(normalizeStrictJsonSchema(opts.outputSchema), null, 2), "utf8");
 				}
 				const model = spec.model ?? config.model;
 				const outerSeatbeltActive = Boolean(spec.deniedReadPaths?.length && process.platform === "darwin" && !process.env.ONE_PIECE_NO_SANDBOX);
@@ -538,11 +536,7 @@ export class CodexExecDriver implements WorkerDriver {
 					let streamError = "";
 					let resolvedModel: string | undefined = model;
 					let usage: WorkerTurnResult["usage"] = { durationMs: 0 };
-					let timer: ReturnType<typeof setTimeout> | undefined;
-
-					const onAbort = () => killTree(child);
-					opts.signal?.addEventListener("abort", onAbort, { once: true });
-					if (opts.timeoutMs) timer = setTimeout(onAbort, opts.timeoutMs);
+					const cancel = bindTurnCancellation(child, { signal: opts.signal, timeoutMs: opts.timeoutMs });
 
 					const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity });
 					rl.on("line", (line) => {
@@ -602,8 +596,7 @@ export class CodexExecDriver implements WorkerDriver {
 					child.on("close", (code) => {
 						resetToIdle();
 						rl.close();
-						if (timer) clearTimeout(timer);
-						opts.signal?.removeEventListener("abort", onAbort);
+						cancel.dispose();
 						if (schemaDir) rmSync(schemaDir, { recursive: true, force: true });
 
 						const durationMs = Date.now() - startedAt;
@@ -611,7 +604,7 @@ export class CodexExecDriver implements WorkerDriver {
 						const combinedErr = [streamError, stderr, rawNonJson].filter(Boolean).join("\n").trim();
 						const finalText = messages.join("\n").trim();
 
-						if (opts.signal?.aborted) {
+						if (opts.signal?.aborted || cancel.wasCancelled()) {
 							resolve({ status: "interrupted", finalText, sessionId: currentSessionId, model: resolvedModel, usage });
 							return;
 						}
@@ -629,12 +622,12 @@ export class CodexExecDriver implements WorkerDriver {
 				});
 			},
 			async interrupt(): Promise<void> {
-				if (sessionState.kind === "running") killTree(sessionState.child);
+				if (sessionState.kind === "running") killProcessTreeNow(sessionState.child);
 			},
 			async close(): Promise<void> {
 				const prev = sessionState;
 				sessionState = { kind: "closed" };
-				if (prev.kind === "running") killTree(prev.child);
+				if (prev.kind === "running") killProcessTreeNow(prev.child);
 			},
 		};
 	}

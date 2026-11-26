@@ -34,11 +34,14 @@ export interface WorktreeManager {
 	create(agentId: string, baseRef?: string): WorktreeHandle;
 	commitWip(worktreePath: string, message: string): string | undefined;
 	headSha(worktreePath: string): string | undefined;
+	treeSha?(worktreePath: string): string | undefined;
+	hasEditsSince?(worktreePath: string, baseRef: string): boolean;
 	diffStat(worktreePath: string, baseRef?: string): string;
 	diffSha(worktreePath: string): string;
 	writeGitExclude(worktreePath: string, patterns: readonly string[]): void;
 	mergeIntoTrunk(branch: string, opts?: { message?: string }): MergeTrunkResult;
 	mergePreviewDiff(branch: string): { baseSha: string; trunkDiff: string; branchDiff: string };
+	resetTrunk?(ref: string): boolean;
 	remove(worktreePath: string): void;
 }
 
@@ -253,6 +256,12 @@ export interface SpawnWorkerRequest {
 	minTier?: DriverTier;
 	/** Maximum capability tier for driver selection (e.g. "sidekick"). */
 	maxTier?: DriverTier;
+	/** Prefer drivers supporting native structured JSON `outputSchema` (e.g. planner/scout). */
+	requireOutputSchema?: boolean;
+	/** Hard-require requested capabilities instead of falling back to an incompatible driver. */
+	strictCapabilities?: boolean;
+	/** Prefer fast in-process API driver when available for control-plane roles. */
+	preferInProcess?: boolean;
 	/** Reuse an existing workspace path instead of creating a new git worktree. */
 	workspace?: string;
 	/** Base git ref to branch the new worktree from (defaults to trunk baseSha). */
@@ -288,6 +297,99 @@ export interface WorkerHandle {
 	close(): Promise<void>;
 }
 
+export interface IntegrationBranchCandidate {
+	readonly handle: string;
+	readonly branch: string;
+	readonly agentId: string;
+	readonly driverId?: string;
+	readonly laneIdx?: number;
+	readonly bestScore?: number;
+	readonly accepted?: number;
+	readonly summary?: string;
+}
+
+export interface IntegrateBranchInput {
+	readonly branch: string;
+	readonly label: string;
+	readonly task?: TaskRecord;
+	readonly authorAgentId: string;
+	readonly authorDriverId?: string;
+	readonly goal: string;
+	readonly totalExpectedBranches?: number;
+	readonly enableConflictResolution?: boolean;
+	readonly enableSemanticRepair?: boolean;
+	readonly actorName?: string;
+	readonly cachePrefix?: string;
+	readonly signal: AbortSignal;
+	readonly closeoutSignal?: AbortSignal;
+}
+
+export interface IntegrateBranchResult {
+	readonly merged: boolean;
+	readonly repaired: boolean;
+	readonly rolledBack: boolean;
+	readonly commitSha?: string;
+	readonly conflictFiles: readonly string[];
+	readonly finding?: Finding;
+	readonly mergedBranches: readonly string[];
+}
+
+export interface AssembleBranchesInput {
+	readonly branches: readonly IntegrationBranchCandidate[];
+	readonly goal: string;
+	readonly actorName: string;
+	readonly cachePrefix: string;
+	readonly totalExpectedBranches?: number;
+	readonly enableConflictResolution?: boolean;
+	readonly enableSemanticRepair?: boolean;
+	readonly consolidateAfterRepair?: boolean;
+	readonly signal: AbortSignal;
+	readonly closeoutSignal?: AbortSignal;
+}
+
+export interface AssembleBranchesResult {
+	readonly mergedCount: number;
+	readonly mergedLaneIndices: ReadonlySet<number>;
+	readonly conflictCount: number;
+	readonly resolvedConflicts: number;
+	readonly trunkAccepted: boolean;
+	readonly bestGreenSha: string;
+	readonly trunkFinding?: Finding;
+}
+
+export interface CompletionPassInput {
+	readonly goal: string;
+	readonly actorName: string;
+	readonly handle: string;
+	readonly cachePrefix: string;
+	readonly failReason: string;
+	readonly missingLaneSummaries?: readonly string[];
+	readonly previousFinding?: Finding;
+	readonly baseSha: string;
+	readonly consolidateBefore?: boolean;
+	readonly signal: AbortSignal;
+	readonly closeoutSignal?: AbortSignal;
+}
+
+export interface CompletionPassResult {
+	readonly improved: boolean;
+	readonly rolledBack: boolean;
+	readonly accepted: boolean;
+	readonly bestGreenSha: string;
+	readonly finding?: Finding;
+}
+
+export interface IntegrationService {
+	readonly bestGreenSha: string;
+	readonly bestGreenScore: number | undefined;
+	readonly bestGreenAccepted: boolean;
+	readonly bestGreenFindingId: string | undefined;
+	readonly mergedBranches: readonly string[];
+	integrateBranch(input: IntegrateBranchInput): Promise<IntegrateBranchResult>;
+	assembleBranches(input: AssembleBranchesInput): Promise<AssembleBranchesResult>;
+	runCompletionPass(input: CompletionPassInput): Promise<CompletionPassResult>;
+}
+
 export type TopologyOutcome = {
 	readonly status: "done" | "stopped" | "failed";
 	readonly summary: string;
@@ -306,9 +408,15 @@ export interface SwarmOsApi {
 	readonly trust: TrustService;
 	readonly router: QuotaPoolRouter;
 	readonly mcp: McpToolRegistry;
+	/** Non-preemptible closeout signal for mechanical assembly and final verification after work cutoff. */
+	readonly closeoutSignal?: AbortSignal;
+	/** Shared OS-level mechanical merge, conflict resolution, semantic repair, and monotonic ratchet pipeline. */
+	readonly integration?: IntegrationService;
 	run(): Run;
 	/** Check remaining wall-clock/token/USD fraction (0..1); returns true once reserve threshold is reached. */
 	isInCloseoutReserve(): boolean;
+	/** Remaining wall-clock budget in milliseconds (undefined if no wallSeconds limit is configured). */
+	remainingWallMs?(): number | undefined;
 	/** Create a new task on the shared task table. */
 	createTask(input: {
 		title: string;
@@ -328,10 +436,16 @@ export interface SwarmOsApi {
 	spawnWorker(req: SpawnWorkerRequest): Promise<WorkerHandle>;
 	/** Record an explicit nomination for final run delivery. */
 	nominate(findingId: string, revision?: number, auto?: boolean): void;
+	/** Path to the run's line-budgeted stigmergic field guide (`.swarm/field-guide/index.md` source). */
+	readonly fieldGuidePath?: string;
+	/** Current immutable KV-cache-safe wave snapshot of the field guide. */
+	fieldGuideSnapshot?(): string;
+	/** Wave-boundary dreaming: consolidate board posts, verifier receipts, and handoffs into <= 80 lines. */
+	consolidateFieldGuide?(opts?: { mode?: "deterministic" | "llm" }): Promise<{ lines: number; bytes: number; path: string }>;
 }
 
 export interface TopologyPlugin {
 	readonly name: string;
 	readonly description: string;
-	run(os: SwarmOsApi, input: { goal: string; rubric?: string; signal: AbortSignal }): Promise<TopologyOutcome>;
+	run(os: SwarmOsApi, input: { goal: string; rubric?: string; signal: AbortSignal; closeoutSignal?: AbortSignal }): Promise<TopologyOutcome>;
 }

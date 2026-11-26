@@ -1,8 +1,10 @@
 export * from "./contracts.ts";
+export * from "./overlay.ts";
 export * from "./sandbox.ts";
 export * from "./event-reader.ts";
 export * from "./scorecard.ts";
 export * from "./stats.ts";
+export * from "./correlation.ts";
 export * from "./runner.ts";
 export * from "./calibration.ts";
 export * from "./fork.ts";
@@ -15,3 +17,7 @@ export * from "./tasks/registry.ts";
 export { miniCoopInterpTask } from "./tasks/mini-coop-interp/index.ts";
 export { siloJoinMicroTask } from "./tasks/silo-join-micro/index.ts";
 export { miniOptPackTask, verifyPacking } from "./tasks/mini-opt-pack/index.ts";
+export { causalIncidentMeshTask } from "./tasks/causal-incident-mesh/index.ts";
+export { adversarialSpecForgeTask } from "./tasks/adversarial-spec-forge/index.ts";
+export { vliwKernelOptTask } from "./tasks/vliw-kernel-opt/index.ts";
+export { horizonRepoMigrationTask } from "./tasks/horizon-repo-migration/index.ts";

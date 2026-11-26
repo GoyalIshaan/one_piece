@@ -3,16 +3,18 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import type {
-	DriverCapabilities,
-	DriverConfig,
-	DriverHealth,
-	WorkerDriver,
-	WorkerSession,
-	WorkerSpawnSpec,
-	WorkerTurnResult,
+import {
+	type DriverCapabilities,
+	type DriverConfig,
+	type DriverHealth,
+	seatbeltReadDenyCommand,
+	type WorkerDriver,
+	type WorkerSession,
+	type WorkerSpawnSpec,
+	type WorkerTurnResult,
 } from "@one-piece/core";
 import { buildCliEnv, classifyQuotaError, probeCliBinary } from "./classify.ts";
+import { bindTurnCancellation, killProcessTreeNow } from "./supervisor.ts";
 
 function writeGeminiMcpConfig(spec: WorkerSpawnSpec): void {
 	if (!spec.mcp) return;
@@ -29,19 +31,6 @@ function writeGeminiMcpConfig(spec: WorkerSpawnSpec): void {
 		},
 	};
 	writeFileSync(join(dir, "settings.json"), JSON.stringify(settings, null, 2), "utf8");
-}
-
-function killTree(child: ChildProcess): void {
-	try {
-		if (child.pid) process.kill(-child.pid, "SIGKILL");
-		else child.kill("SIGKILL");
-	} catch {
-		try {
-			child.kill("SIGKILL");
-		} catch {
-			// Already exited.
-		}
-	}
 }
 
 /**
@@ -135,7 +124,8 @@ export class GeminiCliDriver implements WorkerDriver {
 				];
 
 				return new Promise<WorkerTurnResult>((resolve) => {
-					const child = spawn(binary, args, {
+					const [spawnBin, ...spawnArgs] = seatbeltReadDenyCommand([binary, ...args], spec.deniedReadPaths ?? []);
+					const child = spawn(spawnBin!, spawnArgs, {
 						cwd: spec.workspace,
 						env,
 						stdio: ["ignore", "pipe", "pipe"],
@@ -149,11 +139,7 @@ export class GeminiCliDriver implements WorkerDriver {
 					let streamError = "";
 					let resolvedModel: string | undefined = model;
 					let usage: WorkerTurnResult["usage"] = { durationMs: 0 };
-					let timer: ReturnType<typeof setTimeout> | undefined;
-
-					const onAbort = () => killTree(child);
-					opts.signal?.addEventListener("abort", onAbort, { once: true });
-					if (opts.timeoutMs) timer = setTimeout(onAbort, opts.timeoutMs);
+					const cancel = bindTurnCancellation(child, { signal: opts.signal, timeoutMs: opts.timeoutMs });
 
 					const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity });
 					rl.on("line", (line) => {
@@ -217,15 +203,14 @@ export class GeminiCliDriver implements WorkerDriver {
 					child.on("close", (code) => {
 						resetToIdle();
 						rl.close();
-						if (timer) clearTimeout(timer);
-						opts.signal?.removeEventListener("abort", onAbort);
+						cancel.dispose();
 
 						const durationMs = Date.now() - startedAt;
 						usage = { ...usage, durationMs };
 						const combinedErr = [streamError, stderr, rawNonJson].filter(Boolean).join("\n").trim();
 						const finalText = textChunks.join("").trim();
 
-						if (opts.signal?.aborted) {
+						if (opts.signal?.aborted || cancel.wasCancelled()) {
 							resolve({ status: "interrupted", finalText, sessionId: currentSessionId, model: resolvedModel, usage });
 							return;
 						}
@@ -243,12 +228,12 @@ export class GeminiCliDriver implements WorkerDriver {
 				});
 			},
 			async interrupt(): Promise<void> {
-				if (sessionState.kind === "running") killTree(sessionState.child);
+				if (sessionState.kind === "running") killProcessTreeNow(sessionState.child);
 			},
 			async close(): Promise<void> {
 				const prev = sessionState;
 				sessionState = { kind: "closed" };
-				if (prev.kind === "running") killTree(prev.child);
+				if (prev.kind === "running") killProcessTreeNow(prev.child);
 			},
 		};
 	}
@@ -268,7 +253,8 @@ export class GeminiCliDriver implements WorkerDriver {
 			...(this.config.extraArgs ?? []),
 		];
 
-		const child = spawn(binary, args, {
+		const [spawnBin, ...spawnArgs] = seatbeltReadDenyCommand([binary, ...args], spec.deniedReadPaths ?? []);
+		const child = spawn(spawnBin!, spawnArgs, {
 			cwd: spec.workspace,
 			env,
 			stdio: ["pipe", "pipe", "pipe"],
@@ -356,7 +342,7 @@ export class GeminiCliDriver implements WorkerDriver {
 			if (acpSessionId) spec.onActivity?.({ type: "session", sessionId: acpSessionId, model: resolvedModel });
 		} catch (error) {
 			rl.close();
-			killTree(child);
+			killProcessTreeNow(child);
 			throw error;
 		}
 
@@ -379,21 +365,40 @@ export class GeminiCliDriver implements WorkerDriver {
 				sessionState = { kind: "running", chunks };
 				const text = spec.systemPrompt && !sentSystem ? `${spec.systemPrompt}\n\n${prompt}` : prompt;
 				sentSystem = true;
+				if (opts.signal?.aborted) {
+					resetToIdle();
+					return { status: "interrupted", finalText: "", sessionId: acpSessionId, model: resolvedModel, usage: { durationMs: 0 } };
+				}
+				const cancel = bindTurnCancellation(child, {
+					signal: opts.signal,
+					timeoutMs: opts.timeoutMs,
+					graceMs: 3_000,
+					onCancel: () => {
+						if (acpSessionId) void sendRpc("session/cancel", { sessionId: acpSessionId }).catch(() => {});
+					},
+				});
 				try {
 					await sendRpc("session/prompt", { sessionId: acpSessionId, prompt: [{ type: "text", text }] });
-					return { status: "completed", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage: { durationMs: Date.now() - startedAt } };
+					return {
+						status: opts.signal?.aborted || cancel.wasCancelled() ? "interrupted" : "completed",
+						finalText: chunks.join("").trim(),
+						sessionId: acpSessionId,
+						model: resolvedModel,
+						usage: { durationMs: Date.now() - startedAt },
+					};
 				} catch (error) {
 					const raw = `${error instanceof Error ? error.message : String(error)}\n${stderr}`.trim();
 					const quota = classifyQuotaError(raw);
 					const usage = { durationMs: Date.now() - startedAt };
+					if (opts.signal?.aborted || cancel.wasCancelled()) {
+						return { status: "interrupted", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage };
+					}
 					if (quota) {
 						return { status: "rate_limited", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, quotaError: quota, error: raw };
 					}
-					if (opts.signal?.aborted) {
-						return { status: "interrupted", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage };
-					}
 					return { status: "failed", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, error: raw };
 				} finally {
+					cancel.dispose();
 					resetToIdle();
 				}
 			},
@@ -405,7 +410,7 @@ export class GeminiCliDriver implements WorkerDriver {
 			async close(): Promise<void> {
 				sessionState = { kind: "closed" };
 				rl.close();
-				killTree(child);
+				killProcessTreeNow(child);
 			},
 		};
 	}

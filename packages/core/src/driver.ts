@@ -90,11 +90,20 @@ export type WorkerActivityEvent =
 	| { type: "tool_result"; name: string; isError?: boolean; outputPreview?: string; durationMs?: number; isMcp?: boolean }
 	| { type: "error"; message: string };
 
+export interface WorkerWorkspaceSnapshot {
+	readonly headSha?: string;
+	readonly treeSha?: string;
+	readonly wipSha?: string;
+	readonly hasEdits: boolean;
+}
+
 interface WorkerTurnBase {
 	finalText: string;
 	sessionId?: string;
 	model?: string;
 	usage?: UsageRecord;
+	/** Automatically captured by SwarmOS on every write-worker turn exit/interruption. */
+	workspaceSnapshot?: WorkerWorkspaceSnapshot;
 }
 
 export type WorkerTurnResult = WorkerTurnBase & Exclusive<
@@ -193,6 +202,12 @@ export interface QuotaPoolRouter {
 			avoidDrivers?: readonly string[];
 			minTier?: DriverTier;
 			maxTier?: DriverTier;
+			/** Prefer drivers whose `capabilities.supportsOutputSchema` is true (graceful fallback unless `strictCapabilities` is true). */
+			requireOutputSchema?: boolean;
+			/** If true, throw rather than silently falling back to a driver lacking requested capabilities. */
+			strictCapabilities?: boolean;
+			/** Prefer fast in-process API drivers (`kind === "pi-in-process"`) when registered for this role (e.g. planner/reviewer). */
+			preferInProcess?: boolean;
 			signal?: AbortSignal;
 		},
 	): Promise<DriverPoolSelection>;

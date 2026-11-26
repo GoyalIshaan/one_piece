@@ -40,6 +40,8 @@ interface CommandOptions {
 	env?: Record<string, string>;
 	/** Folders writable besides cwd and temp. */
 	writeRoots?: string[];
+	/** Per-invocation paths blocked from reading (preferred over process-global deny lists). */
+	deniedReadPaths?: readonly string[];
 	/** Keep temporary writes inside the scratch workspace. */
 	isolatedWrites?: boolean;
 	/** Explicitly block all outbound network even on the worker profile. */
@@ -97,15 +99,28 @@ function real(path: string): string {
 	}
 }
 
-/** Paths no sandboxed command may read (eval graders, hidden answers). Process-wide. */
-const deniedReads = new Set<string>();
+/**
+ * @deprecated Process-global mutable deny list. Prefer passing immutable `deniedReadPaths` per spawn/command.
+ * Retained as a ref-counted compatibility shim for legacy callers and tests.
+ */
+const deniedReadCounts = new Map<string, number>();
 
+/** @deprecated Prefer passing immutable `deniedReadPaths` per command/worker. */
 export function denySandboxReads(paths: string[]): void {
-	for (const p of paths) deniedReads.add(real(p));
+	for (const p of paths) {
+		const key = real(p);
+		deniedReadCounts.set(key, (deniedReadCounts.get(key) ?? 0) + 1);
+	}
 }
 
+/** @deprecated Prefer passing immutable `deniedReadPaths` per command/worker. */
 export function allowSandboxReads(paths: string[]): void {
-	for (const p of paths) deniedReads.delete(real(p));
+	for (const p of paths) {
+		const key = real(p);
+		const count = deniedReadCounts.get(key) ?? 0;
+		if (count <= 1) deniedReadCounts.delete(key);
+		else deniedReadCounts.set(key, count - 1);
+	}
 }
 
 const operatorArchive = join(homedir(), ".one_piece", "archives.noindex");
@@ -117,13 +132,37 @@ export function isOperatorArchivePath(path: string): boolean {
 	return canonical === archive || canonical.startsWith(archive + "/");
 }
 
-/** Match restrictions for reads performed by the host process instead of Seatbelt. */
-export function isSandboxReadBlocked(path: string): boolean {
+/**
+ * Pure per-call read-denial check combining operator archives, an immutable per-worker/per-command
+ * `deniedReadPaths` list, and any legacy process-global entries.
+ */
+export function isPathBlocked(path: string, deniedReadPaths?: readonly string[]): boolean {
 	const canonical = real(path);
-	return isOperatorArchivePath(canonical) || [...deniedReads].some(root => canonical === root || canonical.startsWith(root + "/"));
+	if (isOperatorArchivePath(canonical)) return true;
+	if (deniedReadPaths?.length) {
+		for (const raw of deniedReadPaths) {
+			if (!raw) continue;
+			const root = real(raw);
+			if (canonical === root || canonical.startsWith(root + "/")) return true;
+		}
+	}
+	return [...deniedReadCounts.keys()].some(root => canonical === root || canonical.startsWith(root + "/"));
 }
 
-function seatbeltProfile(profile: SandboxProfile, roots: string[], archive: string | undefined, unrestricted: boolean, leasedMacGpu: boolean, networkOff = false): string {
+/** @deprecated Use `isPathBlocked(path, deniedReadPaths)` with explicit immutable paths. */
+export function isSandboxReadBlocked(path: string): boolean {
+	return isPathBlocked(path);
+}
+
+function seatbeltProfile(
+	profile: SandboxProfile,
+	roots: string[],
+	archive: string | undefined,
+	unrestricted: boolean,
+	leasedMacGpu: boolean,
+	networkOff = false,
+	deniedReadPaths?: readonly string[],
+): string {
 	const quote = (r: string) => `(subpath "${r.replace(/"/g, '\\"')}")`;
 	const privateArchive = archive ? `(deny file-read* file-write* ${quote(archive)})` : "";
 	const gpuPolicy = leasedMacGpu ? "" : [
@@ -132,7 +171,13 @@ function seatbeltProfile(profile: SandboxProfile, roots: string[], archive: stri
 		'(deny network-outbound (remote ip "localhost:*") (remote unix-socket))',
 		profile === "worker" && !networkOff ? '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))' : "",
 	].join("\n");
-	const privateReads = deniedReads.size ? `(deny file-read* ${[...deniedReads].map(quote).join(" ")})` : "";
+	const combinedDenied = new Set<string>(deniedReadCounts.keys());
+	for (const raw of deniedReadPaths ?? []) {
+		if (!raw) continue;
+		combinedDenied.add(raw);
+		combinedDenied.add(real(raw));
+	}
+	const privateReads = combinedDenied.size ? `(deny file-read* ${[...combinedDenied].map(quote).join(" ")})` : "";
 	if (unrestricted && profile !== "isolated") return ["(version 1)", "(allow default)", privateReads, privateArchive, gpuPolicy].join("\n");
 	const writes = roots.map(quote).join(" ");
 	const isolatedReads = profile === "isolated" ? [
@@ -186,7 +231,10 @@ export function seatbeltReadDenyCommand(command: string[], deniedPaths: readonly
 }
 
 /** Apply the same OS restrictions to shell tools and native subprocesses such as workspace Git. */
-export function sandboxCommand(command: string[], options: Pick<CommandOptions, "cwd" | "profile" | "isolatedWrites" | "writeRoots" | "networkOff"> & Admission): string[] {
+export function sandboxCommand(
+	command: string[],
+	options: Pick<CommandOptions, "cwd" | "profile" | "isolatedWrites" | "writeRoots" | "networkOff" | "deniedReadPaths"> & Admission,
+): string[] {
 	if (options.leasedMacGpu && (!options.commandPrefix?.length || !Number.isFinite(options.readyTimeoutMs) ||
 		options.readyTimeoutMs <= 0 || typeof options.admissionCheck !== "function")) {
 		throw new Error("A leased Mac GPU command requires a launcher, readiness deadline and admission check");
@@ -197,7 +245,15 @@ export function sandboxCommand(command: string[], options: Pick<CommandOptions, 
 	}
 	const roots = [real(options.cwd), ...(options.profile === "isolated" || options.isolatedWrites ? [] : [real(tmpdir()), "/private/tmp", "/private/var/folders"]), ...(options.writeRoots ?? []).map(real)];
 	const archive = existsSync(operatorArchive) ? real(operatorArchive) : undefined;
-	const rules = seatbeltProfile(options.profile, roots, archive, Boolean(process.env.ONE_PIECE_NO_SANDBOX), options.leasedMacGpu === true, options.networkOff === true);
+	const rules = seatbeltProfile(
+		options.profile,
+		roots,
+		archive,
+		Boolean(process.env.ONE_PIECE_NO_SANDBOX),
+		options.leasedMacGpu === true,
+		options.networkOff === true,
+		options.deniedReadPaths,
+	);
 	return ["/usr/bin/sandbox-exec", "-p", rules, ...command];
 }
 
@@ -225,8 +281,8 @@ export function runCommand(options: RunOptions): Promise<RunResult> {
 		const child = spawn(executable!, args, {
 			cwd: options.cwd,
 			env: isolated
-				? { PATH: "/Library/Frameworks/Python.framework/Versions/Current/bin:/usr/bin:/bin", HOME: options.cwd, LANG: "en_US.UTF-8", TMPDIR: options.cwd }
-				: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? options.cwd, LANG: "en_US.UTF-8", TMPDIR: options.isolatedWrites ? options.cwd : tmpdir(), ...passthroughEnv(), ...options.env, ...admissionEnv },
+				? { PATH: "/Library/Frameworks/Python.framework/Versions/Current/bin:/usr/bin:/bin", HOME: options.cwd, LANG: "en_US.UTF-8", TMPDIR: options.cwd, PYTHONDONTWRITEBYTECODE: "1" }
+				: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? options.cwd, LANG: "en_US.UTF-8", TMPDIR: options.isolatedWrites ? options.cwd : tmpdir(), PYTHONDONTWRITEBYTECODE: "1", ...passthroughEnv(), ...options.env, ...admissionEnv },
 			stdio: waitForReady ? ["ignore", "pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
 			detached: true,
 		});

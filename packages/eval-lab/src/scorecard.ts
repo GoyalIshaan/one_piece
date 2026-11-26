@@ -273,6 +273,9 @@ export async function extractScorecard(options: ExtractScorecardOptions): Promis
 	let cacheRead = 0;
 	let cacheWrite = 0;
 	let reasoning = 0;
+	let cacheReadReported = false;
+	let cacheWriteReported = false;
+	let reasoningReported = false;
 	let peakInputPerCall = 0;
 	let estimatedUsd = 0;
 	let llmWaitMs = 0;
@@ -293,6 +296,9 @@ export async function extractScorecard(options: ExtractScorecardOptions): Promis
 			const inTok = Number(e.data.input ?? 0);
 			const crTok = Number(e.data.cacheReadTokens ?? 0);
 			const cwTok = Number(e.data.cacheWriteTokens ?? 0);
+			if (e.data.cacheReadReported === true || e.data.cacheReadTokens !== undefined) cacheReadReported = true;
+			if (e.data.cacheWriteReported === true || e.data.cacheWriteTokens !== undefined) cacheWriteReported = true;
+			if (e.data.reasoningReported === true || e.data.reasoningTokens !== undefined) reasoningReported = true;
 			input += inTok;
 			output += Number(e.data.output ?? 0);
 			cacheRead += crTok;
@@ -329,6 +335,9 @@ export async function extractScorecard(options: ExtractScorecardOptions): Promis
 				const crTok = Number(e.data.cachedTokens ?? 0);
 				const cwTok = Number(e.data.cacheWriteTokens ?? 0);
 				const rTok = Number(e.data.reasoningTokens ?? 0);
+				if (e.data.cacheReadReported === true || e.data.cachedTokens !== undefined) cacheReadReported = true;
+				if (e.data.cacheWriteReported === true || e.data.cacheWriteTokens !== undefined) cacheWriteReported = true;
+				if (e.data.reasoningReported === true || e.data.reasoningTokens !== undefined) reasoningReported = true;
 				input += inTok;
 				output += outTok;
 				cacheRead += crTok;
@@ -380,6 +389,9 @@ export async function extractScorecard(options: ExtractScorecardOptions): Promis
 		cacheWrite,
 		cacheHitRate,
 		reasoning,
+		cacheReadReported,
+		cacheWriteReported,
+		reasoningReported,
 		peakInputPerCall,
 		estimatedUsd: Math.round(estimatedUsd * 1e6) / 1e6,
 		byRole,

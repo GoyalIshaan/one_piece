@@ -16,6 +16,8 @@ export { GrokAcpDriver, GrokCliDriver } from "./grok.ts";
 export { synthesizeHandoffFile, type HandoffInput } from "./handoff.ts";
 export { PiInProcessDriver } from "./pi.ts";
 export { DriverQuotaRouter, type QuotaRouterOptions } from "./quota-router.ts";
+export { normalizeStrictJsonSchema } from "./schema.ts";
+export { bindTurnCancellation, killProcessTree, killProcessTreeNow, type TurnCancellationBinding } from "./supervisor.ts";
 
 export function createDriver(
 	config: DriverConfig,

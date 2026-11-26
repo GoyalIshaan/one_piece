@@ -1,5 +1,6 @@
 import { appendFileSync, cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { runTaskCalibration } from "./calibration.ts";
 import type {
 	BudgetMode,
 	CandidateSnapshot,
@@ -11,6 +12,7 @@ import type {
 	PromotionBar,
 	RunBudget,
 	Scorecard,
+	SeatSpec,
 } from "./contracts.ts";
 import { openEvalTraceDb, readRunEvents } from "./event-reader.ts";
 import { gitReproducibility, sha256Dir } from "./sandbox.ts";
@@ -40,6 +42,8 @@ export interface CampaignOptions {
 	promotionBar?: PromotionBar;
 	baselineArmId?: string;
 	candidateArmId?: string;
+	/** Skip the automatic zero-cost pre-campaign task calibration gate (default false). */
+	skipCalibration?: boolean;
 	log?: (line: string) => void;
 }
 
@@ -87,7 +91,7 @@ async function runSilentBestOfN(
 	let cumulativeTokens = 0;
 
 	try {
-		for (let i = 0; i < n; i++) {
+		const runOneSeat = async (i: number): Promise<{ idx: number; subDir: string; subDbPath: string; subRunId: string; receipt: HarnessRunReceipt }> => {
 			const subDir = join(spec.runDir, `silent-seat-${i}`);
 			const subWorkspace = join(subDir, "workspace");
 			mkdirSync(subDir, { recursive: true });
@@ -95,22 +99,39 @@ async function runSilentBestOfN(
 			const subDbPath = join(subDir, "trace.db");
 			const subRunId = `${spec.runId}-seat-${i}`;
 
-			const otherShards = (spec.privateShards ?? []).filter((_, idx) => idx !== i);
+			// Pass full first-class `seats` (plus backward-compatible `privateShards`/`soloSeatPrompts`) with `seatIndex: i`
+			// so `createV2Adapter` resolves per-seat prompts and immutable per-worker Seatbelt denies cleanly.
 			const subReceipt = await adapter.run({
 				...spec,
 				runId: subRunId,
 				runDir: subDir,
 				dbPath: subDbPath,
 				workspaceDir: subWorkspace,
-				privateShards: spec.privateShards?.[i] ? [spec.privateShards[i]!] : undefined,
+				seats: spec.seats,
+				privateShards: spec.privateShards,
+				seatPrompts: undefined,
+				soloSeatPrompts: spec.soloSeatPrompts,
 				seatIndex: i,
-				totalSeats: spec.totalSeats ?? spec.privateShards?.length ?? n,
-				hiddenDenyPaths: [...spec.hiddenDenyPaths, ...otherShards],
+				totalSeats: spec.totalSeats ?? spec.seats?.length ?? spec.privateShards?.length ?? n,
+				hiddenDenyPaths: spec.hiddenDenyPaths,
 				controlRung: "solo",
 				topology: "silent_bon_member",
 				swarmSize: 1,
 				budget: perWorkerBudget,
 			});
+			return { idx: i, subDir, subDbPath, subRunId, receipt: subReceipt };
+		};
+
+		const seatResults =
+			spec.budgetMode === "wall_clock"
+				? await Promise.all(Array.from({ length: n }, (_, i) => runOneSeat(i)))
+				: await (async () => {
+					const out: Array<Awaited<ReturnType<typeof runOneSeat>>> = [];
+					for (let i = 0; i < n; i++) out.push(await runOneSeat(i));
+					return out;
+				})();
+
+		for (const { idx: i, subDbPath, subRunId, receipt: subReceipt } of seatResults) {
 			subReceipts.push(subReceipt);
 			faults.push(...subReceipt.harnessFaults);
 			for (const d of subReceipt.driverIds ?? []) driverSet.add(d);
@@ -121,6 +142,7 @@ async function runSilentBestOfN(
 			for (const ev of events) {
 				if (ev.type === "run.started" || ev.type === "run.finished") continue;
 				if (ev.type === "model.call") seatTokens += Number(ev.data.totalTokens ?? 0);
+				else if (ev.type === "budget.charged") seatTokens += Number(ev.data.tokens ?? 0);
 				insertEvent.run(
 					ev.ts,
 					spec.runId,
@@ -144,34 +166,128 @@ async function runSilentBestOfN(
 		}
 
 		// Fair public-only selector: NEVER peeks at hidden `task.grade()`!
-		// Uses `task.publicCheck()` when available, breaking ties deterministically by first valid submission.
+		// On privately sharded tasks, each isolated seat i produces `submissions/seat_i.json` with zero
+		// cross-seat communication; mechanically assemble those disjoint seat files just like swarm trunk
+		// assembly so `silent_bon` is a fair, non-strawman no-communication baseline (all 4 seats present).
 		const higher = task.higherIsBetter ?? true;
 		let chosen: { dir: string; sha256: string; score: number; passed: boolean } | undefined;
-		for (const sub of subReceipts) {
-			if (!sub.nominatedArtifactDir || !existsSync(sub.nominatedArtifactDir)) continue;
-			const pub = task.publicCheck
-				? await task.publicCheck({
-						artifactDir: sub.nominatedArtifactDir,
-						seed: spec.seed,
-						n: spec.totalSeats ?? spec.privateShards?.length ?? n,
-						options,
-					})
-				: {
-						passed: sub.candidateSnapshots.some((c) => c.sha256 === sub.nominatedSha256 && c.acceptedByVerifier),
-						score: 0,
-						details: "no publicCheck defined; deterministic first-valid selection",
+
+		const resolvedSeats: readonly SeatSpec[] = spec.seats?.length
+			? spec.seats
+			: (spec.privateShards ?? []).map((dir, idx) => ({
+				index: idx,
+				handle: `seat-${idx}`,
+				privateDir: dir,
+				outputPath: join("submissions", `seat_${idx}.json`),
+				prompt: spec.seatPrompts?.[idx] ?? "",
+				soloPrompt: spec.soloSeatPrompts?.[idx] ?? "",
+			}));
+
+		if (resolvedSeats.length > 0) {
+			const assembledDir = join(spec.runDir, "silent-assembled");
+			mkdirSync(assembledDir, { recursive: true });
+			cpSync(spec.workspaceDir, assembledDir, { recursive: true });
+
+			// Locate the best artifact directory for each isolated seat (nominated dir first, then latest snapshot
+			// containing that seat's declared `outputPath` since 1/N seats fail N/N publicCheck).
+			const seatArtifactDirs: Array<string | undefined> = resolvedSeats.map((seat) => {
+				const sub = subReceipts[seat.index];
+				if (!sub) return undefined;
+				const candidateDirs: string[] = [];
+				if (sub.nominatedArtifactDir) candidateDirs.push(sub.nominatedArtifactDir);
+				for (let k = sub.candidateSnapshots.length - 1; k >= 0; k--) {
+					const snapDir = sub.candidateSnapshots[k]?.dir;
+					if (snapDir) candidateDirs.push(snapDir);
+				}
+				return candidateDirs.find((d) => existsSync(join(d, seat.outputPath)));
+			});
+
+			let mergedSeats = 0;
+			if (task.assembleSeats) {
+				const assembled = await task.assembleSeats({
+					baseWorkspaceDir: spec.workspaceDir,
+					seats: resolvedSeats,
+					seatArtifactDirs,
+					outDir: assembledDir,
+					seed: spec.seed,
+					n: spec.totalSeats ?? resolvedSeats.length,
+					options,
+				});
+				mergedSeats = assembled.assembledCount;
+			} else {
+				for (let i = 0; i < resolvedSeats.length; i++) {
+					const seat = resolvedSeats[i]!;
+					const srcDir = seatArtifactDirs[i];
+					if (!srcDir) continue;
+					const srcFile = join(srcDir, seat.outputPath);
+					if (existsSync(srcFile)) {
+						const dstFile = join(assembledDir, seat.outputPath);
+						mkdirSync(dirname(dstFile), { recursive: true });
+						cpSync(srcFile, dstFile);
+						mergedSeats += 1;
+					}
+				}
+			}
+
+			if (mergedSeats > 0) {
+				const assembledSha = sha256Dir(assembledDir);
+				const pub = task.publicCheck
+					? await task.publicCheck({
+							artifactDir: assembledDir,
+							seed: spec.seed,
+							n: spec.totalSeats ?? resolvedSeats.length,
+							options,
+						})
+					: { passed: mergedSeats === n, score: mergedSeats / n, details: `assembled ${mergedSeats}/${n} seats` };
+				allSnapshots.push({
+					id: "silent-assembled",
+					agentId: "silent_bon:assembler",
+					dir: assembledDir,
+					sha256: assembledSha,
+					atTokens: cumulativeTokens,
+					atWallMs: Math.max(0, Date.now() - began),
+					acceptedByVerifier: pub.passed,
+				});
+				if (pub.passed) {
+					chosen = {
+						dir: assembledDir,
+						sha256: assembledSha,
+						score: pub.score,
+						passed: pub.passed,
 					};
-			if (
-				!chosen ||
-				(pub.passed && !chosen.passed) ||
-				(pub.passed === chosen.passed && (higher ? pub.score > chosen.score : pub.score < chosen.score))
-			) {
-				chosen = {
-					dir: sub.nominatedArtifactDir,
-					sha256: sub.nominatedSha256,
-					score: pub.score,
-					passed: pub.passed,
-				};
+				}
+			}
+		}
+
+		// For unsharded tasks (or fallback when no sharded seat files were produced), pick the best
+		// individual seat artifact using `task.publicCheck()` only.
+		if (!chosen) {
+			for (const sub of subReceipts) {
+				if (!sub.nominatedArtifactDir || !existsSync(sub.nominatedArtifactDir)) continue;
+				const pub = task.publicCheck
+					? await task.publicCheck({
+							artifactDir: sub.nominatedArtifactDir,
+							seed: spec.seed,
+							n: spec.totalSeats ?? spec.privateShards?.length ?? n,
+							options,
+						})
+					: {
+							passed: sub.candidateSnapshots.some((c) => c.sha256 === sub.nominatedSha256 && c.acceptedByVerifier),
+							score: 0,
+							details: "no publicCheck defined; deterministic first-valid selection",
+						};
+				if (
+					!chosen ||
+					(pub.passed && !chosen.passed) ||
+					(pub.passed === chosen.passed && (higher ? pub.score > chosen.score : pub.score < chosen.score))
+				) {
+					chosen = {
+						dir: sub.nominatedArtifactDir,
+						sha256: sub.nominatedSha256,
+						score: pub.score,
+						passed: pub.passed,
+					};
+				}
 			}
 		}
 
@@ -215,7 +331,11 @@ export function renderCampaignReport(
 	];
 	for (const arm of arms) {
 		const rows = scorecards.filter(
-			(s) => s.reproducibility.topology === (arm.topology ?? arm.controlRung) && s.dynamics.swarmSize === arm.swarmSize && s.reproducibility.controlRung === arm.controlRung,
+			(s) =>
+				s.runId.endsWith(`-${arm.id}`) ||
+				(s.reproducibility.topology === (arm.topology ?? arm.controlRung) &&
+					s.dynamics.swarmSize === arm.swarmSize &&
+					s.reproducibility.controlRung === arm.controlRung),
 		);
 		if (!rows.length) continue;
 		const avg = (fn: (s: Scorecard) => number) => rows.reduce((acc, r) => acc + fn(r), 0) / rows.length;
@@ -242,6 +362,23 @@ export async function runCampaign(options: CampaignOptions): Promise<CampaignRes
 
 	mkdirSync(join(outDir, "scorecards"), { recursive: true });
 	const git = gitReproducibility(repoRoot);
+	let calibrationReport: { passed: boolean; checksPassed: number; checksTotal: number } | null = null;
+	if (!options.skipCalibration && task.buildReferenceArtifact) {
+		const cal = await runTaskCalibration(task, {
+			seed: seeds[0] ?? 7,
+			repoRoot,
+			taskOptions,
+		});
+		calibrationReport = {
+			passed: cal.passed,
+			checksPassed: cal.checks.filter((c) => c.passed).length,
+			checksTotal: cal.checks.length,
+		};
+		if (!cal.passed) {
+			const failed = cal.checks.filter((c) => !c.passed).map((c) => `${c.name}: ${c.details}`).join("; ");
+			throw new Error(`Pre-campaign calibration failed for task "${task.id}": ${failed}`);
+		}
+	}
 	const protocol = {
 		schemaVersion: 1,
 		createdAt: new Date().toISOString(),
@@ -254,6 +391,7 @@ export async function runCampaign(options: CampaignOptions): Promise<CampaignRes
 		budgetMode,
 		taskOptions,
 		promotionBar: options.promotionBar ?? null,
+		calibration: calibrationReport,
 		git,
 	};
 	writeFileSync(join(outDir, "protocol.json"), JSON.stringify(protocol, null, 2) + "\n");
@@ -299,7 +437,10 @@ export async function runCampaign(options: CampaignOptions): Promise<CampaignRes
 				goal: prepared.goal,
 				rubric: prepared.rubric,
 				workspaceDir: prepared.workspaceDir,
+				seats: prepared.seats,
 				privateShards: prepared.privateShards,
+				seatPrompts: prepared.seatPrompts,
+				soloSeatPrompts: prepared.soloSeatPrompts,
 				seatIndex: arm.controlRung === "solo" ? 0 : undefined,
 				totalSeats: prepared.n,
 				hiddenDenyPaths: [hiddenDir, dbPath, `${dbPath}-wal`, `${dbPath}-shm`],

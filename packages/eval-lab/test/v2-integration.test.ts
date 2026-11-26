@@ -256,14 +256,17 @@ describe("eval-lab <-> one_piece v2 SwarmOS end-to-end integration", () => {
 				budget: { tokens: 20_000 },
 				outDir: join(root, "campaign-spy"),
 				repoRoot: REPO_ROOT,
+				skipCalibration: true,
 			});
 			expect(spyRes.scorecards[0]?.hasHarnessFault).toBe(false);
 			expect(publicCalls).toBeGreaterThanOrEqual(2); // 2 workers checked via publicCheck (plus TrustLayer)
 			// Only offline scorecard extraction calls grade() (1 nominated + 2 candidate snapshots = 3), never during selection
 			expect(gradeCalls).toBeLessThanOrEqual(4);
 
-			// Verify publicCheck works cleanly without touching hiddenDir on mini-coop-interp
+			// Verify publicCheck works cleanly without touching hiddenDir on mini-coop-interp:
+			// starter fails calibrated publicCheck, while reference solution passes without hiddenDir.
 			const interpDir = join(root, "interp-pub");
+			const interpRefDir = join(root, "interp-pub-ref");
 			const interpHidden = join(root, "interp-hidden");
 			const interpPrep = await miniCoopInterpTask.prepare({
 				seed: 7,
@@ -272,13 +275,29 @@ describe("eval-lab <-> one_piece v2 SwarmOS end-to-end integration", () => {
 				workDir: interpDir,
 				hiddenDir: interpHidden,
 			});
-			const pubRes = await miniCoopInterpTask.publicCheck!({
+			cpSync(interpPrep.workspaceDir, interpRefDir, { recursive: true });
+			await miniCoopInterpTask.buildReferenceArtifact!({
+				prepared: interpPrep,
+				outDir: interpRefDir,
+			});
+			// Delete hiddenDir before running publicCheck to prove it never touches hiddenDir.
+			rmSync(interpHidden, { recursive: true, force: true });
+			const starterPubRes = await miniCoopInterpTask.publicCheck!({
 				artifactDir: interpPrep.workspaceDir,
 				seed: 7,
 				n: 2,
 				options: { coupling: "high" },
 			});
-			expect(pubRes.passed).toBe(true);
+			expect(starterPubRes.passed).toBe(false);
+			expect(starterPubRes.score).toBeLessThan(1);
+			const refPubRes = await miniCoopInterpTask.publicCheck!({
+				artifactDir: interpRefDir,
+				seed: 7,
+				n: 2,
+				options: { coupling: "high" },
+			});
+			expect(refPubRes.passed).toBe(true);
+			expect(refPubRes.score).toBe(1);
 
 			// Verify provider auth/model outage is flagged as a HarnessFault (never silently masked as 0.0)
 			const outageDriver = new ScriptedV2Driver("v2-outage", async () => ({
@@ -397,8 +416,12 @@ describe("eval-lab <-> one_piece v2 SwarmOS end-to-end integration", () => {
 			expect(silent.hasHarnessFault).toBe(false);
 			expect(swarm.hasHarnessFault).toBe(false);
 			expect(solo.deliveredPass).toBe(false);
+			expect(solo.autoNominated).toBe(false);
 			expect(silent.deliveredPass).toBe(false);
-			expect(silent.autoNominated).toBe(false);
+			// Fair non-strawman silent_bon mechanically assembles all 4 disjoint seat files (passing public schema),
+			// yet without Board communication Seats 1..3 have offset=0 so only Seat 0 (1/4 = 0.25) is correct.
+			expect(silent.autoNominated).toBe(true);
+			expect(silent.deliveredScore).toBe(0.25);
 			expect(swarm.deliveredPass).toBe(true);
 			expect(swarm.deliveredScore).toBe(1);
 			expect(swarm.losses.nominationLoss).toBe(0);

@@ -7,11 +7,13 @@ export interface HierarchyTopologyOptions {
 
 const PLAN_SCHEMA: JsonSchema = {
 	type: "object",
+	additionalProperties: false,
 	properties: {
 		subtasks: {
 			type: "array",
 			items: {
 				type: "object",
+				additionalProperties: false,
 				properties: {
 					title: { type: "string" },
 					description: { type: "string" },
@@ -66,6 +68,7 @@ export function hierarchyTopology(opts: HierarchyTopologyOptions = {}): Topology
 				role: "planner",
 				readOnly: true,
 				canSpawn: false,
+				requireOutputSchema: true,
 				cacheKeyPrefix: `${os.runId}:hierarchy-planner`,
 				toolScope: {
 					board: "read",

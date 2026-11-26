@@ -41,15 +41,18 @@ export interface LifecycleEvents {
 	"agent.compacted": { agentId: string; strategy: "micro" | "anchor"; beforeTokens: number; afterTokens: number; prunedCount: number; compactionCount: number };
 	"agent.handoff": { agentId: string; fromDriver: string; toDriver: string; workspace: string; handoffPath: string; reasonKind?: string; waitedMs?: number };
 	"refinery.conflict_resolved": { taskId: string; branch: string; conflictFiles: string[]; commitSha: string };
+	"refinery.semantic_regression": { taskId: string; branch: string; reason: string; repaired: boolean; rolledBack: boolean };
 	"peer.conflict_detected": { peerHandle: string; branch: string; conflictFiles: string[] };
 	"peer.conflict_resolved": { peerHandle: string; branch: string; conflictFiles: string[]; commitSha: string };
+	"peer.trunk_repaired": { reason: string; repaired: boolean; commitSha?: string };
+	"field_guide.updated": { lines: number; bytes: number; mode: "deterministic" | "llm"; path: string; wave: number };
 	"skill.loaded": { skill: string; source: string; bytes: number };
 	"codemode.executed": { exitCode: number; durationMs: number; outputBytes: number; artifactId?: string };
 	"driver.tool_call": { tool: string; argsPreview?: string; isMcp?: boolean; driverId?: string };
 	"driver.tool_result": { tool: string; isError: boolean; outputPreview?: string; durationMs?: number; isMcp?: boolean; driverId?: string };
 	"driver.error": { message: string; driverId?: string };
 	"task.created": { taskId: string; title: string; dependsOn: string[] };
-	"task.ready": { taskId: string; title: string };
+	"task.ready": { taskId: string; title: string; reason?: string; avoidedDriver?: string };
 	"task.claimed": { taskId: string; agentId: string; fencingToken: number; leaseExpiresAt: number };
 	"task.status": { taskId: string; status: TaskStatus; result?: string };
 	"board.posted": {
@@ -85,6 +88,9 @@ export interface LifecycleEvents {
 		cachedTokens?: number;
 		cacheWriteTokens?: number;
 		reasoningTokens?: number;
+		cacheReadReported?: boolean;
+		cacheWriteReported?: boolean;
+		reasoningReported?: boolean;
 		usd?: number;
 		units?: Record<string, number>;
 	};
