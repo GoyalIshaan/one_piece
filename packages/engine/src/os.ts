@@ -6,6 +6,7 @@ import {
 	assertNever,
 	type BoardService,
 	type BudgetVector,
+	type DecisionModelClient,
 	type DriverTier,
 	EventBus,
 	FileArtifactStore,
@@ -55,6 +56,7 @@ import {
 } from "./field-guide.ts";
 import { IntegrationPipeline } from "./integration.ts";
 import { FileSkillRegistry, loadSkillTool } from "./skills.ts";
+import { BoardTriageService } from "./triage.ts";
 import { TriggerEngine } from "./triggers.ts";
 import { TrustLayer } from "./trust.ts";
 
@@ -87,6 +89,8 @@ export interface SwarmOsConfig {
 	enableFieldGuide?: boolean;
 	/** Hard line ceiling for `.swarm/field-guide/index.md` (default 80). */
 	fieldGuideMaxLines?: number;
+	/** Optional System-1 calibrated Decision Model client (e.g., TypeSafe Jev). */
+	decisionClient?: DecisionModelClient;
 	rawConfig?: Record<string, unknown>;
 	store: Store;
 	router: QuotaPoolRouter;
@@ -125,6 +129,8 @@ export class SwarmOS implements SwarmOsApi {
 	readonly mcp: McpBusServer;
 	readonly skills: FileSkillRegistry;
 	readonly integration: IntegrationPipeline;
+	readonly decisionClient?: DecisionModelClient;
+	readonly triage: BoardTriageService;
 	readonly fieldGuidePath: string;
 
 	private currentRun: Run;
@@ -135,13 +141,35 @@ export class SwarmOS implements SwarmOsApi {
 	private readonly startedAt: number;
 	private readonly networkOffWorkers: boolean;
 	private readonly autoHandoffOnSecondCompaction: boolean;
-	private readonly enableFieldGuide: boolean;
+	private enableFieldGuide: boolean;
 	private readonly fieldGuideMaxLines: number;
-	private readonly baseEnvProbe: string;
+	private baseEnvProbe: string;
 	private fieldGuideWave = 0;
 	private frozenFieldGuideSnapshot = "";
 	private readonly triggers: TriggerEngine;
 	private readonly closeout: CloseoutController;
+	private readonly spawnedChildren = new Map<
+		string,
+		{
+			agentId: string;
+			parentAgentId: string;
+			role: Role;
+			handle: string;
+			subtreeId: string;
+			promise: Promise<{
+				agentId: string;
+				handle: string;
+				role: Role;
+				status: string;
+				branch?: string;
+				commitSha?: string;
+				score?: number;
+				summary: string;
+			}>;
+			cancel: () => void;
+			steer: (msg: string) => Promise<void>;
+		}
+	>();
 	private readonly activeHandles = new Map<
 		string,
 		{
@@ -197,6 +225,13 @@ export class SwarmOS implements SwarmOsApi {
 		}
 		this.artifacts = new FileArtifactStore(this.runId, this.runDir, this.bus);
 		this.board = new SwarmBoardService(this.bus);
+		this.decisionClient = cfg.decisionClient;
+		this.triage = new BoardTriageService({
+			runId: this.runId,
+			board: this.board,
+			bus: this.bus,
+			decisionClient: this.decisionClient,
+		});
 		this.secrets = new LocalSecretBroker(this.runId, this.bus, { secrets: cfg.secrets ?? [] });
 		this.skills = new FileSkillRegistry({ projectDir: cfg.workspace, extraDirs: cfg.skillsDirs });
 
@@ -411,7 +446,16 @@ export class SwarmOS implements SwarmOsApi {
 	}
 
 	fieldGuideSnapshot(): string {
-		return this.frozenFieldGuideSnapshot;
+		return this.enableFieldGuide ? this.frozenFieldGuideSnapshot : "";
+	}
+
+	setFieldGuideEnabled(enabled: boolean): void {
+		this.enableFieldGuide = enabled;
+		if (enabled && !this.baseEnvProbe) {
+			this.baseEnvProbe = probeWorkspaceEnvironment(this.worktrees.repoRoot, this.worktrees.baseSha);
+			this.frozenFieldGuideSnapshot = enforceLineBudget(this.baseEnvProbe, this.fieldGuideMaxLines);
+			writeFieldGuideFile(this.fieldGuidePath, this.frozenFieldGuideSnapshot);
+		}
 	}
 
 	async consolidateFieldGuide(opts: { mode?: "deterministic" | "llm" } = {}): Promise<{ lines: number; bytes: number; path: string }> {
@@ -495,7 +539,11 @@ export class SwarmOS implements SwarmOsApi {
 	defaultToolsFor(role: Role, opts: ToolScope = {}): ToolDefinition[] {
 		const tools: ToolDefinition[] = [];
 		const boardMode = opts.board ?? "read-write";
-		const boardToolOpts = { resolveHandle: (id: string) => this.store.get("agents", id)?.handle };
+		const boardToolOpts = {
+			resolveHandle: (id: string) => this.store.get("agents", id)?.handle,
+			resolveSubtree: (id: string) => opts.subtreeId ?? this.store.get("agents", id)?.subtreeId,
+			defaultVisibility: opts.defaultPostVisibility ?? (role === "worker" ? ("subtree" as const) : ("global" as const)),
+		};
 		if (boardMode === "read-write") {
 			tools.push(...boardTools(this.board, boardToolOpts));
 		} else if (boardMode === "read") {
@@ -677,8 +725,9 @@ export class SwarmOS implements SwarmOsApi {
 			}
 		}
 
-		// Async non-blocking spawn is ONLY exposed when explicitly opted in by the topology plugin.
-		if (opts.canSpawn) {
+		// Strict 2-role recursive spawning invariant: ONLY non-worker roles (Planners/Root) may spawn agents.
+		const allowRecursiveSpawn = role !== "worker" && Boolean(opts.spawnAgents);
+		if (opts.canSpawn && role !== "worker") {
 			tools.push({
 				name: "spawn_task",
 				description: "Queue an asynchronous sub-task for a leaf worker (returns task ID immediately).",
@@ -701,6 +750,278 @@ export class SwarmOS implements SwarmOsApi {
 					return { text: `Queued task ${task.id}: ${task.title}`, data: { taskId: task.id } };
 				},
 			});
+		}
+
+		if (allowRecursiveSpawn) {
+			tools.push(
+				{
+					name: "spawn_agents",
+					description:
+						"Spawn one or more child Planners (recursive search-tree managers with Board write + spawn access) and/or leaf Workers (non-spawning executors in isolated git worktrees) in parallel. Returns agent IDs immediately so you can launch waves concurrently or back-to-back.",
+					inputSchema: {
+						type: "object",
+						properties: {
+							agents: {
+								type: "array",
+								items: {
+									type: "object",
+									properties: {
+										role: { type: "string", enum: ["planner", "worker"] },
+										handle: { type: "string", description: "Optional readable handle (e.g. 'planner-perf', 'worker-wal')" },
+										prompt: { type: "string", description: "Concrete assignment or search-space subtree prompt" },
+										base_ref: { type: "string", description: "Optional git branch/SHA to branch this child's worktree from" },
+										owned_paths: { type: "array", items: { type: "string" }, description: "Optional owned path hints" },
+									},
+									required: ["role", "prompt"],
+								},
+							},
+						},
+						required: ["agents"],
+					},
+					execute: async (args, ctx) => {
+						if (this.workAbort.signal.aborted || this.isInCloseoutReserve()) {
+							return { text: "Cannot spawn new agents during closeout reserve or after abort.", isError: true };
+						}
+						const rawSpecs = Array.isArray(args.agents) ? args.agents : [];
+						if (!rawSpecs.length) {
+							return { text: "agents array must contain at least one agent spec.", isError: true };
+						}
+						const parentRecord = this.store.get("agents", ctx.agentId);
+						const parentDepth = parentRecord?.depth ?? 0;
+						const parentSubtree = parentRecord?.subtreeId ?? parentRecord?.id ?? ctx.agentId;
+						const spawnedMeta: Array<{ agentId: string; role: string; handle: string; subtreeId: string }> = [];
+
+						for (let i = 0; i < rawSpecs.length; i++) {
+							const item = rawSpecs[i] as Record<string, unknown>;
+							const childRole: Role = item.role === "planner" ? "planner" : "worker";
+							const childPrompt = String(item.prompt ?? "").trim();
+							if (!childPrompt) continue;
+							const childHandle = typeof item.handle === "string" && item.handle.trim()
+								? item.handle.trim()
+								: `${childRole}-d${parentDepth + 1}-${i + 1}`;
+							const baseRef = typeof item.base_ref === "string" && item.base_ref.trim() ? item.base_ref.trim() : undefined;
+							const ownedPaths = Array.isArray(item.owned_paths)
+								? item.owned_paths.filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+								: [];
+							const childSubtree = childRole === "planner" ? `${parentSubtree}/${childHandle}` : parentSubtree;
+
+							const childAbort = new AbortController();
+							let liveHandle: WorkerHandle | undefined;
+							const childIdPlaceholder = newId("agt");
+							let resolvedAgentId = childIdPlaceholder;
+
+							const childPromise = (async () => {
+								const child = await this.spawnWorker({
+									role: childRole,
+									handle: childHandle,
+									parentAgentId: ctx.agentId,
+									subtreeId: childSubtree,
+									depth: parentDepth + 1,
+									baseRef,
+									canSpawn: childRole === "planner",
+									passiveSnapshotOnExit: true,
+									cacheKeyPrefix: `${this.runId}:recursive-${childRole}`,
+									toolScope: {
+										board: "read-write",
+										artifacts: true,
+										findings: true,
+										tasks: false,
+										nominate: false,
+										scheduler: "auto",
+										canSpawn: childRole === "planner",
+										spawnAgents: childRole === "planner",
+										passiveSnapshotOnExit: true,
+										subtreeId: childSubtree,
+										defaultPostVisibility: childRole === "planner" ? "global" : "subtree",
+									},
+									systemPrompt:
+										childRole === "planner"
+											? [
+												"You are a recursive Planner managing a search subtree in an isolated git worktree.",
+												"You may solve directly, spawn parallel or sequential child Planners/Workers via `spawn_agents` + `await_agents`, and publish discoveries/hypotheses/dead-ends to Board v2 (`board_publish`) so sibling Planners learn from your branch.",
+											].join("\n")
+											: [
+												"You are a focused leaf Worker in an isolated git worktree (cannot spawn sub-agents).",
+												"Implement and verify your assigned task cleanly, and publish key discoveries, counterexamples, or dead-ends via `board_publish(kind=...)`.",
+											].join("\n"),
+								});
+								liveHandle = child;
+								resolvedAgentId = child.agent.id;
+								const entry = this.spawnedChildren.get(childIdPlaceholder);
+								if (entry && resolvedAgentId !== childIdPlaceholder) {
+									entry.agentId = resolvedAgentId;
+									this.spawnedChildren.set(resolvedAgentId, entry);
+									this.spawnedChildren.delete(childIdPlaceholder);
+								}
+								try {
+									const pulse = this.board.digest(this.runId, { subtreeId: childSubtree });
+									const pathHint = ownedPaths.length ? `\nOwned paths: ${ownedPaths.join(", ")}` : "";
+									const fullPrompt = `${pulse}\n\n${childPrompt}${pathHint}`;
+									const combined = AbortSignal.any([this.workAbort.signal, childAbort.signal]);
+									const turnRes = await child.runTurn(fullPrompt, { signal: combined });
+									const wipSha = turnRes.workspaceSnapshot?.wipSha ?? this.worktrees.commitWip(child.workspace, `${child.agent.handle}: child work`);
+									const headSha = turnRes.workspaceSnapshot?.headSha ?? this.worktrees.headSha(child.workspace);
+									const bestChildFinding = this.store
+										.list("findings", { runId: this.runId })
+										.filter((f) => f.authorAgentId === child.agent.id)
+										.sort((a, b) => (b.score ?? -Infinity) - (a.score ?? -Infinity))[0];
+									return {
+										agentId: child.agent.id,
+										handle: child.agent.handle,
+										role: childRole,
+										status: turnRes.status,
+										branch: child.branch,
+										commitSha: wipSha ?? headSha,
+										score: bestChildFinding?.score,
+										summary: turnRes.finalText.slice(0, 800) || `Child ${child.agent.handle} finished (${turnRes.status}).`,
+									};
+								} catch (err) {
+									return {
+										agentId: resolvedAgentId,
+										handle: childHandle,
+										role: childRole,
+										status: "failed",
+										branch: child.branch,
+										summary: err instanceof Error ? err.message : String(err),
+									};
+								} finally {
+									await child.close().catch(() => {});
+								}
+							})();
+
+							this.spawnedChildren.set(childIdPlaceholder, {
+								agentId: childIdPlaceholder,
+								parentAgentId: ctx.agentId,
+								role: childRole,
+								handle: childHandle,
+								subtreeId: childSubtree,
+								promise: childPromise,
+								cancel: () => {
+									childAbort.abort(new Error(`Cancelled by parent ${ctx.agentId}`));
+									void liveHandle?.interrupt?.().catch(() => {});
+								},
+								steer: async (msg: string) => {
+									await liveHandle?.steer?.(msg);
+								},
+							});
+							spawnedMeta.push({ agentId: childIdPlaceholder, role: childRole, handle: childHandle, subtreeId: childSubtree });
+						}
+
+						return {
+							text: `Spawned ${spawnedMeta.length} child agent(s): ${spawnedMeta.map((m) => `${m.handle}[${m.role}]=${m.agentId}`).join(", ")}. Call await_agents to collect results.`,
+							data: { spawned: spawnedMeta },
+						};
+					},
+				},
+				{
+					name: "await_agents",
+					description: "Wait for spawned child Planners/Workers to finish (mode='all' or 'any') and run Board triage so high-signal child discoveries are promoted.",
+					inputSchema: {
+						type: "object",
+						properties: {
+							agent_ids: { type: "array", items: { type: "string" }, description: "Specific child IDs to await (omit to await all your children)" },
+							mode: { type: "string", enum: ["all", "any"], description: "Wait for all or first completed (default 'all')" },
+							timeout_seconds: { type: "number", minimum: 1, maximum: 600 },
+						},
+					},
+					execute: async (args, ctx) => {
+						const requestedIds = Array.isArray(args.agent_ids)
+							? args.agent_ids.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+							: [];
+						const targets = requestedIds.length
+							? requestedIds
+								.map((id) => this.spawnedChildren.get(id) ?? [...this.spawnedChildren.values()].find((c) => c.agentId === id))
+								.filter((c): c is NonNullable<typeof c> => Boolean(c))
+							: [...this.spawnedChildren.values()].filter((c) => c.parentAgentId === ctx.agentId);
+
+						if (!targets.length) {
+							return { text: "No active spawned children found to await." };
+						}
+						const mode = args.mode === "any" ? "any" : "all";
+						const timeoutMs = typeof args.timeout_seconds === "number" && Number.isFinite(args.timeout_seconds)
+							? Math.max(1_000, Math.floor(args.timeout_seconds * 1_000))
+							: undefined;
+
+						const raceWithTimeout = async <T>(p: Promise<T>): Promise<T | "TIMED_OUT"> => {
+							if (!timeoutMs) return p;
+							return Promise.race([
+								p,
+								new Promise<"TIMED_OUT">((r) => {
+									const t = setTimeout(() => r("TIMED_OUT"), timeoutMs);
+									t.unref?.();
+								}),
+							]);
+						};
+
+						// Temporarily park parent Planner's concurrency permit while awaiting children so
+						// nested recursive Planners can NEVER deadlock even on a 1-slot driver pool!
+						const parentActive = this.activeHandles.get(ctx.agentId);
+						parentActive?.handle.selection.park?.();
+						let settled: Array<{
+							agentId: string;
+							handle: string;
+							role: Role;
+							status: string;
+							branch?: string;
+							commitSha?: string;
+							score?: number;
+							summary: string;
+						}> | "TIMED_OUT";
+						try {
+							settled = mode === "any"
+								? await raceWithTimeout(Promise.race(targets.map((t) => t.promise)).then((r) => [r]))
+								: await raceWithTimeout(Promise.all(targets.map((t) => t.promise)));
+						} finally {
+							parentActive?.handle.selection.unpark?.();
+						}
+
+						if (settled === "TIMED_OUT") {
+							return { text: `await_agents timed out after ${args.timeout_seconds}s while ${targets.length} child(ren) remain running.` };
+						}
+
+						// Run Decision-Model Board triage on newly produced subtree claims before returning to parent Planner.
+						await this.triage.triagePosts({
+							goal: this.currentRun.goal.text,
+							signal: this.closeoutAbort.signal,
+						}).catch(() => {});
+
+						const lines = settled.map(
+							(r) =>
+								`- ${r.handle} (${r.role}, id=${r.agentId}, status=${r.status}${r.branch ? `, branch=${r.branch}` : ""}${r.score !== undefined ? `, score=${r.score.toFixed(4)}` : ""}): ${r.summary.slice(0, 320)}`,
+						);
+						return {
+							text: `Collected ${settled.length} child result(s):\n${lines.join("\n")}`,
+							data: { results: settled },
+						};
+					},
+				},
+				{
+					name: "steer_or_cancel_agent",
+					description: "Redirect (steer) or cancel a live spawned child agent when a sibling discovers a better direction or dead-end.",
+					inputSchema: {
+						type: "object",
+						properties: {
+							agent_id: { type: "string" },
+							action: { type: "string", enum: ["steer", "cancel"] },
+							message: { type: "string", description: "Steering guidance when action='steer'" },
+						},
+						required: ["agent_id", "action"],
+					},
+					execute: async (args) => {
+						const id = String(args.agent_id ?? "").trim();
+						const target = this.spawnedChildren.get(id) ?? [...this.spawnedChildren.values()].find((c) => c.agentId === id);
+						if (!target) return { text: `Spawned child not found: ${id}`, isError: true };
+						if (args.action === "cancel") {
+							target.cancel();
+							return { text: `Cancelled child ${target.handle} (${target.agentId}).` };
+						}
+						const msg = String(args.message ?? "").trim();
+						if (!msg) return { text: "message is required for action='steer'", isError: true };
+						await target.steer(msg);
+						return { text: `Steered child ${target.handle} (${target.agentId}).` };
+					},
+				},
+			);
 		}
 
 		if (opts.skills !== false && this.skills.renderOnDemandCatalog(role, opts.excludeSkills).length > 0) {
@@ -837,12 +1158,20 @@ export class SwarmOS implements SwarmOsApi {
 			...(assignedTask?.ownedPaths?.length ? [`Stay within owned paths: ${assignedTask.ownedPaths.join(", ")}`] : []),
 		];
 
+		const effectiveSubtreeId = req.subtreeId ?? req.toolScope?.subtreeId ?? (req.parentAgentId ? this.store.get("agents", req.parentAgentId)?.subtreeId : undefined) ?? agentId;
+		const effectiveDepth = req.depth ?? (req.parentAgentId ? (this.store.get("agents", req.parentAgentId)?.depth ?? 0) + 1 : 0);
+		const passiveSnapshotOnExit = req.passiveSnapshotOnExit ?? req.toolScope?.passiveSnapshotOnExit ?? false;
 		const buildTools = (driverKind: string, driverId: string) => {
 			const modelHint = req.model ?? this.router.getDriverConfig?.(driverId)?.model;
+			// Enforce strict 2-role invariant: leaf workers NEVER gain spawn permissions.
+			const canSpawnEffective = req.role === "worker" ? false : (req.canSpawn ?? req.toolScope?.canSpawn ?? false);
+			const spawnAgentsEffective = req.role === "worker" ? false : (req.toolScope?.spawnAgents ?? false);
 			return req.tools ??
 				this.defaultToolsFor(req.role, {
 					...(req.toolScope ?? {}),
-					canSpawn: req.canSpawn ?? req.toolScope?.canSpawn ?? false,
+					canSpawn: canSpawnEffective,
+					spawnAgents: spawnAgentsEffective,
+					subtreeId: effectiveSubtreeId,
 					readOnly: req.readOnly ?? req.toolScope?.readOnly ?? false,
 					excludeSkills: req.skills,
 					deniedReadPaths: effectiveDeniedReadPaths,
@@ -908,6 +1237,8 @@ export class SwarmOS implements SwarmOsApi {
 			driverId: selection.driver.id,
 			model: req.model,
 			parentAgentId: req.parentAgentId,
+			subtreeId: effectiveSubtreeId,
+			depth: effectiveDepth,
 			taskId: req.taskId,
 			workspace,
 			branch,
@@ -1529,6 +1860,38 @@ export class SwarmOS implements SwarmOsApi {
 			interrupt: () => (handleState.kind === "closed" || handleState.kind === "broken" ? Promise.resolve() : (session.interrupt?.() ?? Promise.resolve())),
 			close: async () => {
 				if (handleState.kind === "closed") return;
+				// Passive deliverable capture: automatically snapshot & verify committed worker edits
+				// even when the worker never called `report_finding` manually.
+				if (passiveSnapshotOnExit && !req.readOnly && !this.closeoutAbort.signal.aborted) {
+					try {
+						const wipSha = this.worktrees.commitWip(workspace, `${agent.handle}: passive snapshot`);
+						const headAfter = this.worktrees.headSha(workspace);
+						const hasEdits = Boolean(wipSha) || Boolean(headAfter && initialBaseHeadSha && headAfter !== initialBaseHeadSha);
+						if (hasEdits) {
+							const treeSha = this.worktrees.treeSha?.(workspace) ?? this.worktrees.diffSha(workspace);
+							const alreadySubmitted = this.store
+								.list("findings", { runId: this.runId })
+								.some((f) => f.authorAgentId === agentId && f.submissions.some((s) => s.treeSha === treeSha));
+							if (!alreadySubmitted) {
+								const diff = this.worktrees.diffStat(workspace, initialBaseHeadSha);
+								await this.trust.submitFinding(
+									{
+										agentId,
+										driverId: selection.driver.id,
+										taskId: req.taskId,
+										workspace,
+										claim: `${agent.handle} passive workspace deliverable`,
+										summary: `Auto-captured worktree changes on exit.\nDiff:\n${diff.slice(0, 1200)}`,
+										level: "empirical",
+									},
+									this.closeoutAbort.signal,
+								);
+							}
+						}
+					} catch {
+						// Best-effort passive capture; never block worker teardown.
+					}
+				}
 				const finalStatus: TerminalAgentStatus =
 					handleState.kind === "broken"
 						? "failed"

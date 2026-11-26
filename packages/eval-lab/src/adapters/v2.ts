@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
+	type DecisionModelClient,
 	type DriverConfig,
 	type FindingVerifier,
 	type QuotaPoolRouter,
@@ -25,6 +26,8 @@ export interface V2AdapterOptions {
 	enableBlindReview?: boolean;
 	enableFieldGuide?: boolean;
 	reservePct?: number;
+	/** Optional System-1 calibrated Decision Model client (e.g., TypeSafe Jev). */
+	decisionClient?: DecisionModelClient;
 	/** Optional overrides passed to `createTopology(name, options)`. */
 	topologyOptions?: Record<string, unknown>;
 }
@@ -114,6 +117,7 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 					verifier: bridgePublicVerifier(options.task, spec),
 					enableBlindReview: options.enableBlindReview ?? false,
 					enableFieldGuide: options.enableFieldGuide ?? true,
+					decisionClient: options.decisionClient,
 					networkOffWorkers: true,
 					rawConfig: {
 						evalLab: {
@@ -296,7 +300,10 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
  * (`codex`, `codex-exec`, `gemini`/`agy`, `grok`, with optional `:model` suffix like `codex:gpt-6.2-sol`)
  * for live CLI benchmark runs.
  */
-export function createCliV2Router(driverSpecs: readonly string[]): DriverQuotaRouter {
+export function createCliV2Router(
+	driverSpecs: readonly string[],
+	opts: { concurrencyMode?: "physics" | "fixed" } = {},
+): DriverQuotaRouter {
 	const configs: DriverConfig[] = driverSpecs.map((raw) => {
 		const trimmed = raw.trim();
 		const colonIdx = trimmed.indexOf(":");
@@ -330,5 +337,6 @@ export function createCliV2Router(driverSpecs: readonly string[]): DriverQuotaRo
 	return new DriverQuotaRouter({
 		drivers: entries,
 		roles: { default: ids, worker: ids, planner: ids, reviewer: ids, refinery: ids },
+		concurrencyMode: opts.concurrencyMode ?? "fixed",
 	});
 }

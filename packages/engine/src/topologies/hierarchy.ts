@@ -3,6 +3,8 @@ import type { JsonSchema, SwarmOsApi, TopologyOutcome, TopologyPlugin } from "@o
 export interface HierarchyTopologyOptions {
 	maxWorkers?: number;
 	maxWorkerTurns?: number;
+	/** Allow the Planner to recursively spawn additional Planners/Workers dynamically (default false for classic 1-level hierarchy). */
+	recursive?: boolean;
 }
 
 const PLAN_SCHEMA: JsonSchema = {
@@ -66,21 +68,23 @@ export function hierarchyTopology(opts: HierarchyTopologyOptions = {}): Topology
 			os.bus.emit(os.runId, "phase.changed", { to: "plan", reason: "Decomposing goal into bounded subtasks" });
 			const planner = await os.spawnWorker({
 				role: "planner",
-				readOnly: true,
-				canSpawn: false,
-				requireOutputSchema: true,
+				readOnly: !opts.recursive,
+				canSpawn: Boolean(opts.recursive),
+				requireOutputSchema: !opts.recursive,
 				cacheKeyPrefix: `${os.runId}:hierarchy-planner`,
 				toolScope: {
-					board: "read",
+					board: "read-write",
 					artifacts: true,
 					findings: false,
 					tasks: false,
 					nominate: false,
-					scheduler: "never",
+					scheduler: "auto",
 					skills: false,
+					canSpawn: Boolean(opts.recursive),
+					spawnAgents: Boolean(opts.recursive),
 				},
 				systemPrompt: [
-					"You are a concise engineering lead. Decompose the goal into disjoint, testable subtasks.",
+					"You are a concise engineering lead. Decompose the goal into disjoint, testable subtasks and share cross-cutting insights on Board v2 via `board_publish`.",
 					'Respond ONLY with JSON: {"subtasks":[{"title":"...","description":"..."}]}',
 				].join("\n"),
 			});

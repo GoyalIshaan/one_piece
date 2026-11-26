@@ -93,6 +93,10 @@ interface AgentFields {
 	model?: string;
 	sessionId?: string;
 	parentAgentId?: string;
+	/** Subtree root identifier used to scope Board v2 epistemic digests cleanly at high parallelism. */
+	subtreeId?: string;
+	/** Recursive depth in the Planner/Worker search forest (0 = root). */
+	depth?: number;
 	taskId?: string;
 	workspace?: string;
 	branch?: string;
@@ -144,6 +148,9 @@ export type TaskPhase = Exclusive<
 export type TaskRecord = TaskFields & TaskPhase;
 export type ClaimedTaskRecord = Extract<TaskRecord, { status: "claimed" }>;
 
+export type BoardPostKind = "discovery" | "hypothesis" | "counterexample" | "dead_end" | "bound_estimate" | "update";
+export type BoardVisibility = "subtree" | "global";
+
 export interface BoardReference {
 	postId: string;
 	reason: string;
@@ -154,6 +161,12 @@ export interface BoardPost {
 	runId: string;
 	board?: string;
 	topic: string;
+	/** Typed epistemic claim classification on the shared knowledge DAG. */
+	kind?: BoardPostKind;
+	/** Subtree root identifier of the author (enables low-noise local digests). */
+	subtreeId?: string;
+	/** Two-tier visibility: subtree-local by default for workers, promoted to global by Decision Model triage. */
+	visibility?: BoardVisibility;
 	authorAgentId: string;
 	authorHandle?: string;
 	summary: string;

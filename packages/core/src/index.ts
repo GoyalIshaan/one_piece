@@ -1,4 +1,5 @@
 export * from "./artifacts.ts";
+export * from "./decision.ts";
 export * from "./driver.ts";
 export * from "./events.ts";
 export * from "./ids.ts";

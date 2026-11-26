@@ -77,6 +77,12 @@ export interface LifecycleEvents {
 	"quota.retry": { driverId: string; attempt: number; waitMs: number; reason: string };
 	"quota.cooldown": { driverId: string; until: number; reason: string };
 	"quota.drained": { driverId: string; reason: string };
+	"governor.scaled": { driverId: string; prevWindow: number; nextWindow: number; reason: string; freeMemMb: number; cpuLoadRatio: number };
+	"decision.evaluated": { purpose: string; provider: string; model: string; questionCount: number; inputTokens: number; latencyMs: number };
+	"board.promoted": { postId: string; novelty?: number; broadcastProb?: number; crossoverProb?: number; reason: string };
+	"bound.estimated": { metricName: string; estimatedCeiling: number | null; stoppingFraction: number; confidence: number; assumptions: string[] };
+	"adaptive.morphed": { from: string; to: string; reason: string; confidence?: number };
+	"researcher.checkpoint": { policy: "coalesce" | "interactive"; trigger: string; bestScore?: number; estimatedCeiling?: number | null; action: string };
 	"phase.changed": { from?: string; to: string; reason: string };
 	"budget.charged": {
 		agentId?: string;

@@ -2,6 +2,7 @@ import {
 	applyBoardPostLabels,
 	type BoardLabelInput,
 	type BoardPost,
+	type BoardPostKind,
 	type BoardPostLabelResult,
 	type BoardPublishInput,
 	type BoardQueryOptions,
@@ -10,6 +11,7 @@ import {
 	type BoardService,
 	type BoardThreadView,
 	type BoardTopicSummary,
+	type BoardVisibility,
 	type BoardWaitOptions,
 	type BoardWaitResult,
 	type EventBus,
@@ -239,12 +241,18 @@ export class SwarmBoardService implements BoardService {
 		const seq = this.nextSeq(input.runId);
 		const authorAgent = this.bus.store.get("agents", input.authorAgentId);
 		const authorHandle = input.authorHandle?.trim() || authorAgent?.handle || undefined;
+		const resolvedSubtreeId = input.subtreeId?.trim() || authorAgent?.subtreeId || undefined;
+		const resolvedVisibility: BoardVisibility =
+			input.visibility ?? (authorAgent?.role === "worker" && resolvedSubtreeId ? "subtree" : "global");
 
 		const post: BoardPost = {
 			id: newId("post"),
 			runId: input.runId,
 			board: boardName,
 			topic,
+			kind: input.kind,
+			subtreeId: resolvedSubtreeId,
+			visibility: resolvedVisibility,
 			authorAgentId: input.authorAgentId,
 			authorHandle,
 			summary: input.summary.trim().slice(0, 400),
@@ -304,6 +312,9 @@ export class SwarmBoardService implements BoardService {
 			if (!opts.includeSuperseded && p.supersededBy) return false;
 			if (opts.afterSeq !== undefined && postSeq(p) <= opts.afterSeq) return false;
 			if (topicFilter && p.topic.toLowerCase() !== topicFilter) return false;
+			if (opts.kind && p.kind !== opts.kind) return false;
+			if (opts.visibility && (p.visibility ?? "global") !== opts.visibility) return false;
+			if (opts.subtreeId && (p.visibility ?? "global") === "subtree" && p.subtreeId !== opts.subtreeId) return false;
 			if (opts.threadId && p.id !== opts.threadId && p.threadId !== opts.threadId) return false;
 			if (!matchesLabelFilters(p, labelFilters)) return false;
 			return true;
@@ -397,13 +408,53 @@ export class SwarmBoardService implements BoardService {
 		return res;
 	}
 
-	digest(runId: string, board?: string): string {
+	promote(postId: string, input: { actorId: string; labels?: Record<string, string>; reason?: string }): BoardPost | undefined {
+		const existing = this.bus.store.get("posts", postId);
+		if (!existing) return undefined;
+		const nextLabels: Record<string, string> = {
+			...(existing.labels ?? {}),
+			...(input.labels ?? {}),
+			"os:promoted": "true",
+		};
+		const updated: BoardPost = {
+			...existing,
+			visibility: "global",
+			labels: nextLabels,
+		};
+		this.bus.save("posts", updated, input.actorId);
+		const novelty = nextLabels["os:novelty"] !== undefined ? Number(nextLabels["os:novelty"]) : undefined;
+		const broadcastProb = nextLabels["os:broadcast_prob"] !== undefined ? Number(nextLabels["os:broadcast_prob"]) : undefined;
+		const crossoverProb = nextLabels["os:crossover_prob"] !== undefined ? Number(nextLabels["os:crossover_prob"]) : undefined;
+		this.bus.emit(
+			updated.runId,
+			"board.promoted",
+			{
+				postId: updated.id,
+				...(Number.isFinite(novelty) ? { novelty } : {}),
+				...(Number.isFinite(broadcastProb) ? { broadcastProb } : {}),
+				...(Number.isFinite(crossoverProb) ? { crossoverProb } : {}),
+				reason: input.reason ?? "Promoted to global board visibility",
+			},
+			input.actorId,
+		);
+		return updated;
+	}
+
+	digest(runId: string, boardOrOpts?: string | { board?: string; subtreeId?: string }): string {
+		const board = typeof boardOrOpts === "string" ? boardOrOpts : boardOrOpts?.board;
+		const subtreeId = typeof boardOrOpts === "string" ? undefined : boardOrOpts?.subtreeId;
 		const allPosts = this.allRunPosts(runId, board);
-		const active = allPosts.filter((p) => !p.supersededBy);
+		const visible = allPosts.filter((p) => {
+			if (p.supersededBy) return false;
+			if (!subtreeId) return true;
+			return (p.visibility ?? "global") === "global" || p.subtreeId === subtreeId;
+		});
 		const cursor = this.currentCursor(allPosts);
-		if (!active.length) return `Board pulse: 0 posts (cursor=0)`;
-		const topics = this.computeTopics(allPosts);
-		return `Board pulse: ${active.length} post${active.length === 1 ? "" : "s"} [${formatTopics(topics)}] (cursor=${cursor})`;
+		if (!visible.length) return `Board pulse: 0 posts (cursor=${cursor})`;
+		const topics = this.computeTopics(visible);
+		const promotedCount = visible.filter((p) => p.labels?.["os:promoted"] === "true").length;
+		const promotedTag = promotedCount > 0 ? `, promoted=${promotedCount}` : "";
+		return `Board pulse: ${visible.length} post${visible.length === 1 ? "" : "s"} [${formatTopics(topics)}]${promotedTag} (cursor=${cursor})`;
 	}
 
 	async wait(runId: string, opts: BoardWaitOptions = {}): Promise<BoardWaitResult> {
@@ -418,6 +469,8 @@ export class SwarmBoardService implements BoardService {
 				if (p.supersededBy) return false;
 				if (opts.afterSeq !== undefined && postSeq(p) <= opts.afterSeq) return false;
 				if (topicFilter && p.topic.toLowerCase() !== topicFilter) return false;
+				if (opts.kind && p.kind !== opts.kind) return false;
+				if (opts.visibility && (p.visibility ?? "global") !== opts.visibility) return false;
 				if (opts.threadId && p.id !== opts.threadId && p.threadId !== opts.threadId) return false;
 				if (!matchesLabelFilters(p, labelFilters)) return false;
 				return true;
@@ -509,10 +562,18 @@ export class SwarmBoardService implements BoardService {
 export interface BoardToolsOptions {
 	/** Resolve an OS-assigned readable handle for an agentId (e.g. "peer-1"). */
 	resolveHandle?: (agentId: string) => string | undefined;
+	/** Resolve the subtree root ID for an agentId (enables subtree-scoped digests). */
+	resolveSubtree?: (agentId: string) => string | undefined;
+	/** Default visibility stamped onto posts created via `board_publish`. */
+	defaultVisibility?: BoardVisibility;
 }
+
+const VALID_KINDS = new Set<BoardPostKind>(["discovery", "hypothesis", "counterexample", "dead_end", "bound_estimate", "update"]);
 
 function renderPostEntry(post: BoardPost, query: string, citations: number, bodyLimit = 480): string {
 	const who = post.authorHandle ?? post.authorAgentId;
+	const kindStr = post.kind ? `, kind=${post.kind}` : "";
+	const visStr = post.visibility === "subtree" ? `, scope=subtree:${post.subtreeId ?? "local"}` : "";
 	const threadStr = post.threadId ? `, thread=${post.threadId}` : "";
 	const supStr = post.supersededBy ? `, SUPERSEDED_BY=${post.supersededBy}` : "";
 	const excerpt = searchExcerptDetailed(post.body, query, bodyLimit);
@@ -520,7 +581,7 @@ function renderPostEntry(post: BoardPost, query: string, citations: number, body
 		? `\n[truncated: ${excerpt.totalChars} chars — call board_visit("${post.id}") for full body]`
 		: "";
 	const summaryLine = post.summary && post.body !== post.summary ? `Summary: ${post.summary}\n` : "";
-	return `[${post.id}] (${post.topic}, by ${who}, seq=${postSeq(post)}, citations=${citations}${formatLabels(post.labels)}${threadStr}${supStr})\n${summaryLine}${excerpt.text}${truncHint}`;
+	return `[${post.id}] (${post.topic}${kindStr}${visStr}, by ${who}, seq=${postSeq(post)}, citations=${citations}${formatLabels(post.labels)}${threadStr}${supStr})\n${summaryLine}${excerpt.text}${truncHint}`;
 }
 
 /**
@@ -537,6 +598,8 @@ export function boardTools(board: BoardService, opts: BoardToolsOptions = {}): T
 				properties: {
 					query: { type: "string", description: "Optional keywords (omit or empty to list latest posts)" },
 					topic: { type: "string", description: "Optional exact topic filter" },
+					kind: { type: "string", enum: ["discovery", "hypothesis", "counterexample", "dead_end", "bound_estimate", "update"], description: "Optional epistemic claim kind filter" },
+					visibility: { type: "string", enum: ["subtree", "global"], description: "Optional visibility scope filter" },
 					channel: { type: "string", description: "Optional board channel name (default swarm)" },
 					thread_id: { type: "string", description: "Optional thread root post ID to read a thread chronologically" },
 					labels: { type: "array", items: { type: "string" }, description: "Optional label filters like ['state=open', 'seat=0']" },
@@ -549,6 +612,9 @@ export function boardTools(board: BoardService, opts: BoardToolsOptions = {}): T
 			execute(args, ctx) {
 				const query = typeof args.query === "string" ? args.query : "";
 				const topic = typeof args.topic === "string" && args.topic.trim() ? args.topic.trim() : undefined;
+				const kindRaw = typeof args.kind === "string" ? args.kind.trim() : "";
+				const kind = VALID_KINDS.has(kindRaw as BoardPostKind) ? (kindRaw as BoardPostKind) : undefined;
+				const visibility = args.visibility === "subtree" || args.visibility === "global" ? args.visibility : undefined;
 				const channel = typeof args.channel === "string" && args.channel.trim() ? args.channel.trim() : undefined;
 				const threadId = typeof args.thread_id === "string" && args.thread_id.trim() ? args.thread_id.trim() : undefined;
 				const labels = Array.isArray(args.labels)
@@ -582,6 +648,8 @@ export function boardTools(board: BoardService, opts: BoardToolsOptions = {}): T
 				const res = board.query(ctx.runId, {
 					query,
 					topic,
+					kind,
+					visibility,
 					board: channel,
 					threadId,
 					labels,
@@ -619,6 +687,8 @@ export function boardTools(board: BoardService, opts: BoardToolsOptions = {}): T
 				type: "object",
 				properties: {
 					topic: { type: "string", description: "Short topic tag (e.g. 'shard-subtotal', 'interface', 'blocker')" },
+					kind: { type: "string", enum: ["discovery", "hypothesis", "counterexample", "dead_end", "bound_estimate", "update"], description: "Typed epistemic claim kind on the shared knowledge DAG" },
+					visibility: { type: "string", enum: ["subtree", "global"], description: "Optional scope ('subtree' for local branch notes, 'global' for cross-swarm announcements)" },
 					summary: { type: "string", description: "1-2 sentence concise summary" },
 					body: { type: "string", description: "Optional full note body" },
 					channel: { type: "string", description: "Optional board channel name (default swarm)" },
@@ -646,12 +716,19 @@ export function boardTools(board: BoardService, opts: BoardToolsOptions = {}): T
 						if (v !== undefined && v !== null) labels[k] = String(v);
 					}
 				}
+				const kindRaw = typeof args.kind === "string" ? args.kind.trim() : "";
+				const kind = VALID_KINDS.has(kindRaw as BoardPostKind) ? (kindRaw as BoardPostKind) : undefined;
+				const requestedVis = args.visibility === "subtree" || args.visibility === "global" ? args.visibility : undefined;
+				const subtreeId = opts.resolveSubtree?.(ctx.agentId);
 				try {
 					const post = board.publish({
 						runId: ctx.runId,
 						authorAgentId: ctx.agentId,
 						authorHandle: opts.resolveHandle?.(ctx.agentId),
 						topic: String(args.topic ?? "general"),
+						kind,
+						subtreeId,
+						visibility: requestedVis ?? opts.defaultVisibility,
 						summary: String(args.summary ?? ""),
 						body: typeof args.body === "string" ? args.body : undefined,
 						board: typeof args.channel === "string" && args.channel.trim() ? args.channel.trim() : undefined,
@@ -664,7 +741,7 @@ export function boardTools(board: BoardService, opts: BoardToolsOptions = {}): T
 						artifactIds,
 						isOsActor: false,
 					});
-					const pulse = board.digest(ctx.runId, post.board);
+					const pulse = board.digest(ctx.runId, { board: post.board, subtreeId });
 					const threadSuffix = post.threadId ? `, thread=${post.threadId}` : "";
 					return {
 						text: `Published ${post.id} (topic=${post.topic}, seq=${postSeq(post)}${threadSuffix}). ${pulse}`,
@@ -726,6 +803,8 @@ export function boardTools(board: BoardService, opts: BoardToolsOptions = {}): T
 				properties: {
 					after: { type: "number", minimum: 0, description: "Optional cursor: only match posts with seq > after" },
 					topic: { type: "string", description: "Optional exact topic filter" },
+					kind: { type: "string", enum: ["discovery", "hypothesis", "counterexample", "dead_end", "bound_estimate", "update"], description: "Optional epistemic claim kind filter" },
+					visibility: { type: "string", enum: ["subtree", "global"], description: "Optional visibility scope filter" },
 					channel: { type: "string", description: "Optional board channel name (default swarm)" },
 					thread_id: { type: "string", description: "Optional thread root post ID filter" },
 					labels: { type: "array", items: { type: "string" }, description: "Optional label filters like ['state=ready']" },
@@ -736,6 +815,9 @@ export function boardTools(board: BoardService, opts: BoardToolsOptions = {}): T
 			async execute(args, ctx) {
 				const afterSeq = typeof args.after === "number" && Number.isFinite(args.after) ? Math.floor(args.after) : undefined;
 				const topic = typeof args.topic === "string" && args.topic.trim() ? args.topic.trim() : undefined;
+				const kindRaw = typeof args.kind === "string" ? args.kind.trim() : "";
+				const kind = VALID_KINDS.has(kindRaw as BoardPostKind) ? (kindRaw as BoardPostKind) : undefined;
+				const visibility = args.visibility === "subtree" || args.visibility === "global" ? args.visibility : undefined;
 				const channel = typeof args.channel === "string" && args.channel.trim() ? args.channel.trim() : undefined;
 				const threadId = typeof args.thread_id === "string" && args.thread_id.trim() ? args.thread_id.trim() : undefined;
 				const labels = Array.isArray(args.labels)
@@ -752,6 +834,8 @@ export function boardTools(board: BoardService, opts: BoardToolsOptions = {}): T
 					afterSeq,
 					board: channel,
 					topic,
+					kind,
+					visibility,
 					threadId,
 					labels,
 					minPosts,

@@ -1,3 +1,4 @@
+import type { DecisionModelClient } from "./decision.ts";
 import type { DriverPoolSelection, DriverTier, McpConnectionInfo, QuotaPoolRouter, WorkerSession, WorkerTurnResult } from "./driver.ts";
 import type { EventBus } from "./events.ts";
 import type { FindingVerifier, ResourceScheduler, SecretBroker } from "./services.ts";
@@ -6,6 +7,8 @@ import type {
 	AgentRecord,
 	ArtifactRecord,
 	BoardPost,
+	BoardPostKind,
+	BoardVisibility,
 	EvidenceLevel,
 	Exclusive,
 	Finding,
@@ -110,6 +113,9 @@ export interface BoardPublishInput {
 	authorAgentId: string;
 	authorHandle?: string;
 	topic: string;
+	kind?: BoardPostKind;
+	subtreeId?: string;
+	visibility?: BoardVisibility;
 	summary: string;
 	body?: string;
 	board?: string;
@@ -131,6 +137,9 @@ export interface BoardQueryOptions {
 	offset?: number;
 	board?: string;
 	topic?: string;
+	kind?: BoardPostKind;
+	subtreeId?: string;
+	visibility?: BoardVisibility;
 	threadId?: string;
 	labels?: readonly string[];
 	afterSeq?: number;
@@ -176,6 +185,8 @@ export interface BoardWaitOptions {
 	afterSeq?: number;
 	board?: string;
 	topic?: string;
+	kind?: BoardPostKind;
+	visibility?: BoardVisibility;
 	threadId?: string;
 	labels?: readonly string[];
 	minPosts?: number;
@@ -208,7 +219,9 @@ export interface BoardService {
 	visit(postId: string): { post: BoardPost; citedBy: BoardPost[]; replies?: BoardPost[]; newestId?: string; cursor?: number } | undefined;
 	thread(postId: string, opts?: { latest?: number }): BoardThreadView | undefined;
 	label(postId: string, input: BoardLabelInput): BoardPostLabelResult;
-	digest(runId: string, board?: string): string;
+	/** Promote a subtree-local epistemic post to global visibility with OS curation labels. */
+	promote?(postId: string, input: { actorId: string; labels?: Record<string, string>; reason?: string }): BoardPost | undefined;
+	digest(runId: string, boardOrOpts?: string | { board?: string; subtreeId?: string }): string;
 	wait(runId: string, opts?: BoardWaitOptions): Promise<BoardWaitResult>;
 	recent(runId: string, limit?: number): BoardPost[];
 }
@@ -228,6 +241,14 @@ export interface ToolScope {
 	scheduler?: "auto" | "always" | "never";
 	/** Explicitly opt into async recursive spawning (`spawn_task`). */
 	canSpawn?: boolean;
+	/** Expose first-class recursive Planner spawning tools (`spawn_agents`, `await_agents`, `steer_or_cancel_agent`). Strictly denied for `role === "worker"`. */
+	spawnAgents?: boolean;
+	/** Automatically capture & verify a passive snapshot whenever a worker exits with new commits. */
+	passiveSnapshotOnExit?: boolean;
+	/** Subtree ID for scoped board publishing & digests. */
+	subtreeId?: string;
+	/** Default visibility stamped onto agent board posts ("subtree" for workers, "global" for top planners). */
+	defaultPostVisibility?: BoardVisibility;
 	/** Read-only worker flag. */
 	readOnly?: boolean;
 	/** Expose `load_skill` when on-demand skills exist (default true). */
@@ -250,6 +271,12 @@ export interface SpawnWorkerRequest {
 	handle?: string;
 	taskId?: string;
 	parentAgentId?: string;
+	/** Subtree root identifier propagated to children for scoped Board v2 digests. */
+	subtreeId?: string;
+	/** Recursive depth in the Planner/Worker search forest (0 = root). */
+	depth?: number;
+	/** Automatically commit WIP and submit passive verification snapshot on turn exit when edits exist. */
+	passiveSnapshotOnExit?: boolean;
 	preferredDriverId?: string;
 	avoidDrivers?: readonly string[];
 	/** Minimum capability tier for driver selection (e.g. "frontier"). */
@@ -412,6 +439,10 @@ export interface SwarmOsApi {
 	readonly closeoutSignal?: AbortSignal;
 	/** Shared OS-level mechanical merge, conflict resolution, semantic repair, and monotonic ratchet pipeline. */
 	readonly integration?: IntegrationService;
+	/** Optional System-1 calibrated Decision Model client (e.g., TypeSafe Jev) for routing, triage, and stopping gates. */
+	readonly decisionClient?: DecisionModelClient;
+	/** Toggle Wave-1 / subsequent Field Guide prompt injection dynamically (e.g., from Meta-Router). */
+	setFieldGuideEnabled?(enabled: boolean): void;
 	run(): Run;
 	/** Check remaining wall-clock/token/USD fraction (0..1); returns true once reserve threshold is reached. */
 	isInCloseoutReserve(): boolean;

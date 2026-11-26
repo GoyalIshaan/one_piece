@@ -13,6 +13,8 @@ export interface SubstratePeersOptions {
 	seatConfigs?: readonly SubstrateSeatConfig[];
 	/** Automatically run a 1-turn semantic repair integrator if assembled trunk fails verification (default true). */
 	enableSemanticRepair?: boolean;
+	/** Allow peers to act as Planner-capable peers that can dynamically spawn child Planners/Workers (default false for classic flat peers). */
+	allowPeerSpawning?: boolean;
 }
 
 /**
@@ -36,13 +38,17 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 			os.bus.emit(os.runId, "phase.changed", { to: "peer-explore", reason: `Launching ${peerCount} peers over Board v2 substrate` });
 
 			const isSharded = Boolean(opts.seatConfigs && opts.seatConfigs.length > 0);
+			const peerSpawning = Boolean(opts.allowPeerSpawning && !isSharded);
 			const handles = await Promise.all(
 				Array.from({ length: peerCount }, (_, idx) => {
 					const seatCfg = opts.seatConfigs?.[idx];
+					const peerHandle = seatCfg?.handle ?? `peer-${idx + 1}`;
 					return os.spawnWorker({
-						role: "worker",
-						handle: seatCfg?.handle ?? `peer-${idx + 1}`,
-						canSpawn: false,
+						role: peerSpawning ? "planner" : "worker",
+						handle: peerHandle,
+						subtreeId: peerHandle,
+						depth: 0,
+						canSpawn: peerSpawning,
 						deniedReadPaths: seatCfg?.deniedReadPaths,
 						cacheKeyPrefix: `${os.runId}:substrate-peer`,
 						toolScope: {
@@ -54,6 +60,10 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 							tasks: false,
 							nominate: false,
 							scheduler: "auto",
+							canSpawn: peerSpawning,
+							spawnAgents: peerSpawning,
+							subtreeId: peerHandle,
+							defaultPostVisibility: "global",
 						},
 						systemPrompt: [
 							"You are a peer engineer in a flat ScaleMAS substrate swarm working in an isolated git worktree.",
