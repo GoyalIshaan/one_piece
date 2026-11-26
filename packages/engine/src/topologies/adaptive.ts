@@ -318,7 +318,7 @@ export function adaptiveTopology(opts: AdaptiveTopologyOptions = {}): TopologyPl
 	return {
 		name: "adaptive",
 		description: "Zero-token pre-flight structural regime classifier routing sharded/staged/broad workloads to elastic-phase and compact scalar-opt/coupled repos to evolution.",
-		async run(os: SwarmOsApi, { goal, rubric, signal }): Promise<TopologyOutcome> {
+		async run(os: SwarmOsApi, { goal, rubric, signal, closeoutSignal }): Promise<TopologyOutcome> {
 			const hasSeatConfigs = Boolean(opts.seatConfigs && opts.seatConfigs.length > 0);
 			const cls = classifyAdaptiveRegime({
 				workspaceDir: os.worktrees.trunkPath,
@@ -337,7 +337,7 @@ export function adaptiveTopology(opts: AdaptiveTopologyOptions = {}): TopologyPl
 					populationPerGen: opts.populationPerGen ?? opts.peers ?? opts.maxWorkers ?? 4,
 					generations: opts.generations ?? 2,
 				};
-				const out = await evolutionTopology(evoOpts).run(os, { goal, rubric, signal });
+				const out = await evolutionTopology(evoOpts).run(os, { goal, rubric, signal, closeoutSignal });
 				return {
 					...out,
 					summary: `Adaptive[${cls.regime} -> evolution]: ${out.summary}`,
@@ -351,7 +351,7 @@ export function adaptiveTopology(opts: AdaptiveTopologyOptions = {}): TopologyPl
 				enableDreaming: opts.enableDreaming,
 				enableSemanticRepair: opts.enableSemanticRepair,
 			};
-			const out = await elasticPhaseTopology(elasticOpts).run(os, { goal, rubric, signal });
+			const out = await elasticPhaseTopology(elasticOpts).run(os, { goal, rubric, signal, closeoutSignal });
 			return {
 				...out,
 				summary: `Adaptive[${cls.regime} -> elastic-phase]: ${out.summary}`,

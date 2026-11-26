@@ -1,8 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
-	allowSandboxReads,
-	denySandboxReads,
 	type DriverConfig,
 	type FindingVerifier,
 	type QuotaPoolRouter,
@@ -85,7 +83,6 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 			const began = Date.now();
 			const topologyName = resolveV2TopologyName(spec);
 			const denyPaths = [...spec.hiddenDenyPaths];
-			denySandboxReads(denyPaths);
 
 			let cumulativeTokens = 0;
 			const snapshotMeta = new Map<string, { atTokens: number; atWallMs: number }>();
@@ -98,6 +95,7 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 					runDir: spec.runDir,
 					workspace: spec.workspaceDir,
 					topology: topologyName,
+					deniedReadPaths: denyPaths,
 					goal: {
 						title: `${spec.taskId} (seed ${spec.seed})`,
 						text: spec.injectedPrompt ? `${spec.goal}\n\n${spec.injectedPrompt}` : spec.goal,
@@ -149,10 +147,13 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 				});
 
 				const n = Math.max(1, spec.swarmSize);
-				const totalSeats = spec.totalSeats ?? spec.privateShards?.length ?? n;
-				const shards = spec.privateShards ?? [];
+				const firstClassSeats = spec.seats;
+				const shards = firstClassSeats?.length ? firstClassSeats.map((s) => s.privateDir) : (spec.privateShards ?? []);
+				const totalSeats = spec.totalSeats ?? firstClassSeats?.length ?? shards.length ?? n;
 
 				const buildSeatPrompt = (seatIdx: number, shardDir: string, multiPeer: boolean): string => {
+					const seat = firstClassSeats?.[seatIdx];
+					if (seat) return multiPeer ? seat.prompt : seat.soloPrompt;
 					if (multiPeer && spec.seatPrompts?.[seatIdx]) return spec.seatPrompts[seatIdx]!;
 					if (!multiPeer) {
 						const soloPrompt =
@@ -184,7 +185,7 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 							const myShard = shards[idx];
 							const siblingDenies = shards.filter((_, j) => j !== idx);
 							return {
-								handle: `seat-${idx}`,
+								handle: firstClassSeats?.[idx]?.handle ?? `seat-${idx}`,
 								deniedReadPaths: [...denyPaths, ...siblingDenies],
 								seatPrompt: myShard ? buildSeatPrompt(idx, myShard, true) : undefined,
 							};
@@ -197,7 +198,7 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 				const singleExtra =
 					topologyName === "single"
 						? {
-							handle: shards.length > 0 ? `seat-${singleSeatIdx}` : "solo",
+							handle: firstClassSeats?.[singleSeatIdx]?.handle ?? (shards.length > 0 ? `seat-${singleSeatIdx}` : "solo"),
 							deniedReadPaths: singleDeniedReads,
 							seatPrompt: singleShard ? buildSeatPrompt(singleSeatIdx, singleShard, false) : undefined,
 						}
@@ -283,7 +284,6 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 					modelIds: usedModels,
 				};
 			} finally {
-				allowSandboxReads(denyPaths);
 				if (os) await os.dispose();
 				store.close();
 			}

@@ -12,7 +12,9 @@ import {
 	GeminiCliDriver,
 	GrokAcpDriver,
 	GrokCliDriver,
+	killProcessTree,
 	maybeCompactSession,
+	normalizeStrictJsonSchema,
 	prepareCleanCodexHome,
 	prepareCleanGrokHome,
 } from "../src/index.ts";
@@ -525,9 +527,94 @@ describe("drivers & 3-class quota classification", () => {
 			expect(res.usage?.inputTokens).toBe(12000);
 			expect(res.usage?.outputTokens).toBe(850);
 			expect(res.usage?.cachedTokens).toBe(4000);
+			expect(res.usage?.cacheReadReported).toBe(true);
+			expect(res.usage?.reasoningReported).toBe(true);
 			await sess.close();
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
+	});
+
+	it("wakes queued pool waiters on whichever eligible driver frees first, enforces strictCapabilities, and prefers in-process drivers for control-plane roles", async () => {
+		const mk = (id: string, kind: "codex-exec" | "pi-in-process", supportsOutputSchema: boolean) => ({
+			id,
+			kind,
+			capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema, supportsMcpHttp: false },
+			healthCheck: async () => ({ ok: true, driverId: id, kind }),
+			spawn: async () => ({ driverId: id, runTurn: async () => ({ status: "completed" as const, finalText: "" }), close: async () => {} }),
+		});
+
+		// 1. Unified pool condition-queue: 2 drivers with maxConcurrent=1; occupy both, enqueue waiter, release driver B -> waiter wakes on B immediately!
+		const router = new DriverQuotaRouter({
+			drivers: [
+				{ driver: mk("drv-a", "codex-exec", true), config: { id: "drv-a", kind: "codex-exec", maxConcurrent: 1 } },
+				{ driver: mk("drv-b", "codex-exec", true), config: { id: "drv-b", kind: "codex-exec", maxConcurrent: 1 } },
+			],
+			roles: { default: ["drv-a", "drv-b"] },
+		});
+		const s1 = await router.acquireForRole("worker");
+		const s2 = await router.acquireForRole("worker");
+		expect(new Set([s1.driver.id, s2.driver.id]).size).toBe(2);
+
+		const pending3 = router.acquireForRole("worker");
+		// Release s2 (whichever driver it is) -> pending3 MUST immediately get s2's freed driver without waiting on s1!
+		const freedId = s2.driver.id;
+		s2.release();
+		const s3 = await pending3;
+		expect(s3.driver.id).toBe(freedId);
+		s1.release();
+		s3.release();
+
+		// 2. strictCapabilities throws when no driver supports outputSchema
+		const noSchemaRouter = new DriverQuotaRouter({
+			drivers: [{ driver: mk("plain", "codex-exec", false), config: { id: "plain", kind: "codex-exec", maxConcurrent: 1 } }],
+			roles: { default: ["plain"] },
+		});
+		await expect(
+			noSchemaRouter.acquireForRole("planner", { requireOutputSchema: true, strictCapabilities: true }),
+		).rejects.toThrow(/supports required outputSchema/);
+
+		// 3. preferInProcess routes planner/reviewer to pi-in-process when registered in role pool
+		const mixedRouter = new DriverQuotaRouter({
+			drivers: [
+				{ driver: mk("cli-slow", "codex-exec", true), config: { id: "cli-slow", kind: "codex-exec", maxConcurrent: 2 } },
+				{ driver: mk("api-fast", "pi-in-process", true), config: { id: "api-fast", kind: "pi-in-process", maxConcurrent: 2 } },
+			],
+			roles: { planner: ["cli-slow", "api-fast"] },
+		});
+		const planSel = await mixedRouter.acquireForRole("planner", { preferInProcess: true });
+		expect(planSel.driver.id).toBe("api-fast");
+		planSel.release();
+
+		// 4. Shared strict JSON schema normalizer handles nested objects, arrays, and unions
+		const normalized = normalizeStrictJsonSchema({
+			type: "object",
+			properties: {
+				items: {
+					type: "array",
+					items: {
+						anyOf: [
+							{ type: "object", properties: { a: { type: "string" }, b: { type: "number" } } },
+							{ type: "string" },
+						],
+					},
+				},
+			},
+		}) as any;
+		expect(normalized.additionalProperties).toBe(false);
+		expect(normalized.required).toEqual(["items"]);
+		expect(normalized.properties.items.items.anyOf[0].additionalProperties).toBe(false);
+		expect(normalized.properties.items.items.anyOf[0].required).toEqual(["a", "b"]);
+	});
+
+	it("reaps detached subprocess trees cleanly via killProcessTree", async () => {
+		const { spawn } = await import("node:child_process");
+		const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+			stdio: "ignore",
+			detached: true,
+		});
+		expect(child.pid).toBeGreaterThan(0);
+		await killProcessTree(child, 150);
+		expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
 	});
 });

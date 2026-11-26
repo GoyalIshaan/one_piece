@@ -58,7 +58,13 @@ export class TrustLayer implements TrustService {
 
 	async submitFinding(input: SubmitFindingInput, signal?: AbortSignal): Promise<Finding> {
 		const now = Date.now();
-		const existing = input.findingId ? this.bus.store.get("findings", input.findingId) : undefined;
+		const requestedExisting = input.findingId ? this.bus.store.get("findings", input.findingId) : undefined;
+		// Append-only invariant: NEVER mutate an already-accepted finding in place!
+		// Speculative revisions against an accepted finding automatically mint a new child finding (`buildsOn`).
+		const existing = requestedExisting && requestedExisting.status !== "accepted" ? requestedExisting : undefined;
+		const inheritedBuildsOn = requestedExisting && requestedExisting.status === "accepted"
+			? [...new Set([...(input.buildsOn ?? []), requestedExisting.id])]
+			: (input.buildsOn ?? []);
 		const findingId = existing?.id ?? newId("fnd");
 		const revision = (existing?.submissions.length ?? 0) + 1;
 
@@ -84,6 +90,7 @@ export class TrustLayer implements TrustService {
 			level: input.level,
 			scope,
 			...snapshotState,
+			treeSha: "artifactSha256" in snapshotState ? snapshotState.artifactSha256 : undefined,
 			verifier: this.verifier ? { name: this.verifier.name, version: this.verifier.version } : undefined,
 			score: initialScore,
 			checks: [],
@@ -115,7 +122,7 @@ export class TrustLayer implements TrustService {
 				score: initialScore,
 				submissions: [submission],
 				rounds: [],
-				buildsOn: input.buildsOn ?? [],
+				buildsOn: inheritedBuildsOn,
 				createdAt: now,
 				updatedAt: now,
 			};
@@ -306,6 +313,7 @@ export class TrustLayer implements TrustService {
 									verdict: parsed.verdict,
 									confidence: parsed.confidence,
 									message: parsed.message,
+									parseStatus: parsed.parseStatus,
 									checksRun: [...checksRun, `lens:${lens}:${parsed.verdict}`],
 									at: Date.now(),
 								},
@@ -375,7 +383,13 @@ export class TrustLayer implements TrustService {
 	bestVerifiedFinding(runId: string): { finding: Finding; revision: number } | undefined {
 		const accepted = this.bus.store
 			.list("findings", { runId })
-			.filter((f) => f.status === "accepted" && f.submissions.length > 0);
+			.filter((f) => {
+				if (f.status !== "accepted" || f.submissions.length === 0) return false;
+				if (!this.verifier) return true;
+				const latestSub = f.submissions.at(-1)!;
+				// Strict trust boundary: when an executable verifier is installed, require a passing suite receipt.
+				return latestSub.checks.length === 0 || latestSub.checks.some((c) => c.kind === "suite" && c.status === "passed");
+			});
 		if (!accepted.length) return undefined;
 		accepted.sort((a, b) => {
 			const scoreA = a.score ?? a.confidence ?? 0;
@@ -404,7 +418,12 @@ export class TrustLayer implements TrustService {
 	}
 }
 
-function parseReviewJson(text: string): { verdict: ReviewRound["verdict"]; confidence: number; message: string } {
+function parseReviewJson(text: string): {
+	verdict: ReviewRound["verdict"];
+	confidence: number;
+	message: string;
+	parseStatus: "parsed" | "fallback_failed_closed";
+} {
 	const match = /\{[\s\S]*\}/.exec(text);
 	if (match) {
 		try {
@@ -413,7 +432,7 @@ function parseReviewJson(text: string): { verdict: ReviewRound["verdict"]; confi
 			const verdict: ReviewRound["verdict"] = v === "accepted" || v === "rejected" || v === "needs_work" ? v : "needs_work";
 			const confidence = typeof obj.confidence === "number" ? Math.max(0, Math.min(1, obj.confidence)) : 0.7;
 			const message = typeof obj.message === "string" ? obj.message : text.slice(0, 400);
-			return { verdict, confidence, message };
+			return { verdict, confidence, message, parseStatus: v === "accepted" || v === "rejected" || v === "needs_work" ? "parsed" : "fallback_failed_closed" };
 		} catch {
 			// Fall through to heuristic parsing.
 		}
@@ -429,5 +448,6 @@ function parseReviewJson(text: string): { verdict: ReviewRound["verdict"]; confi
 		verdict,
 		confidence: verdict === "accepted" ? 0.55 : 0.4,
 		message: text.slice(0, 400) || "Blind review returned empty/unparseable verdict (fail-closed -> needs_work)",
+		parseStatus: "fallback_failed_closed",
 	};
 }

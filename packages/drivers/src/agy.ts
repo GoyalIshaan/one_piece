@@ -14,19 +14,7 @@ import {
 	type WorkerTurnResult,
 } from "@one-piece/core";
 import { buildCliEnv, classifyQuotaError, probeCliBinary } from "./classify.ts";
-
-function killTree(child: ChildProcess): void {
-	try {
-		if (child.pid) process.kill(-child.pid, "SIGKILL");
-		else child.kill("SIGKILL");
-	} catch {
-		try {
-			child.kill("SIGKILL");
-		} catch {
-			// Already exited.
-		}
-	}
-}
+import { bindTurnCancellation, killProcessTreeNow } from "./supervisor.ts";
 
 /**
  * Antigravity CLI (`agy`) native ACP JSON-RPC 2.0 driver.
@@ -228,7 +216,7 @@ export class AgyAcpDriver implements WorkerDriver {
 			}
 		} catch (error) {
 			rl.close();
-			killTree(child);
+			killProcessTreeNow(child);
 			throw error;
 		}
 
@@ -251,25 +239,18 @@ export class AgyAcpDriver implements WorkerDriver {
 				sessionState = { kind: "running", chunks };
 				const text = spec.systemPrompt && !sentSystemFallback ? `${spec.systemPrompt}\n\n${prompt}` : prompt;
 				sentSystemFallback = true;
-				let timer: ReturnType<typeof setTimeout> | undefined;
-				let killGraceTimer: ReturnType<typeof setTimeout> | undefined;
-				let abortedLocally = false;
-				const onAbort = () => {
-					abortedLocally = true;
-					if (acpSessionId) void sendRpc("session/cancel", { sessionId: acpSessionId }).catch(() => {});
-					if (!killGraceTimer) {
-						killGraceTimer = setTimeout(() => {
-							killTree(child);
-						}, 3_000);
-						killGraceTimer.unref?.();
-					}
-				};
 				if (opts.signal?.aborted) {
 					resetToIdle();
 					return { status: "interrupted", finalText: "", sessionId: acpSessionId, model: resolvedModel, usage: { durationMs: 0 } };
 				}
-				opts.signal?.addEventListener("abort", onAbort, { once: true });
-				if (opts.timeoutMs) timer = setTimeout(onAbort, opts.timeoutMs);
+				const cancel = bindTurnCancellation(child, {
+					signal: opts.signal,
+					timeoutMs: opts.timeoutMs,
+					graceMs: 3_000,
+					onCancel: () => {
+						if (acpSessionId) void sendRpc("session/cancel", { sessionId: acpSessionId }).catch(() => {});
+					},
+				});
 				try {
 					const res = await sendRpc("session/prompt", { sessionId: acpSessionId, prompt: [{ type: "text", text }] });
 					const rawUsage = res?.usage;
@@ -282,11 +263,14 @@ export class AgyAcpDriver implements WorkerDriver {
 							outputTokens: Number(rawUsage.outputTokens ?? rawUsage.output_tokens ?? 0) || undefined,
 							reasoningTokens: Number(rawUsage.thoughtTokens ?? rawUsage.reasoningTokens ?? 0) || undefined,
 							totalTokens: Number(rawUsage.totalTokens ?? rawUsage.total_tokens ?? 0) || undefined,
+							cacheReadReported: rawUsage.cachedReadTokens !== undefined || rawUsage.cache_read_input_tokens !== undefined,
+							cacheWriteReported: rawUsage.cachedWriteTokens !== undefined || rawUsage.cache_creation_input_tokens !== undefined,
+							reasoningReported: rawUsage.thoughtTokens !== undefined || rawUsage.reasoningTokens !== undefined,
 							durationMs,
 						}
 						: { durationMs };
 					return {
-						status: opts.signal?.aborted || abortedLocally ? "interrupted" : "completed",
+						status: opts.signal?.aborted || cancel.wasCancelled() ? "interrupted" : "completed",
 						finalText: chunks.join("").trim(),
 						sessionId: acpSessionId,
 						model: resolvedModel,
@@ -296,7 +280,7 @@ export class AgyAcpDriver implements WorkerDriver {
 					const raw = `${error instanceof Error ? error.message : String(error)}\n${stderr}`.trim();
 					const quota = classifyQuotaError(raw);
 					const usage = { durationMs: Date.now() - startedAt };
-					if (opts.signal?.aborted || abortedLocally) {
+					if (opts.signal?.aborted || cancel.wasCancelled()) {
 						return { status: "interrupted", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage };
 					}
 					if (quota) {
@@ -304,9 +288,7 @@ export class AgyAcpDriver implements WorkerDriver {
 					}
 					return { status: "failed", finalText: chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, error: raw };
 				} finally {
-					if (timer) clearTimeout(timer);
-					if (killGraceTimer) clearTimeout(killGraceTimer);
-					opts.signal?.removeEventListener("abort", onAbort);
+					cancel.dispose();
 					resetToIdle();
 				}
 			},
@@ -318,7 +300,7 @@ export class AgyAcpDriver implements WorkerDriver {
 			async close(): Promise<void> {
 				sessionState = { kind: "closed" };
 				rl.close();
-				killTree(child);
+				killProcessTreeNow(child);
 			},
 		};
 	}

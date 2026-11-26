@@ -53,6 +53,10 @@ export interface UsageRecord {
 	totalTokens?: number;
 	usd?: number;
 	durationMs?: number;
+	/** Explicit tri-state indicators distinguishing "provider reported 0" from "omitted". */
+	cacheReadReported?: boolean;
+	cacheWriteReported?: boolean;
+	reasoningReported?: boolean;
 }
 
 interface RunFields {
@@ -203,6 +207,8 @@ export type FindingSubmission = {
 	level: EvidenceLevel;
 	scope?: string;
 	verifier?: { name: string; version: string };
+	/** Content-addressed git tree hash (`HEAD^{tree}`) for basin deduplication. */
+	treeSha?: string;
 	score?: number;
 	checks: VerificationReceipt[];
 	at: number;
@@ -219,6 +225,8 @@ export interface ReviewRound {
 	verdict: "accepted" | "rejected" | "needs_work";
 	message: string;
 	confidence?: number;
+	/** Distinguishes clean structured JSON verdicts from fail-closed heuristic fallbacks. */
+	parseStatus?: "parsed" | "fallback_failed_closed";
 	checksRun: string[];
 	at: number;
 }

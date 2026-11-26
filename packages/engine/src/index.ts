@@ -8,6 +8,7 @@ export {
 	probeWorkspaceEnvironment,
 	writeFieldGuideFile,
 } from "./field-guide.ts";
+export { IntegrationPipeline } from "./integration.ts";
 export { SwarmOS, type SwarmOsConfig } from "./os.ts";
 export { FileSkillRegistry, loadSkillTool } from "./skills.ts";
 export * from "./topologies/index.ts";

@@ -88,6 +88,9 @@ export interface LifecycleEvents {
 		cachedTokens?: number;
 		cacheWriteTokens?: number;
 		reasoningTokens?: number;
+		cacheReadReported?: boolean;
+		cacheWriteReported?: boolean;
+		reasoningReported?: boolean;
 		usd?: number;
 		units?: Record<string, number>;
 	};

@@ -39,7 +39,7 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 	return {
 		name: "evolution",
 		description: "Pure mechanical TypeScript archive loop dispatching fresh-context CLI mutation bursts with verified ratcheting.",
-		async run(os: SwarmOsApi, { goal, rubric, signal }): Promise<TopologyOutcome> {
+		async run(os: SwarmOsApi, { goal, rubric, signal, closeoutSignal }): Promise<TopologyOutcome> {
 			const archive: ArchiveEntry[] = [];
 			const negativeMemory: NegativeEntry[] = [];
 			let bestScore = Number.NEGATIVE_INFINITY;
@@ -136,10 +136,10 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 							].filter(Boolean).join("\n\n");
 
 							const res = await worker.runTurn(prompt, { signal, ...(genTimeoutMs ? { timeoutMs: genTimeoutMs } : {}) });
-							const wipSha = os.worktrees.commitWip(worker.workspace, `evo-gen-${gen}-slot-${slot + 1}`);
-							const headAfter = os.worktrees.headSha(worker.workspace);
-							const hasEdits = Boolean(wipSha) || (Boolean(headAfter) && Boolean(baseHeadSha) && headAfter !== baseHeadSha);
-							const diffSha = os.worktrees.diffSha(worker.workspace);
+							const wipSha = res.workspaceSnapshot?.wipSha ?? os.worktrees.commitWip(worker.workspace, `evo-gen-${gen}-slot-${slot + 1}`);
+							const headAfter = res.workspaceSnapshot?.headSha ?? os.worktrees.headSha(worker.workspace);
+							const hasEdits = Boolean(res.workspaceSnapshot?.hasEdits) || Boolean(wipSha) || (Boolean(headAfter) && Boolean(baseHeadSha) && headAfter !== baseHeadSha);
+							const diffSha = res.workspaceSnapshot?.treeSha ?? os.worktrees.diffSha(worker.workspace);
 							const diffStat = os.worktrees.diffStat(worker.workspace, baseHeadSha ?? os.worktrees.baseSha);
 
 							let finding: Finding | undefined = os.store
@@ -148,7 +148,7 @@ export function evolutionTopology(opts: EvolutionTopologyOptions = {}): Topology
 								.at(-1);
 
 							if (!finding && (res.status === "completed" || (res.status === "interrupted" && hasEdits))) {
-								const verifySig = signal.aborted ? new AbortController().signal : signal;
+								const verifySig = closeoutSignal ?? os.closeoutSignal ?? new AbortController().signal;
 								finding = await os.trust.submitFinding(
 									{
 										agentId: worker.agent.id,

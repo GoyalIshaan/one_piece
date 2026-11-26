@@ -1,4 +1,4 @@
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EvalTask } from "./contracts.ts";
@@ -283,6 +283,48 @@ export async function runTaskCalibration(
 			passed: staleCard.hasHarnessFault && staleCard.harnessFaults.some((f) => f.code === "STALE_VERDICT_APPLIED"),
 			details: `faults=[${staleCard.harnessFaults.map((f) => f.code).join(", ")}], refSha=${sha256Dir(refDir).slice(0, 12)}`,
 		});
+
+		// 7. PublicCheck calibration (starter fails non-optimization tasks; oracle strictly beats starter)
+		if (task.publicCheck && task.buildReferenceArtifact) {
+			const higher = task.higherIsBetter ?? true;
+			const starterPub = await task.publicCheck({ artifactDir: prepared.workspaceDir, seed, n, options: taskOptions });
+			const oraclePub = await task.publicCheck({ artifactDir: refDir, seed, n, options: taskOptions });
+			const isScalarOpt = task.family === "scalar-optimization" || prepared.incumbentScore !== undefined;
+			const starterCalOk = isScalarOpt ? true : !starterPub.passed && starterPub.score < 1.0;
+			const oracleBeatsStarter = higher ? oraclePub.score > starterPub.score + 1e-9 : oraclePub.score < starterPub.score - 1e-9;
+			checks.push({
+				name: "public_check_calibrated",
+				passed: starterCalOk && oraclePub.passed && oracleBeatsStarter,
+				details: `starter(passed=${starterPub.passed}, score=${starterPub.score}); oracle(passed=${oraclePub.passed}, score=${oraclePub.score})`,
+			});
+
+			// 8. PublicCheck tamper-resistance (mutating in-tree public test/sim files cannot fake a pass or speedup)
+			const tamperDir = join(root, "tamper-probe");
+			cpSync(prepared.workspaceDir, tamperDir, { recursive: true });
+			const pubTestPath = join(tamperDir, "tests", "test_public.py");
+			const vliwSimPath = join(tamperDir, "vliw_sim.py");
+			let tamperedCheckOk = true;
+			let tamperDetail = "no mutable in-tree public harness file";
+			if (existsSync(pubTestPath)) {
+				writeFileSync(
+					pubTestPath,
+					"import unittest\nclass Tampered(unittest.TestCase):\n    def test_fake(self):\n        self.assertTrue(True)\n",
+				);
+				const tamperedPub = await task.publicCheck({ artifactDir: tamperDir, seed, n, options: taskOptions });
+				tamperedCheckOk = !tamperedPub.passed && Math.abs(tamperedPub.score - starterPub.score) <= 1e-6;
+				tamperDetail = `tampered tests/test_public.py -> passed=${tamperedPub.passed}, score=${tamperedPub.score} (starter=${starterPub.score})`;
+			} else if (existsSync(vliwSimPath)) {
+				writeFileSync(vliwSimPath, "# tampered simulator\ndef simulate(*args, **kwargs):\n    return 1, {}\n");
+				const tamperedPub = await task.publicCheck({ artifactDir: tamperDir, seed, n, options: taskOptions });
+				tamperedCheckOk = Math.abs(tamperedPub.score - starterPub.score) <= 1e-4;
+				tamperDetail = `tampered vliw_sim.py -> score=${tamperedPub.score} (starter=${starterPub.score})`;
+			}
+			checks.push({
+				name: "public_check_tamper_resistant",
+				passed: tamperedCheckOk,
+				details: tamperDetail,
+			});
+		}
 
 		return {
 			taskId: task.id,

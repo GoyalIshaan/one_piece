@@ -101,7 +101,18 @@ export class PiInProcessDriver implements WorkerDriver {
 			? { provider: this.config.provider, id: requestedModel }
 			: this.router.pick(spec.role);
 		const model = this.router.resolve(picked);
-		let turnUsage = { inputTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0, usd: 0 };
+		let turnUsage = {
+			inputTokens: 0,
+			cachedTokens: 0,
+			cacheWriteTokens: 0,
+			outputTokens: 0,
+			reasoningTokens: 0,
+			totalTokens: 0,
+			usd: 0,
+			cacheReadReported: false,
+			cacheWriteReported: false,
+			reasoningReported: false,
+		};
 		let lastInputTokens = 0;
 		let compactionCount = 0;
 		let needsHandoff = false;
@@ -111,10 +122,19 @@ export class PiInProcessDriver implements WorkerDriver {
 
 		const streamFn = this.router.streamFn((record) => {
 			turnUsage.inputTokens += record.input;
-			turnUsage.cachedTokens += record.cacheReadTokens ?? 0;
-			turnUsage.cacheWriteTokens += record.cacheWriteTokens ?? 0;
+			if (record.cacheReadTokens !== undefined) {
+				turnUsage.cachedTokens += record.cacheReadTokens;
+				turnUsage.cacheReadReported = true;
+			}
+			if (record.cacheWriteTokens !== undefined) {
+				turnUsage.cacheWriteTokens += record.cacheWriteTokens;
+				turnUsage.cacheWriteReported = true;
+			}
 			turnUsage.outputTokens += record.output;
-			turnUsage.reasoningTokens += record.reasoningTokens ?? 0;
+			if (record.reasoningTokens !== undefined) {
+				turnUsage.reasoningTokens += record.reasoningTokens;
+				turnUsage.reasoningReported = true;
+			}
 			turnUsage.totalTokens += record.totalTokens;
 			turnUsage.usd += record.usd;
 			lastInputTokens = record.input + (record.cacheReadTokens ?? 0);
@@ -175,7 +195,18 @@ export class PiInProcessDriver implements WorkerDriver {
 				}
 				sessionState = { kind: "running" };
 				const startedAt = Date.now();
-				turnUsage = { inputTokens: 0, cachedTokens: 0, cacheWriteTokens: 0, outputTokens: 0, reasoningTokens: 0, totalTokens: 0, usd: 0 };
+				turnUsage = {
+					inputTokens: 0,
+					cachedTokens: 0,
+					cacheWriteTokens: 0,
+					outputTokens: 0,
+					reasoningTokens: 0,
+					totalTokens: 0,
+					usd: 0,
+					cacheReadReported: false,
+					cacheWriteReported: false,
+					reasoningReported: false,
+				};
 				needsHandoff = false;
 				const onAbort = () => agent.abort();
 				opts.signal?.addEventListener("abort", onAbort, { once: true });

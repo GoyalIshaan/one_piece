@@ -58,7 +58,7 @@ function parseResetTimestamp(text: string): number | undefined {
 
 /** Build a clean env for CLI subprocesses, stripping API keys when subscriptionMode is enabled. */
 export function buildCliEnv(stripKeys: readonly string[], extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-	const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+	const env: NodeJS.ProcessEnv = { ...process.env, PYTHONDONTWRITEBYTECODE: "1", ...extra };
 	for (const key of stripKeys) delete env[key];
 	return env;
 }

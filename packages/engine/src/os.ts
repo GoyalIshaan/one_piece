@@ -53,6 +53,7 @@ import {
 	probeWorkspaceEnvironment,
 	writeFieldGuideFile,
 } from "./field-guide.ts";
+import { IntegrationPipeline } from "./integration.ts";
 import { FileSkillRegistry, loadSkillTool } from "./skills.ts";
 import { TriggerEngine } from "./triggers.ts";
 import { TrustLayer } from "./trust.ts";
@@ -66,6 +67,10 @@ export interface SwarmOsConfig {
 	budget?: BudgetVector;
 	reservePct?: number;
 	wallSeconds?: number;
+	/** Non-preemptible closeout grace window in ms after wallSeconds expires (default 30_000). */
+	closeoutGraceMs?: number;
+	/** Run-level paths kernel-blocked from reading for every worker and scheduled job. */
+	deniedReadPaths?: readonly string[];
 	pools?: PoolConfig[];
 	secrets?: SecretSpec[];
 	verifier?: FindingVerifier;
@@ -119,11 +124,14 @@ export class SwarmOS implements SwarmOsApi {
 	readonly router: QuotaPoolRouter;
 	readonly mcp: McpBusServer;
 	readonly skills: FileSkillRegistry;
+	readonly integration: IntegrationPipeline;
 	readonly fieldGuidePath: string;
 
 	private currentRun: Run;
 	private readonly reservePct: number;
 	private readonly wallSeconds?: number;
+	private readonly closeoutGraceMs: number;
+	private readonly runDeniedReadPaths: readonly string[];
 	private readonly startedAt: number;
 	private readonly networkOffWorkers: boolean;
 	private readonly autoHandoffOnSecondCompaction: boolean;
@@ -136,11 +144,19 @@ export class SwarmOS implements SwarmOsApi {
 	private readonly closeout: CloseoutController;
 	private readonly activeHandles = new Map<
 		string,
-		{ handle: WorkerHandle; abort: AbortController; workspace: string; armEscalation: (reason: string) => boolean }
+		{
+			handle: WorkerHandle;
+			abort: AbortController;
+			workspace: string;
+			deniedReadPaths: readonly string[];
+			armEscalation: (reason: string) => boolean;
+		}
 	>();
-	private readonly runAbort = new AbortController();
+	private readonly workAbort = new AbortController();
+	private readonly closeoutAbort = new AbortController();
 	private wallReserveTimer?: ReturnType<typeof setTimeout>;
 	private wallHardTimer?: ReturnType<typeof setTimeout>;
+	private closeoutGraceTimer?: ReturnType<typeof setTimeout>;
 	private lifecycle:
 		| { readonly kind: "ready" }
 		| { readonly kind: "executing"; readonly topology: string }
@@ -162,6 +178,8 @@ export class SwarmOS implements SwarmOsApi {
 		this.router.attachBus?.(this.bus, this.runId);
 		this.reservePct = cfg.reservePct ?? 0.12;
 		this.wallSeconds = cfg.wallSeconds;
+		this.closeoutGraceMs = cfg.closeoutGraceMs ?? 30_000;
+		this.runDeniedReadPaths = cfg.deniedReadPaths ? [...cfg.deniedReadPaths] : [];
 		this.startedAt = Date.now();
 		this.networkOffWorkers = cfg.networkOffWorkers ?? false;
 		this.autoHandoffOnSecondCompaction = cfg.autoHandoffOnSecondCompaction ?? true;
@@ -207,7 +225,8 @@ export class SwarmOS implements SwarmOsApi {
 				isRunActive: () => this.currentRun.status === "running",
 				workspaceOf: (agentId) => this.activeHandles.get(agentId)?.workspace ?? this.store.get("agents", agentId)?.workspace,
 				taskIdOf: (agentId) => this.store.get("agents", agentId)?.taskId,
-				signalOf: (agentId) => this.activeHandles.get(agentId)?.abort.signal ?? this.runAbort.signal,
+				signalOf: (agentId) => this.activeHandles.get(agentId)?.abort.signal ?? this.workAbort.signal,
+				deniedReadPathsOf: (agentId) => this.activeHandles.get(agentId)?.deniedReadPaths ?? this.runDeniedReadPaths,
 				availableBudget: (unit) => {
 					const cap = this.currentRun.budget[unit];
 					return cap === undefined ? Infinity : cap - (this.currentRun.spent[unit] ?? 0);
@@ -228,6 +247,7 @@ export class SwarmOS implements SwarmOsApi {
 		});
 
 		this.closeout = new CloseoutController(this.runId, this.runDir, this.bus, this.trust);
+		this.integration = new IntegrationPipeline(this);
 
 		this.triggers = new TriggerEngine({
 			runId: this.runId,
@@ -267,15 +287,28 @@ export class SwarmOS implements SwarmOsApi {
 			}, reserveMs);
 			this.wallReserveTimer.unref?.();
 
-			// Hard wall-clock cutoff: abort any hung/runaway worker turn at 100% wallSeconds so CloseoutController still runs.
+			// Hard wall-clock cutoff: abort active LLM turns via workAbort, while keeping closeoutAbort
+			// alive for a bounded non-preemptible grace window so mechanical assembly & verification succeed.
 			const hardMs = Math.max(reserveMs + 1_000, Math.ceil(this.wallSeconds * 1000));
 			this.wallHardTimer = setTimeout(() => {
-				if (!this.runAbort.signal.aborted) {
-					this.runAbort.abort(new Error(`Wall-clock limit (${this.wallSeconds}s) exceeded`));
+				if (!this.workAbort.signal.aborted) {
+					this.workAbort.abort(new Error(`Wall-clock limit (${this.wallSeconds}s) exceeded`));
+				}
+				if (!this.closeoutAbort.signal.aborted && !this.closeoutGraceTimer) {
+					this.closeoutGraceTimer = setTimeout(() => {
+						if (!this.closeoutAbort.signal.aborted) {
+							this.closeoutAbort.abort(new Error(`Closeout grace (${this.closeoutGraceMs}ms) exceeded`));
+						}
+					}, Math.max(1_000, this.closeoutGraceMs));
+					this.closeoutGraceTimer.unref?.();
 				}
 			}, hardMs);
 			this.wallHardTimer.unref?.();
 		}
+	}
+
+	get closeoutSignal(): AbortSignal {
+		return this.closeoutAbort.signal;
 	}
 
 	static async create(cfg: SwarmOsConfig): Promise<SwarmOS> {
@@ -396,7 +429,7 @@ export class SwarmOS implements SwarmOsApi {
 			maxLines: this.fieldGuideMaxLines,
 		});
 
-		if (mode === "llm" && !this.runAbort.signal.aborted && !this.isInCloseoutReserve()) {
+		if (mode === "llm" && !this.workAbort.signal.aborted && !this.isInCloseoutReserve()) {
 			try {
 				const consolidator = await this.spawnWorker({
 					role: "explorer",
@@ -425,7 +458,7 @@ export class SwarmOS implements SwarmOsApi {
 				});
 				try {
 					const res = await consolidator.runTurn(`Draft Field Guide (Wave ${this.fieldGuideWave}):\n\n${markdown}`, {
-						signal: this.runAbort.signal,
+						signal: this.workAbort.signal,
 					});
 					if (res.status === "completed" && res.finalText.trim().length > 20) {
 						markdown = enforceLineBudget(res.finalText, this.fieldGuideMaxLines);
@@ -763,6 +796,7 @@ export class SwarmOS implements SwarmOsApi {
 					artifacts: this.artifacts,
 					readOnly: opts.readOnly,
 					networkOff: this.networkOffWorkers,
+					deniedReadPaths: (opts as ToolScope & { deniedReadPaths?: readonly string[] }).deniedReadPaths ?? this.runDeniedReadPaths,
 					editFormat: (opts as ToolScope & { editFormat?: "search_replace" | "apply_patch" }).editFormat,
 				}),
 			);
@@ -776,13 +810,16 @@ export class SwarmOS implements SwarmOsApi {
 			throw new Error(`Cannot spawn worker (${req.role}) after SwarmOS has been disposed`);
 		}
 		const agentId = newId("agt");
+		const effectiveDeniedReadPaths = [...new Set([...this.runDeniedReadPaths, ...(req.deniedReadPaths ?? [])])];
 		let selection = await this.router.acquireForRole(req.role, {
 			preferredDriverId: req.preferredDriverId,
 			avoidDrivers: req.avoidDrivers,
 			minTier: req.minTier,
 			maxTier: req.maxTier,
 			requireOutputSchema: req.requireOutputSchema,
-			signal: this.runAbort.signal,
+			strictCapabilities: req.strictCapabilities,
+			preferInProcess: req.preferInProcess ?? (req.role === "planner" || req.role === "reviewer"),
+			signal: this.workAbort.signal,
 		});
 
 		const worktreeHandle = req.workspace
@@ -790,6 +827,7 @@ export class SwarmOS implements SwarmOsApi {
 			: this.worktrees.create(agentId, req.baseRef);
 		const workspace = req.workspace ?? worktreeHandle!.path;
 		const branch = worktreeHandle?.branch;
+		const initialBaseHeadSha = this.worktrees.headSha(workspace) ?? req.baseRef ?? this.worktrees.baseSha;
 
 		const assignedTask = req.taskId ? this.store.get("tasks", req.taskId) : undefined;
 		const pinnedChecklist = [
@@ -807,6 +845,7 @@ export class SwarmOS implements SwarmOsApi {
 					canSpawn: req.canSpawn ?? req.toolScope?.canSpawn ?? false,
 					readOnly: req.readOnly ?? req.toolScope?.readOnly ?? false,
 					excludeSkills: req.skills,
+					deniedReadPaths: effectiveDeniedReadPaths,
 					includeWorkspaceTools: req.toolScope?.includeWorkspaceTools ?? driverKind === "pi-in-process",
 					...(driverKind === "pi-in-process" && isOpenAiEditModel(modelHint) ? { editFormat: "apply_patch" as const } : {}),
 				} as ToolScope);
@@ -975,7 +1014,7 @@ export class SwarmOS implements SwarmOsApi {
 				model: req.model,
 				maxTurns: req.maxTurns,
 				readOnly: req.readOnly,
-				deniedReadPaths: req.deniedReadPaths,
+				deniedReadPaths: effectiveDeniedReadPaths,
 				cacheKeyPrefix,
 				compaction: compactionPolicy,
 				mcp: mcpReg.connection,
@@ -1155,7 +1194,7 @@ export class SwarmOS implements SwarmOsApi {
 					model: switchedDriver ? undefined : req.model,
 					maxTurns: req.maxTurns,
 					readOnly: req.readOnly,
-					deniedReadPaths: req.deniedReadPaths,
+					deniedReadPaths: effectiveDeniedReadPaths,
 					cacheKeyPrefix,
 					compaction: compactionPolicy,
 					mcp: mcpReg.connection,
@@ -1203,8 +1242,8 @@ export class SwarmOS implements SwarmOsApi {
 					// Because this boundary already resets the KV cache, opportunistically escalate to a higher tier if available.
 					if (rollover && this.autoHandoffOnSecondCompaction) {
 						const rolloverSignal = opts.signal
-							? AbortSignal.any([this.runAbort.signal, abort.signal, opts.signal])
-							: AbortSignal.any([this.runAbort.signal, abort.signal]);
+							? AbortSignal.any([this.workAbort.signal, abort.signal, opts.signal])
+							: AbortSignal.any([this.workAbort.signal, abort.signal]);
 						const targetTier = escalationState.status === "ready" ? findHigherHealthyTier() : undefined;
 						const switched = await switchSessionWithHandoff({
 							reason: rollover.reason,
@@ -1219,15 +1258,25 @@ export class SwarmOS implements SwarmOsApi {
 
 					for (;;) {
 						const combinedSignal = opts.signal
-							? AbortSignal.any([this.runAbort.signal, abort.signal, opts.signal])
-							: AbortSignal.any([this.runAbort.signal, abort.signal]);
+							? AbortSignal.any([this.workAbort.signal, abort.signal, opts.signal])
+							: AbortSignal.any([this.workAbort.signal, abort.signal]);
 
 						lastToolSig = "";
 						turnToolLog = [];
 						const turnWaitedMs = pendingPermitWaitMs;
 						pendingPermitWaitMs = 0;
 
-						const res = await session.runTurn(currentPrompt, { ...opts, signal: combinedSignal });
+						const rawRes = await session.runTurn(currentPrompt, { ...opts, signal: combinedSignal });
+						// Automatically capture WIP + content-addressed tree snapshot on every write-worker turn exit/interrupt.
+						let workspaceSnapshot = rawRes.workspaceSnapshot;
+						if (!req.readOnly && branch) {
+							const wipSha = this.worktrees.commitWip(workspace, `one-piece(${agent.handle}): turn ${agent.turns + 1}`);
+							const headSha = this.worktrees.headSha(workspace);
+							const treeSha = this.worktrees.treeSha?.(workspace);
+							const hasEdits = Boolean(wipSha) || (Boolean(headSha) && headSha !== initialBaseHeadSha);
+							workspaceSnapshot = { headSha, treeSha, wipSha, hasEdits };
+						}
+						const res: WorkerTurnResult = workspaceSnapshot ? { ...rawRes, workspaceSnapshot } : rawRes;
 						const latest = this.store.get("agents", agentId) ?? agent;
 						agent = {
 							...latest,
@@ -1448,7 +1497,7 @@ export class SwarmOS implements SwarmOsApi {
 										systemPrompt: composedSystemPrompt,
 										maxTurns: req.maxTurns,
 										readOnly: req.readOnly,
-										deniedReadPaths: req.deniedReadPaths,
+										deniedReadPaths: effectiveDeniedReadPaths,
 										cacheKeyPrefix,
 										compaction: compactionPolicy,
 										mcp: mcpReg.connection,
@@ -1501,7 +1550,7 @@ export class SwarmOS implements SwarmOsApi {
 			},
 		};
 
-		this.activeHandles.set(agentId, { handle, abort, workspace, armEscalation });
+		this.activeHandles.set(agentId, { handle, abort, workspace, deniedReadPaths: effectiveDeniedReadPaths, armEscalation });
 		return handle;
 	}
 
@@ -1510,7 +1559,7 @@ export class SwarmOS implements SwarmOsApi {
 			throw new Error(`SwarmOS.execute() called in invalid lifecycle state "${this.lifecycle.kind}"`);
 		}
 		this.lifecycle = { kind: "executing", topology: plugin.name };
-		const onExternalAbort = () => this.runAbort.abort(signal?.reason);
+		const onExternalAbort = () => this.workAbort.abort(signal?.reason);
 		signal?.addEventListener("abort", onExternalAbort, { once: true });
 		this.bus.emit(this.runId, "run.started", { topology: plugin.name, goal: this.currentRun.goal.title });
 
@@ -1519,11 +1568,12 @@ export class SwarmOS implements SwarmOsApi {
 			outcome = await plugin.run(this, {
 				goal: this.currentRun.goal.text,
 				rubric: this.currentRun.goal.rubric,
-				signal: this.runAbort.signal,
+				signal: this.workAbort.signal,
+				closeoutSignal: this.closeoutAbort.signal,
 			});
 		} catch (error) {
 			outcome = {
-				status: this.runAbort.signal.aborted ? "stopped" : "failed",
+				status: this.workAbort.signal.aborted ? "stopped" : "failed",
 				summary: error instanceof Error ? error.message : String(error),
 			};
 		} finally {
@@ -1567,8 +1617,10 @@ export class SwarmOS implements SwarmOsApi {
 		this.lifecycle = { kind: "disposed" };
 		if (this.wallReserveTimer) clearTimeout(this.wallReserveTimer);
 		if (this.wallHardTimer) clearTimeout(this.wallHardTimer);
+		if (this.closeoutGraceTimer) clearTimeout(this.closeoutGraceTimer);
 		this.triggers.stop();
-		this.runAbort.abort();
+		this.workAbort.abort();
+		this.closeoutAbort.abort();
 		await Promise.allSettled([...this.activeHandles.values()].map(({ handle }) => handle.close()));
 		await this.scheduler.dispose();
 		await this.mcp.close();
@@ -1627,6 +1679,9 @@ export class SwarmOS implements SwarmOsApi {
 				cachedTokens: usage?.cachedTokens,
 				cacheWriteTokens: usage?.cacheWriteTokens,
 				reasoningTokens: usage?.reasoningTokens,
+				cacheReadReported: usage?.cacheReadReported,
+				cacheWriteReported: usage?.cacheWriteReported,
+				reasoningReported: usage?.reasoningReported,
 				usd,
 				units,
 			},

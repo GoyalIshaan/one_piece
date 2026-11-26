@@ -1,4 +1,5 @@
 export * from "./contracts.ts";
+export * from "./overlay.ts";
 export * from "./sandbox.ts";
 export * from "./event-reader.ts";
 export * from "./scorecard.ts";

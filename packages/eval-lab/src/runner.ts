@@ -1,5 +1,6 @@
 import { appendFileSync, cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { runTaskCalibration } from "./calibration.ts";
 import type {
 	BudgetMode,
 	CandidateSnapshot,
@@ -11,6 +12,7 @@ import type {
 	PromotionBar,
 	RunBudget,
 	Scorecard,
+	SeatSpec,
 } from "./contracts.ts";
 import { openEvalTraceDb, readRunEvents } from "./event-reader.ts";
 import { gitReproducibility, sha256Dir } from "./sandbox.ts";
@@ -40,6 +42,8 @@ export interface CampaignOptions {
 	promotionBar?: PromotionBar;
 	baselineArmId?: string;
 	candidateArmId?: string;
+	/** Skip the automatic zero-cost pre-campaign task calibration gate (default false). */
+	skipCalibration?: boolean;
 	log?: (line: string) => void;
 }
 
@@ -95,20 +99,20 @@ async function runSilentBestOfN(
 			const subDbPath = join(subDir, "trace.db");
 			const subRunId = `${spec.runId}-seat-${i}`;
 
-			// Pass full `privateShards` and `soloSeatPrompts` with `seatIndex: i` so `createV2Adapter`
-			// resolves `soloSeatPrompts[i]` accurately AND restricts sibling shards strictly per-worker
-			// (avoiding process-wide `deniedReads` cross-blocking when seats run concurrently in `Promise.all`).
+			// Pass full first-class `seats` (plus backward-compatible `privateShards`/`soloSeatPrompts`) with `seatIndex: i`
+			// so `createV2Adapter` resolves per-seat prompts and immutable per-worker Seatbelt denies cleanly.
 			const subReceipt = await adapter.run({
 				...spec,
 				runId: subRunId,
 				runDir: subDir,
 				dbPath: subDbPath,
 				workspaceDir: subWorkspace,
+				seats: spec.seats,
 				privateShards: spec.privateShards,
 				seatPrompts: undefined,
 				soloSeatPrompts: spec.soloSeatPrompts,
 				seatIndex: i,
-				totalSeats: spec.totalSeats ?? spec.privateShards?.length ?? n,
+				totalSeats: spec.totalSeats ?? spec.seats?.length ?? spec.privateShards?.length ?? n,
 				hiddenDenyPaths: spec.hiddenDenyPaths,
 				controlRung: "solo",
 				topology: "silent_bon_member",
@@ -168,38 +172,70 @@ async function runSilentBestOfN(
 		const higher = task.higherIsBetter ?? true;
 		let chosen: { dir: string; sha256: string; score: number; passed: boolean } | undefined;
 
-		if (spec.privateShards && spec.privateShards.length > 0) {
+		const resolvedSeats: readonly SeatSpec[] = spec.seats?.length
+			? spec.seats
+			: (spec.privateShards ?? []).map((dir, idx) => ({
+				index: idx,
+				handle: `seat-${idx}`,
+				privateDir: dir,
+				outputPath: join("submissions", `seat_${idx}.json`),
+				prompt: spec.seatPrompts?.[idx] ?? "",
+				soloPrompt: spec.soloSeatPrompts?.[idx] ?? "",
+			}));
+
+		if (resolvedSeats.length > 0) {
 			const assembledDir = join(spec.runDir, "silent-assembled");
 			mkdirSync(assembledDir, { recursive: true });
 			cpSync(spec.workspaceDir, assembledDir, { recursive: true });
-			let mergedSeats = 0;
-			for (let i = 0; i < subReceipts.length; i++) {
-				const sub = subReceipts[i];
-				if (!sub) continue;
-				const seatRel = join("submissions", `seat_${i}.json`);
-				// Individual isolated seats can only produce 1/N of the sharded deliverable, so per-seat
-				// N/N publicCheck fails and leaves `nominatedArtifactDir` unset. Scan the seat's nominated
-				// dir first, then its latest captured snapshot containing `submissions/seat_i.json`.
+
+			// Locate the best artifact directory for each isolated seat (nominated dir first, then latest snapshot
+			// containing that seat's declared `outputPath` since 1/N seats fail N/N publicCheck).
+			const seatArtifactDirs: Array<string | undefined> = resolvedSeats.map((seat) => {
+				const sub = subReceipts[seat.index];
+				if (!sub) return undefined;
 				const candidateDirs: string[] = [];
 				if (sub.nominatedArtifactDir) candidateDirs.push(sub.nominatedArtifactDir);
 				for (let k = sub.candidateSnapshots.length - 1; k >= 0; k--) {
 					const snapDir = sub.candidateSnapshots[k]?.dir;
 					if (snapDir) candidateDirs.push(snapDir);
 				}
-				const srcSeatFile = candidateDirs.map((d) => join(d, seatRel)).find((p) => existsSync(p));
-				if (srcSeatFile) {
-					mkdirSync(join(assembledDir, "submissions"), { recursive: true });
-					cpSync(srcSeatFile, join(assembledDir, seatRel));
-					mergedSeats += 1;
+				return candidateDirs.find((d) => existsSync(join(d, seat.outputPath)));
+			});
+
+			let mergedSeats = 0;
+			if (task.assembleSeats) {
+				const assembled = await task.assembleSeats({
+					baseWorkspaceDir: spec.workspaceDir,
+					seats: resolvedSeats,
+					seatArtifactDirs,
+					outDir: assembledDir,
+					seed: spec.seed,
+					n: spec.totalSeats ?? resolvedSeats.length,
+					options,
+				});
+				mergedSeats = assembled.assembledCount;
+			} else {
+				for (let i = 0; i < resolvedSeats.length; i++) {
+					const seat = resolvedSeats[i]!;
+					const srcDir = seatArtifactDirs[i];
+					if (!srcDir) continue;
+					const srcFile = join(srcDir, seat.outputPath);
+					if (existsSync(srcFile)) {
+						const dstFile = join(assembledDir, seat.outputPath);
+						mkdirSync(dirname(dstFile), { recursive: true });
+						cpSync(srcFile, dstFile);
+						mergedSeats += 1;
+					}
 				}
 			}
+
 			if (mergedSeats > 0) {
 				const assembledSha = sha256Dir(assembledDir);
 				const pub = task.publicCheck
 					? await task.publicCheck({
 							artifactDir: assembledDir,
 							seed: spec.seed,
-							n: spec.totalSeats ?? spec.privateShards.length ?? n,
+							n: spec.totalSeats ?? resolvedSeats.length,
 							options,
 						})
 					: { passed: mergedSeats === n, score: mergedSeats / n, details: `assembled ${mergedSeats}/${n} seats` };
@@ -326,6 +362,23 @@ export async function runCampaign(options: CampaignOptions): Promise<CampaignRes
 
 	mkdirSync(join(outDir, "scorecards"), { recursive: true });
 	const git = gitReproducibility(repoRoot);
+	let calibrationReport: { passed: boolean; checksPassed: number; checksTotal: number } | null = null;
+	if (!options.skipCalibration && task.buildReferenceArtifact) {
+		const cal = await runTaskCalibration(task, {
+			seed: seeds[0] ?? 7,
+			repoRoot,
+			taskOptions,
+		});
+		calibrationReport = {
+			passed: cal.passed,
+			checksPassed: cal.checks.filter((c) => c.passed).length,
+			checksTotal: cal.checks.length,
+		};
+		if (!cal.passed) {
+			const failed = cal.checks.filter((c) => !c.passed).map((c) => `${c.name}: ${c.details}`).join("; ");
+			throw new Error(`Pre-campaign calibration failed for task "${task.id}": ${failed}`);
+		}
+	}
 	const protocol = {
 		schemaVersion: 1,
 		createdAt: new Date().toISOString(),
@@ -338,6 +391,7 @@ export async function runCampaign(options: CampaignOptions): Promise<CampaignRes
 		budgetMode,
 		taskOptions,
 		promotionBar: options.promotionBar ?? null,
+		calibration: calibrationReport,
 		git,
 	};
 	writeFileSync(join(outDir, "protocol.json"), JSON.stringify(protocol, null, 2) + "\n");
@@ -383,6 +437,7 @@ export async function runCampaign(options: CampaignOptions): Promise<CampaignRes
 				goal: prepared.goal,
 				rubric: prepared.rubric,
 				workspaceDir: prepared.workspaceDir,
+				seats: prepared.seats,
 				privateShards: prepared.privateShards,
 				seatPrompts: prepared.seatPrompts,
 				soloSeatPrompts: prepared.soloSeatPrompts,

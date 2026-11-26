@@ -4,6 +4,21 @@ import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync } f
 import { join, relative, resolve } from "node:path";
 import type { MergeTrunkResult, WorktreeHandle, WorktreeManager } from "./topology.ts";
 
+export const WORKTREE_EXCLUDE_PATTERNS: readonly string[] = [
+	".swarm/",
+	".gemini/settings.json",
+	".grok/config.toml",
+	".one_piece/",
+	"__pycache__/",
+	"*.pyc",
+	"*.pyo",
+	".pytest_cache/",
+	".mypy_cache/",
+	".ruff_cache/",
+	".DS_Store",
+	"*.egg-info/",
+];
+
 function git(cwd: string, args: string[]): string {
 	return execFileSync("git", args, {
 		cwd,
@@ -100,20 +115,7 @@ export class GitWorktreeManager implements WorktreeManager {
 			// Branch did not exist yet.
 		}
 		git(this.repoRoot, ["worktree", "add", "-b", branch, worktreePath, baseRef]);
-		this.writeGitExclude(worktreePath, [
-			".swarm/",
-			".gemini/settings.json",
-			".grok/config.toml",
-			".one_piece/",
-			"__pycache__/",
-			"*.pyc",
-			"*.pyo",
-			".pytest_cache/",
-			".mypy_cache/",
-			".ruff_cache/",
-			".DS_Store",
-			"*.egg-info/",
-		]);
+		this.writeGitExclude(worktreePath, WORKTREE_EXCLUDE_PATTERNS);
 		return { path: worktreePath, branch, baseSha: baseRef };
 	}
 
@@ -138,9 +140,20 @@ export class GitWorktreeManager implements WorktreeManager {
 
 	commitWip(worktreePath: string, message: string): string | undefined {
 		try {
+			this.writeGitExclude(worktreePath, WORKTREE_EXCLUDE_PATTERNS);
 			const status = git(worktreePath, ["status", "--porcelain"]);
 			if (!status) return undefined;
 			git(worktreePath, ["add", "-A"]);
+			// Unstage any cached bytecode/harness artifacts if they were somehow tracked before exclude ran.
+			for (const junk of [".swarm", ".one_piece", ".gemini/settings.json", ".grok/config.toml"]) {
+				try {
+					git(worktreePath, ["reset", "-q", "HEAD", "--", junk]);
+				} catch {
+					// Not staged.
+				}
+			}
+			const staged = git(worktreePath, ["diff", "--cached", "--name-only"]);
+			if (!staged) return undefined;
 			git(worktreePath, [
 				"-c", "user.name=one-piece",
 				"-c", "user.email=one-piece@local",
@@ -157,6 +170,26 @@ export class GitWorktreeManager implements WorktreeManager {
 			return git(worktreePath, ["rev-parse", "HEAD"]);
 		} catch {
 			return undefined;
+		}
+	}
+
+	treeSha(worktreePath: string): string | undefined {
+		try {
+			return git(worktreePath, ["rev-parse", "HEAD^{tree}"]);
+		} catch {
+			return undefined;
+		}
+	}
+
+	hasEditsSince(worktreePath: string, baseRef: string): boolean {
+		try {
+			const baseCommit = git(worktreePath, ["rev-parse", `${baseRef}^{commit}`]);
+			const headCommit = git(worktreePath, ["rev-parse", "HEAD"]);
+			if (headCommit !== baseCommit) return true;
+			return Boolean(git(worktreePath, ["status", "--porcelain"]));
+		} catch {
+			const headCommit = this.headSha(worktreePath);
+			return Boolean(headCommit && headCommit !== baseRef);
 		}
 	}
 

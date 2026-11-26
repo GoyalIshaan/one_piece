@@ -209,6 +209,15 @@ export const siloJoinMicroTask: EvalTask = {
 				].join("\n");
 			});
 
+			const seats = privateShards.map((shardDir, seatIdx) => ({
+				index: seatIdx,
+				handle: `seat-${seatIdx}`,
+				privateDir: shardDir,
+				outputPath: join("submissions", `seat_${seatIdx}.json`),
+				prompt: seatPrompts[seatIdx]!,
+				soloPrompt: soloSeatPrompts[seatIdx]!,
+			}));
+
 			return {
 				taskId: "silo-join-micro",
 				seed,
@@ -216,6 +225,7 @@ export const siloJoinMicroTask: EvalTask = {
 				options: { mode },
 				workspaceDir: workDir,
 				hiddenDir,
+				seats,
 				privateShards,
 				seatPrompts,
 				soloSeatPrompts,

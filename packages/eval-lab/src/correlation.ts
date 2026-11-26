@@ -285,10 +285,13 @@ export function analyzeProxyToTargetCorrelation(
 		armKeyFn?: (card: Scorecard) => string;
 		/** Exclude runs with `hasHarnessFault === true` (default true). */
 		excludeFaulted?: boolean;
+		/** Throw an error if pooled runs mix distinct harnessGitSha or dirtyDiffSha manifests (default false). */
+		strictManifest?: boolean;
 	},
 ): ProxyToTargetReport {
 	const armKeyFn = options.armKeyFn ?? defaultArmKey;
 	const excludeFaulted = options.excludeFaulted ?? true;
+	const strictManifest = options.strictManifest ?? false;
 	const proxySet = new Set(options.proxyTaskIds);
 	const targetSet = new Set(options.targetTaskIds);
 
@@ -324,8 +327,16 @@ export function analyzeProxyToTargetCorrelation(
 			const meanTokens = avg((r) => r.tokens.total);
 			const efficiency = meanScore / Math.max(0.1, meanTokens / 100_000);
 			const gitShas = [...new Set(rows.map((r) => r.reproducibility?.harnessGitSha).filter((s): s is string => Boolean(s)))].sort();
+			const dirtyShas = [...new Set(rows.map((r) => r.reproducibility?.dirtyDiffSha).filter((s): s is string => Boolean(s)))].sort();
 			if (gitShas.length > 1) {
-				integrityWarnings.push(`Arm "${arm}" on "${taskId}" pools ${gitShas.length} distinct harness commits (${gitShas.map((s) => s.slice(0, 7)).join(", ")})`);
+				const msg = `Arm "${arm}" on "${taskId}" pools ${gitShas.length} distinct harness commits (${gitShas.map((s) => s.slice(0, 7)).join(", ")})`;
+				integrityWarnings.push(msg);
+				if (strictManifest) throw new Error(`Strict manifest violation: ${msg}`);
+			}
+			if (dirtyShas.length > 1) {
+				const msg = `Arm "${arm}" on "${taskId}" pools ${dirtyShas.length} distinct dirty-tree digests`;
+				integrityWarnings.push(msg);
+				if (strictManifest) throw new Error(`Strict manifest violation: ${msg}`);
 			}
 			armTaskTable[arm]![taskId] = {
 				runs: rows.length,

@@ -3,6 +3,7 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EvalTask, GradeReport, PreparedTask } from "../../contracts.ts";
+import { withCleanOverlay } from "../../overlay.ts";
 import { sha256Dir } from "../../sandbox.ts";
 
 interface SpecForgeConfig {
@@ -889,13 +890,8 @@ export const adversarialSpecForgeTask: EvalTask = {
 
 	async publicCheck({ artifactDir, seed, options }): Promise<{ passed: boolean; score: number; details: string }> {
 		const cfg = configFor(seed, options);
-		const copy = mkdtempSync(join(tmpdir(), "eval-lab-specforge-pub-"));
-		try {
-			cpSync(artifactDir, copy, { recursive: true, filter: (src) => !src.includes("/.git") });
-			// Anti-tamper: always restore authoritative public smoke test file before running checks.
-			const authStarter = starterFiles(cfg);
-			writeFiles(copy, { "tests/test_public.py": authStarter["tests/test_public.py"]! });
-			const pubProbe = `import json, sys, unittest
+		const authStarter = starterFiles(cfg);
+		const pubProbe = `import json, sys, unittest
 sys.path.insert(0, sys.argv[1])
 from query_engine import QueryEngine
 from query_engine.logic import eval_pred
@@ -999,24 +995,37 @@ print(json.dumps({
     "details": "public module contract checks passed (6/6)" if passed else f"public checks {passed_n}/{len(checks)}: " + "; ".join(fails[:4]),
 }))
 `;
-			writeFileSync(join(copy, "__pub_check.py"), pubProbe);
-			const out = execFileSync("python3", ["-B", join(copy, "__pub_check.py"), copy], {
-				cwd: copy,
-				encoding: "utf8",
-				timeout: 12_000,
-				stdio: ["ignore", "pipe", "pipe"],
+			return await withCleanOverlay({
+				artifactDir,
+				deliverablePaths: ["query_engine"],
+				immutableFiles: {
+					"tests/test_public.py": authStarter["tests/test_public.py"]!,
+					"__pub_check.py": pubProbe,
+				},
+				prefix: "eval-lab-specforge-pub-",
+				run: async (overlayDir) => {
+					try {
+						const out = execFileSync("python3", ["-B", join(overlayDir, "__pub_check.py"), overlayDir], {
+							cwd: overlayDir,
+							encoding: "utf8",
+							timeout: 12_000,
+							stdio: ["ignore", "pipe", "pipe"],
+						});
+						const parsed = JSON.parse(out.trim().split("\n").at(-1) ?? "{}") as {
+							passed?: boolean;
+							score?: number;
+							details?: string;
+						};
+						return {
+							passed: Boolean(parsed.passed),
+							score: Number(parsed.score) || 0,
+							details: String(parsed.details ?? "public checks completed"),
+						};
+					} catch (error) {
+						return { passed: false, score: 0, details: `public tests failed: ${String(error).slice(0, 260)}` };
+					}
+				},
 			});
-			const parsed = JSON.parse(out.trim().split("\n").at(-1) ?? "{}") as { passed?: boolean; score?: number; details?: string };
-			return {
-				passed: Boolean(parsed.passed),
-				score: Number(parsed.score) || 0,
-				details: String(parsed.details ?? "public checks completed"),
-			};
-		} catch (error) {
-			return { passed: false, score: 0, details: `public tests failed: ${String(error).slice(0, 260)}` };
-		} finally {
-			rmSync(copy, { recursive: true, force: true });
-		}
 	},
 
 	async grade({ artifactDir, hiddenDir }): Promise<GradeReport> {

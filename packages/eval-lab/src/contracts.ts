@@ -35,6 +35,19 @@ export interface RunBudget {
 	cpuSeconds?: number;
 }
 
+export interface SeatSpec {
+	readonly index: number;
+	readonly handle: string;
+	/** Private read-only shard directory exclusively readable by this seat. */
+	readonly privateDir: string;
+	/** Relative deliverable path inside the workspace produced by this seat (e.g. `submissions/seat_0.json`). */
+	readonly outputPath: string;
+	/** Multi-peer coordinated prompt for this seat. */
+	readonly prompt: string;
+	/** Single-seat / no-communication prompt for solo or silent_bon runs. */
+	readonly soloPrompt: string;
+}
+
 export interface PreparedTask {
 	taskId: string;
 	seed: number;
@@ -42,11 +55,13 @@ export interface PreparedTask {
 	options: Record<string, string>;
 	workspaceDir: string;
 	hiddenDir: string;
-	/** Per-seat private shard directories for asymmetric-information tasks. */
+	/** First-class per-seat specification for privately sharded / asymmetric-information tasks. */
+	seats?: readonly SeatSpec[];
+	/** Per-seat private shard directories for asymmetric-information tasks (derived alias of `seats`). */
 	privateShards?: readonly string[];
-	/** Optional task-specific per-seat prompt instructions for multi-peer runs (keeps task wording out of adapters). */
+	/** Optional task-specific per-seat prompt instructions for multi-peer runs (derived alias of `seats`). */
 	seatPrompts?: readonly string[];
-	/** Optional task-specific prompt instructions for a single-seat / solo run on a sharded task. */
+	/** Optional task-specific prompt instructions for a single-seat / solo run on a sharded task (derived alias of `seats`). */
 	soloSeatPrompts?: readonly string[];
 	goal: string;
 	rubric?: string;
@@ -107,6 +122,20 @@ export interface EvalTask {
 	}): Promise<GradeReport>;
 
 	/**
+	 * Optional deterministic seat assembler for privately sharded tasks (used by `silent_bon`
+	 * and generic sharded runners instead of hardcoding file paths in the runner).
+	 */
+	assembleSeats?(ctx: {
+		baseWorkspaceDir: string;
+		seats: readonly SeatSpec[];
+		seatArtifactDirs: readonly (string | undefined)[];
+		outDir: string;
+		seed: number;
+		n: number;
+		options: Record<string, string>;
+	}): Promise<{ assembledCount: number }>;
+
+	/**
 	 * Produce a known-good reference artifact in `outDir` using `hiddenDir`.
 	 * Used exclusively by the zero-cost calibration gate (never exposed to agents).
 	 */
@@ -160,6 +189,8 @@ export interface HarnessRunSpec {
 	goal: string;
 	rubric?: string;
 	workspaceDir: string;
+	/** First-class per-seat specifications for privately sharded tasks. */
+	seats?: readonly SeatSpec[];
 	privateShards?: readonly string[];
 	seatPrompts?: readonly string[];
 	soloSeatPrompts?: readonly string[];
@@ -240,6 +271,10 @@ export interface TokenBreakdown {
 	cacheWrite: number;
 	cacheHitRate?: number;
 	reasoning: number;
+	/** Explicit tri-state reporting indicators distinguishing "reported 0" from "provider omitted field". */
+	cacheReadReported?: boolean;
+	cacheWriteReported?: boolean;
+	reasoningReported?: boolean;
 	peakInputPerCall: number;
 	estimatedUsd: number;
 	byRole: Record<AgentRoleCategory, number>;

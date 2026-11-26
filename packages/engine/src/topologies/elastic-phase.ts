@@ -1,4 +1,5 @@
 import { type JsonSchema, type SwarmOsApi, type TopologyOutcome, type TopologyPlugin } from "@one-piece/core";
+import { IntegrationPipeline } from "../integration.ts";
 import type { SubstrateSeatConfig } from "./substrate-peers.ts";
 
 export interface ElasticPhaseOptions {
@@ -117,7 +118,7 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 	return {
 		name: "elastic-phase",
 		description: "Dynamic N(t) phase-switching: Scout (N=1) -> Wide Parallel Explore (N=K) -> Dream & Reset -> Narrow Verified Integration & Semantic Repair (N=1).",
-		async run(os: SwarmOsApi, { goal, rubric, signal }): Promise<TopologyOutcome> {
+		async run(os: SwarmOsApi, { goal, rubric, signal, closeoutSignal }): Promise<TopologyOutcome> {
 			const hasSeatConfigs = Boolean(opts.seatConfigs && opts.seatConfigs.length > 0);
 			let lanes: ExploreLane[] = [];
 
@@ -319,13 +320,12 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 			}
 
 			// --- Phase 4: Narrow Single-Writer Trunk Assembly, Conflict Resolution & Semantic Repair (N=1) ---
-			// Mechanical Git assembly of committed lane branches ALWAYS runs (zero LLM tokens, <50ms)
-			// even if the wall cutoff fired right as lanes finished committing!
+			// Delegates to shared OS IntegrationPipeline using closeoutSignal so mechanical Git assembly
+			// ALWAYS runs even if workSignal aborted late exploration turns.
 			let mergedCount = 0;
 			let conflictCount = 0;
 			let resolvedConflicts = 0;
 			let trunkAccepted = false;
-			let lastTrunkSha = os.worktrees.baseSha;
 
 			if (peerBranches.length > 0) {
 				os.bus.emit(os.runId, "phase.changed", {
@@ -334,104 +334,41 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 					reason: `Assembling ${peerBranches.length} committed branches onto isolated trunk`,
 				});
 
-				const mergedLaneIndices = new Set<number>();
-				const ordered = [...peerBranches].sort((a, b) => b.accepted - a.accepted || b.bestScore - a.bestScore);
-				for (const cand of ordered) {
-					if (!cand.branch) continue;
-					const merged = os.worktrees.mergeIntoTrunk(cand.branch, {
-						message: `elastic: merge ${cand.handle} (${cand.branch})`,
-					});
-					if (merged.ok) {
-						lastTrunkSha = merged.commitSha;
-						mergedCount += 1;
-						mergedLaneIndices.add(cand.laneIdx);
-						continue;
-					}
-					conflictCount += 1;
-					os.bus.emit(os.runId, "peer.conflict_detected", {
-						peerHandle: cand.handle,
-						branch: cand.branch,
-						conflictFiles: merged.conflictFiles,
-					}, "elastic-trunk");
+				const integration = os.integration ?? new IntegrationPipeline(os);
+				const assembled = await integration.assembleBranches({
+					branches: peerBranches
+						.filter((b): b is typeof b & { branch: string } => Boolean(b.branch))
+						.map((b) => ({
+							handle: b.handle,
+							branch: b.branch,
+							agentId: b.agentId,
+							driverId: b.driverId,
+							laneIdx: b.laneIdx,
+							bestScore: b.bestScore,
+							accepted: b.accepted,
+							summary: b.summary,
+						})),
+					goal,
+					actorName: "elastic-trunk",
+					cachePrefix: `${os.runId}:elastic`,
+					totalExpectedBranches: peerBranches.length,
+					enableConflictResolution: true,
+					// Completion/repair pass below handles BOTH semantic failure AND missing planned lanes in one pass.
+					enableSemanticRepair: false,
+					signal,
+					closeoutSignal: closeoutSignal ?? os.closeoutSignal,
+				});
 
-					if (merged.conflictFiles.length > 0 && !signal.aborted) {
-						const preview = os.worktrees.mergePreviewDiff(cand.branch);
-						const resolver = await os.spawnWorker({
-							role: "integrator",
-							handle: "elastic-conflict-resolver",
-							baseRef: lastTrunkSha,
-							canSpawn: false,
-							cacheKeyPrefix: `${os.runId}:elastic-resolver`,
-							toolScope: {
-								board: "read",
-								artifacts: true,
-								findings: false,
-								tasks: false,
-								nominate: false,
-								scheduler: "never",
-								sidekick: false,
-								codeMode: false,
-							},
-							systemPrompt: [
-								"You are an impartial merge-conflict integrator in the Narrow Integration phase.",
-								"Reconcile both trunk and incoming changes cleanly without losing either lane's functionality or violating cross-module contracts.",
-							].join("\n"),
-						});
-						try {
-							const resolvePrompt = [
-								`Goal: ${goal}`,
-								`Resolve merge conflict for ${cand.handle} (${cand.branch}) in: ${merged.conflictFiles.join(", ")}`,
-								`## Current trunk diff\n\`\`\`diff\n${preview.trunkDiff.slice(0, 8000)}\n\`\`\``,
-								`## Incoming ${cand.handle} diff\n\`\`\`diff\n${preview.branchDiff.slice(0, 8000)}\n\`\`\``,
-								"Reconcile cleanly, verify tests, and exit.",
-							].join("\n\n");
-							await resolver.runTurn(resolvePrompt, { signal });
-							const wipSha = os.worktrees.commitWip(resolver.workspace, `elastic-resolve(${cand.handle})`);
-							const headAfter = os.worktrees.headSha(resolver.workspace);
-							if (resolver.branch && (wipSha || (headAfter && headAfter !== lastTrunkSha))) {
-								const resMerge = os.worktrees.mergeIntoTrunk(resolver.branch, {
-									message: `elastic: resolved ${cand.handle} conflict`,
-								});
-								if (resMerge.ok) {
-									lastTrunkSha = resMerge.commitSha;
-									mergedCount += 1;
-									mergedLaneIndices.add(cand.laneIdx);
-									resolvedConflicts += 1;
-									os.bus.emit(os.runId, "peer.conflict_resolved", {
-										peerHandle: cand.handle,
-										branch: cand.branch,
-										conflictFiles: merged.conflictFiles,
-										commitSha: resMerge.commitSha,
-									}, resolver.agent.id);
-								}
-							}
-						} finally {
-							await resolver.close();
-						}
-					}
-				}
+				mergedCount = assembled.mergedCount;
+				conflictCount = assembled.conflictCount;
+				resolvedConflicts = assembled.resolvedConflicts;
+				let trunkFinding = assembled.trunkFinding;
 
-				if (mergedCount > 0) {
-					// Use a fresh closeout signal for mechanical trunk verification so assembled work is never dropped on wall abort!
-					const verifySig = signal.aborted ? new AbortController().signal : signal;
-					let trunkFinding = await os.trust.submitFinding(
-						{
-							agentId: "elastic-trunk",
-							workspace: os.worktrees.trunkPath,
-							claim: `Elastic integrated trunk (${mergedCount}/${peerBranches.length} lanes) for: ${goal.slice(0, 100)}`,
-							summary: `Assembled ${mergedCount} lane branches onto trunk (conflicts=${conflictCount}, resolved=${resolvedConflicts}).`,
-							level: "empirical",
-						},
-						verifySig,
-					);
-
-					// Phase-4 Narrow Single-Writer Integration & Semantic Repair:
-					// Trigger if verifier rejects assembled trunk OR if planned parallel lanes failed to land
-					// (e.g. straggler workers left missing lanes even when lightweight public smoke tests passed!).
+				if (trunkFinding) {
 					const missingLanes = !hasSeatConfigs
 						? lanes
 							.map((lane, idx) => ({ lane, idx }))
-							.filter(({ idx }) => !mergedLaneIndices.has(idx))
+							.filter(({ idx }) => !assembled.mergedLaneIndices.has(idx))
 						: [];
 					const needsRepairOrCompletion =
 						trunkFinding.status !== "accepted" || missingLanes.length > 0;
@@ -441,89 +378,24 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 							trunkFinding.status !== "accepted"
 								? (trunkFinding.rounds.at(-1)?.message ?? "Executable verifier rejected assembled trunk")
 								: `${missingLanes.length}/${lanes.length} planned lanes did not land on trunk: ${missingLanes.map((m) => `lane-${m.idx + 1} (${m.lane.title})`).join(", ")}`;
-						if (enableDreaming) await os.consolidateFieldGuide?.();
-						const repairer = await os.spawnWorker({
-							role: "integrator",
+						const completion = await integration.runCompletionPass({
+							goal,
+							actorName: "elastic-trunk",
 							handle: "elastic-integrator",
-							baseRef: lastTrunkSha,
-							canSpawn: false,
-							cacheKeyPrefix: `${os.runId}:elastic-repair`,
-							toolScope: {
-								board: "read",
-								artifacts: true,
-								findings: false,
-								tasks: false,
-								nominate: false,
-								scheduler: "never",
-								sidekick: false,
-								codeMode: false,
-							},
-							systemPrompt: [
-								"You are the single-writer Integrator in Phase 4 (Narrow Integration & Semantic Repair).",
-								"Committed exploration lanes have been merged onto your workspace. Complete any missing/unmerged lanes and fix any cross-module semantic interference without reverting landed lane features, verify tests, and exit.",
-							].join("\n"),
+							cachePrefix: `${os.runId}:elastic-repair`,
+							failReason,
+							missingLaneSummaries: missingLanes.map((m) => `- lane-${m.idx + 1}: ${m.lane.title} — ${m.lane.description}`),
+							previousFinding: trunkFinding,
+							baseSha: assembled.bestGreenSha,
+							consolidateBefore: enableDreaming,
+							signal,
+							closeoutSignal: closeoutSignal ?? os.closeoutSignal,
 						});
-						let repaired = false;
-						let repairedSha: string | undefined;
-						try {
-							const missingBlock = missingLanes.length
-								? `Unmerged/missing planned lanes that STILL need implementation:\n${missingLanes.map((m) => `- lane-${m.idx + 1}: ${m.lane.title} — ${m.lane.description}`).join("\n")}`
-								: "";
-							const repairPrompt = [
-								`Goal: ${goal}`,
-								rubric ? `Rubric: ${rubric}` : "",
-								trunkFinding.status !== "accepted" ? `Assembled trunk verifier failure:\n${failReason}` : "",
-								missingBlock,
-								`Merged lanes:\n${peerBranches.map((b) => `- ${b.handle}: ${b.summary.slice(0, 180)}`).join("\n")}`,
-								"Complete all remaining requirements cleanly, resolve any cross-module semantic bugs, run tests, and leave the workspace ready to commit.",
-							].filter(Boolean).join("\n\n");
-							const repRes = await repairer.runTurn(repairPrompt, { signal });
-							const repWip = os.worktrees.commitWip(repairer.workspace, "elastic: semantic integration repair");
-							const repHead = os.worktrees.headSha(repairer.workspace);
-							const repMadeChanges = Boolean(repWip) || (Boolean(repHead) && repHead !== lastTrunkSha);
-							if ((repRes.status === "completed" || repRes.status === "interrupted") && repairer.branch && repMadeChanges) {
-								const prevSha = lastTrunkSha;
-								const prevAccepted = trunkFinding.status === "accepted";
-								const repMerge = os.worktrees.mergeIntoTrunk(repairer.branch, {
-									message: "elastic: semantic integration repair",
-								});
-								if (repMerge.ok) {
-									const repVerifySig = signal.aborted ? new AbortController().signal : signal;
-									// When `prevAccepted` is true, submit a FRESH candidate finding rather than mutating
-									// `trunkFinding.id` in place so a failed speculative completion + rollback NEVER
-									// corrupts the previously accepted finding's status in SQLite!
-									const nextFinding = await os.trust.submitFinding(
-										{
-											agentId: repairer.agent.id,
-											driverId: repairer.agent.driverId,
-											...(prevAccepted ? {} : { findingId: trunkFinding.id }),
-											workspace: os.worktrees.trunkPath,
-											claim: `Elastic repaired integrated trunk (${repMerge.commitSha.slice(0, 8)})`,
-											summary: `Phase-4 narrow integration completed missing lanes / resolved trunk verifier failure cleanly.`,
-											level: "empirical",
-										},
-										repVerifySig,
-									);
-									if (nextFinding.status === "accepted") {
-										trunkFinding = nextFinding;
-										repaired = true;
-										repairedSha = repMerge.commitSha;
-										lastTrunkSha = repMerge.commitSha;
-									} else if (prevAccepted) {
-										// Monotonic guard: roll back trunk while keeping the original accepted `trunkFinding` intact in store!
-										os.worktrees.resetTrunk?.(prevSha);
-									} else {
-										trunkFinding = nextFinding;
-									}
-								}
-							}
-						} finally {
-							await repairer.close();
-						}
+						if (completion.finding) trunkFinding = completion.finding;
 						os.bus.emit(os.runId, "peer.trunk_repaired", {
 							reason: failReason.slice(0, 300),
-							repaired,
-							commitSha: repairedSha,
+							repaired: completion.accepted && completion.improved,
+							commitSha: completion.improved ? completion.bestGreenSha : undefined,
 						}, "elastic-trunk");
 					}
 

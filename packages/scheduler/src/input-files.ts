@@ -4,7 +4,7 @@ import { lstat, mkdtemp, open, realpath, rename, rm } from "node:fs/promises";
 import { createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import { basename, isAbsolute, relative, resolve, sep, join } from "node:path";
-import { isSandboxReadBlocked, newId } from "@one-piece/core";
+import { isPathBlocked, newId } from "@one-piece/core";
 
 function relativeFile(root: string, path: string): string {
 	const full = resolve(root, path);
@@ -14,18 +14,18 @@ function relativeFile(root: string, path: string): string {
 	return full;
 }
 
-function verifyPath(path: string, canonical: string): void {
-	if (canonical !== path || isSandboxReadBlocked(canonical)) throw new Error("Input must be a regular file inside the source workspace");
+function verifyPath(path: string, canonical: string, deniedReadPaths?: readonly string[]): void {
+	if (canonical !== path || isPathBlocked(canonical, deniedReadPaths)) throw new Error("Input must be a regular file inside the source workspace");
 }
 
 function missing(error: unknown): boolean {
 	return (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
-export function digestInputSync(root: string, path: string): string {
+export function digestInputSync(root: string, path: string, deniedReadPaths?: readonly string[]): string {
 	const full = relativeFile(root, path);
 	try {
-		verifyPath(full, realpathSync(full));
+		verifyPath(full, realpathSync(full), deniedReadPaths);
 	} catch (error) {
 		if (missing(error)) return "missing";
 		throw error;
@@ -40,17 +40,17 @@ export function digestInputSync(root: string, path: string): string {
 		for (let bytes = readSync(fd, buffer); bytes > 0; bytes = readSync(fd, buffer)) hash.update(buffer.subarray(0, bytes));
 		const after = fstatSync(fd, { bigint: true });
 		const current = lstatSync(full, { bigint: true });
-		verifyPath(full, realpathSync(full));
+		verifyPath(full, realpathSync(full), deniedReadPaths);
 		if (after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs || after.ino !== current.ino || after.dev !== current.dev)
 			throw new Error("Input changed while being hashed");
 		return hash.digest("hex");
 	} finally { closeSync(fd); }
 }
 
-export async function digestInput(root: string, path: string, signal?: AbortSignal): Promise<string> {
+export async function digestInput(root: string, path: string, signal?: AbortSignal, deniedReadPaths?: readonly string[]): Promise<string> {
 	const full = relativeFile(root, path);
 	try {
-		verifyPath(full, await realpath(full));
+		verifyPath(full, await realpath(full), deniedReadPaths);
 	} catch (error) {
 		if (missing(error)) return "missing";
 		throw error;
@@ -70,7 +70,7 @@ export async function digestInput(root: string, path: string, signal?: AbortSign
 		}
 		const after = await file.stat({ bigint: true });
 		const current = await lstat(full, { bigint: true });
-		verifyPath(full, await realpath(full));
+		verifyPath(full, await realpath(full), deniedReadPaths);
 		if (after.mtimeNs !== before.mtimeNs || after.ctimeNs !== before.ctimeNs || after.ino !== current.ino || after.dev !== current.dev)
 			throw new Error("Input changed while being hashed");
 		return hash.digest("hex");

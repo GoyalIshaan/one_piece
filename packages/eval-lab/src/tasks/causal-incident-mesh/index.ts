@@ -284,6 +284,15 @@ export const causalIncidentMeshTask: EvalTask = {
 			].join("\n");
 		});
 
+		const seats = privateShards.map((shardDir, seatIdx) => ({
+			index: seatIdx,
+			handle: `seat-${seatIdx}`,
+			privateDir: shardDir,
+			outputPath: join("submissions", `seat_${seatIdx}.json`),
+			prompt: seatPrompts[seatIdx]!,
+			soloPrompt: soloSeatPrompts[seatIdx]!,
+		}));
+
 		return {
 			taskId: "causal-incident-mesh",
 			seed,
@@ -291,6 +300,7 @@ export const causalIncidentMeshTask: EvalTask = {
 			options,
 			workspaceDir: workDir,
 			hiddenDir,
+			seats,
 			privateShards,
 			seatPrompts,
 			soloSeatPrompts,

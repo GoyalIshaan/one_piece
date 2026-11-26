@@ -18,6 +18,7 @@ import {
 	spearmanRankCorrelation,
 } from "../src/correlation.ts";
 import { runFaultInjectionSuite } from "../src/faults.ts";
+import { withCleanOverlay } from "../src/overlay.ts";
 import { runCampaign } from "../src/runner.ts";
 import { adversarialSpecForgeTask } from "../src/tasks/adversarial-spec-forge/index.ts";
 import { causalIncidentMeshTask } from "../src/tasks/causal-incident-mesh/index.ts";
@@ -381,9 +382,43 @@ describe("Cross-Benchmark Rank Correlation Engine (Proxy -> Long-Horizon Transfe
 
 			const meshWork = join(root, "cls-mesh");
 			const meshPrep = await causalIncidentMeshTask.prepare({ seed: 1, n: 4, options: {}, workDir: meshWork, hiddenDir: join(root, "cls-mesh-h") });
+			expect(meshPrep.seats?.length).toBe(4);
+			expect(meshPrep.seats?.[2]?.outputPath).toBe(join("submissions", "seat_2.json"));
 			const meshCls = classifyAdaptiveRegime({ workspaceDir: meshWork, goal: meshPrep.goal, rubric: meshPrep.rubric, hasSeatConfigs: true });
 			expect(meshCls.regime).toBe("sharded-consensus");
 			expect(meshCls.delegate).toBe("elastic-phase");
+
+			// 4. Out-of-tree overlay verifier helper never mutates artifactDir and overwrites tampered tests
+			const artDir = join(root, "overlay-art");
+			mkdirSync(join(artDir, "tests"), { recursive: true });
+			writeFileSync(join(artDir, "impl.txt"), "agent-code");
+			writeFileSync(join(artDir, "tests", "test_public.py"), "TAMPERED");
+			const overlayCheck = await withCleanOverlay({
+				artifactDir: artDir,
+				immutableFiles: { "tests/test_public.py": "AUTHORITATIVE" },
+				async run(dir) {
+					const { readFileSync } = await import("node:fs");
+					return {
+						impl: readFileSync(join(dir, "impl.txt"), "utf8"),
+						test: readFileSync(join(dir, "tests", "test_public.py"), "utf8"),
+					};
+				},
+			});
+			expect(overlayCheck.impl).toBe("agent-code");
+			expect(overlayCheck.test).toBe("AUTHORITATIVE");
+
+			// 5. strictManifest throws when correlation pools scorecards from distinct git commits
+			const mixedA = makeSyntheticCard({ taskId: "p1", arm: "a1", topology: "single", n: 1, seed: 1, score: 0.5, passed: false, tokens: 1000 });
+			const mixedB = makeSyntheticCard({ taskId: "p1", arm: "a1", topology: "single", n: 1, seed: 2, score: 1.0, passed: true, tokens: 1000 });
+			mixedA.reproducibility.harnessGitSha = "1111111";
+			mixedB.reproducibility.harnessGitSha = "2222222";
+			expect(() =>
+				analyzeProxyToTargetCorrelation([mixedA, mixedB], {
+					proxyTaskIds: ["p1"],
+					targetTaskIds: ["t1"],
+					strictManifest: true,
+				}),
+			).toThrow(/Strict manifest violation/);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}

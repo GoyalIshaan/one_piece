@@ -3,6 +3,7 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EvalTask, GradeReport, PreparedTask } from "../../contracts.ts";
+import { withCleanOverlay } from "../../overlay.ts";
 import { sha256Dir } from "../../sandbox.ts";
 
 interface VliwConfig {
@@ -567,27 +568,29 @@ if __name__ == "__main__":
 
 	async publicCheck({ artifactDir, seed }): Promise<{ passed: boolean; score: number; details: string }> {
 		const cfg = configFor(seed);
-		const copy = mkdtempSync(join(tmpdir(), "eval-lab-vliw-pub-"));
-		try {
-			cpSync(artifactDir, copy, { recursive: true, filter: (src) => !src.includes("/.git") });
-			// Always use authoritative simulator & baseline so an agent cannot tamper with vliw_sim.py!
-			writeFileSync(join(copy, "vliw_sim.py"), VLIW_SIM_PY);
-			writeFileSync(join(copy, "starter_baseline.py"), STARTER_KERNEL_PY);
-			writeFileSync(join(copy, "__pub_check.py"), makeHarnessScript(cfg, false));
-			const out = execFileSync("python3", ["-B", join(copy, "__pub_check.py"), copy], {
-				cwd: copy,
-				encoding: "utf8",
-				timeout: 12_000,
-				stdio: ["ignore", "pipe", "pipe"],
-			});
-			const parsed = JSON.parse(out.trim().split("\n").at(-1) ?? "{}") as { score: number; details: string };
-			// Public check passes any bit-exact kernel and reports speedup score so evolutionary archive can ratchet!
-			return { passed: true, score: Number(parsed.score) || 1.0, details: parsed.details };
-		} catch (error) {
-			return { passed: false, score: 0, details: `VLIW check failed: ${String(error).slice(0, 260)}` };
-		} finally {
-			rmSync(copy, { recursive: true, force: true });
-		}
+		return withCleanOverlay({
+			artifactDir,
+			prefix: "eval-lab-vliw-pub-",
+			immutableFiles: {
+				"vliw_sim.py": VLIW_SIM_PY,
+				"starter_baseline.py": STARTER_KERNEL_PY,
+				"__pub_check.py": makeHarnessScript(cfg, false),
+			},
+			async run(overlayDir) {
+				try {
+					const out = execFileSync("python3", ["-B", join(overlayDir, "__pub_check.py"), overlayDir], {
+						cwd: overlayDir,
+						encoding: "utf8",
+						timeout: 12_000,
+						stdio: ["ignore", "pipe", "pipe"],
+					});
+					const parsed = JSON.parse(out.trim().split("\n").at(-1) ?? "{}") as { score: number; details: string };
+					return { passed: true, score: Number(parsed.score) || 1.0, details: parsed.details };
+				} catch (error) {
+					return { passed: false, score: 0, details: `VLIW check failed: ${String(error).slice(0, 260)}` };
+				}
+			},
+		});
 	},
 
 	async grade({ artifactDir, hiddenDir }): Promise<GradeReport> {

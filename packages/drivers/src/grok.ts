@@ -15,6 +15,8 @@ import {
 } from "@one-piece/core";
 import { buildCliEnv, classifyQuotaError, probeCliBinary } from "./classify.ts";
 import { prepareCleanGrokHome } from "./cli-home.ts";
+import { normalizeStrictJsonSchema } from "./schema.ts";
+import { bindTurnCancellation, killProcessTreeNow } from "./supervisor.ts";
 
 function writeGrokMcpConfig(spec: WorkerSpawnSpec): void {
 	if (!spec.mcp) return;
@@ -30,19 +32,6 @@ function writeGrokMcpConfig(spec: WorkerSpawnSpec): void {
 		``,
 	].join("\n");
 	writeFileSync(join(dir, "config.toml"), toml, "utf8");
-}
-
-function killTree(child: ChildProcess): void {
-	try {
-		if (child.pid) process.kill(-child.pid, "SIGKILL");
-		else child.kill("SIGKILL");
-	} catch {
-		try {
-			child.kill("SIGKILL");
-		} catch {
-			// Already exited.
-		}
-	}
 }
 
 /**
@@ -125,7 +114,7 @@ export class GrokCliDriver implements WorkerDriver {
 					"--no-memory",
 					...(spec.readOnly ? ["--permission-mode", "plan"] : ["--always-approve"]),
 					...(opts.outputSchema
-						? ["--json-schema", JSON.stringify(opts.outputSchema)]
+						? ["--json-schema", JSON.stringify(normalizeStrictJsonSchema(opts.outputSchema))]
 						: ["--output-format", "streaming-json"]),
 					...(model ? ["-m", model] : []),
 					...(spec.maxTurns ? ["--max-turns", String(spec.maxTurns)] : []),
@@ -150,14 +139,9 @@ export class GrokCliDriver implements WorkerDriver {
 					let streamError = "";
 					let resolvedModel: string | undefined = model;
 					let usage: WorkerTurnResult["usage"] = { durationMs: 0 };
-					let timer: ReturnType<typeof setTimeout> | undefined;
+					const cancel = bindTurnCancellation(child, { signal: opts.signal, timeoutMs: opts.timeoutMs });
 
-					const onAbort = () => killTree(child);
-					opts.signal?.addEventListener("abort", onAbort, { once: true });
-					if (opts.timeoutMs) timer = setTimeout(onAbort, opts.timeoutMs);
-
-					const toolNameByCallId = new Map<string, string>();
-		const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity });
+					const rl = createInterface({ input: child.stdout!, crlfDelay: Infinity });
 					rl.on("line", (line) => {
 						const trimmed = line.trim();
 						if (!trimmed) return;
@@ -231,15 +215,14 @@ export class GrokCliDriver implements WorkerDriver {
 					child.on("close", (code) => {
 						resetToIdle();
 						rl.close();
-						if (timer) clearTimeout(timer);
-						opts.signal?.removeEventListener("abort", onAbort);
+						cancel.dispose();
 
 						const durationMs = Date.now() - startedAt;
 						usage = { ...usage, durationMs };
 						const combinedErr = [streamError, stderr, rawNonJson].filter(Boolean).join("\n").trim();
 						const finalText = textChunks.join("").trim() || (code === 0 ? rawNonJson.trim() : "");
 
-						if (opts.signal?.aborted) {
+						if (opts.signal?.aborted || cancel.wasCancelled()) {
 							resolve({ status: "interrupted", finalText, sessionId: currentSessionId, model: resolvedModel, usage });
 							return;
 						}
@@ -257,12 +240,12 @@ export class GrokCliDriver implements WorkerDriver {
 				});
 			},
 			async interrupt(): Promise<void> {
-				if (sessionState.kind === "running") killTree(sessionState.child);
+				if (sessionState.kind === "running") killProcessTreeNow(sessionState.child);
 			},
 			async close(): Promise<void> {
 				const prev = sessionState;
 				sessionState = { kind: "closed" };
-				if (prev.kind === "running") killTree(prev.child);
+				if (prev.kind === "running") killProcessTreeNow(prev.child);
 			},
 		};
 	}
@@ -496,7 +479,7 @@ export class GrokAcpDriver implements WorkerDriver {
 			}
 		} catch (error) {
 			rl.close();
-			killTree(child);
+			killProcessTreeNow(child);
 			throw error;
 		}
 
@@ -519,25 +502,18 @@ export class GrokAcpDriver implements WorkerDriver {
 				sessionState = turn;
 				const text = spec.systemPrompt && !sentSystemPrompt ? `${spec.systemPrompt}\n\n${prompt}` : prompt;
 				sentSystemPrompt = true;
-				let timer: ReturnType<typeof setTimeout> | undefined;
-				let killGraceTimer: ReturnType<typeof setTimeout> | undefined;
-				let abortedLocally = false;
-				const onAbort = () => {
-					abortedLocally = true;
-					if (acpSessionId) void sendRpc("session/cancel", { sessionId: acpSessionId }).catch(() => {});
-					if (!killGraceTimer) {
-						killGraceTimer = setTimeout(() => {
-							killTree(child);
-						}, 3_000);
-						killGraceTimer.unref?.();
-					}
-				};
 				if (opts.signal?.aborted) {
 					resetToIdle();
 					return { status: "interrupted", finalText: "", sessionId: acpSessionId, model: resolvedModel, usage: { durationMs: 0 } };
 				}
-				opts.signal?.addEventListener("abort", onAbort, { once: true });
-				if (opts.timeoutMs) timer = setTimeout(onAbort, opts.timeoutMs);
+				const cancel = bindTurnCancellation(child, {
+					signal: opts.signal,
+					timeoutMs: opts.timeoutMs,
+					graceMs: 3_000,
+					onCancel: () => {
+						if (acpSessionId) void sendRpc("session/cancel", { sessionId: acpSessionId }).catch(() => {});
+					},
+				});
 				try {
 					const res = await sendRpc("session/prompt", { sessionId: acpSessionId, prompt: [{ type: "text", text }] });
 					const meta = res?._meta;
@@ -551,10 +527,12 @@ export class GrokAcpDriver implements WorkerDriver {
 							outputTokens: Number(meta?.outputTokens ?? 0) || undefined,
 							reasoningTokens: Number(meta?.reasoningTokens ?? 0) || undefined,
 							totalTokens: Number(meta?.totalTokens ?? 0) || undefined,
+							cacheReadReported: meta?.cachedReadTokens !== undefined,
+							reasoningReported: meta?.reasoningTokens !== undefined,
 							durationMs,
 						};
 					return {
-						status: opts.signal?.aborted || abortedLocally ? "interrupted" : "completed",
+						status: opts.signal?.aborted || cancel.wasCancelled() ? "interrupted" : "completed",
 						finalText: turn.chunks.join("").trim(),
 						sessionId: acpSessionId,
 						model: resolvedModel,
@@ -564,7 +542,7 @@ export class GrokAcpDriver implements WorkerDriver {
 					const raw = `${error instanceof Error ? error.message : String(error)}\n${stderr}`.trim();
 					const quota = classifyQuotaError(raw);
 					const usage = { ...(turn.usage ?? {}), durationMs: Date.now() - startedAt };
-					if (opts.signal?.aborted || abortedLocally) {
+					if (opts.signal?.aborted || cancel.wasCancelled()) {
 						return { status: "interrupted", finalText: turn.chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage };
 					}
 					if (quota) {
@@ -572,9 +550,7 @@ export class GrokAcpDriver implements WorkerDriver {
 					}
 					return { status: "failed", finalText: turn.chunks.join("").trim(), sessionId: acpSessionId, model: resolvedModel, usage, error: raw };
 				} finally {
-					if (timer) clearTimeout(timer);
-					if (killGraceTimer) clearTimeout(killGraceTimer);
-					opts.signal?.removeEventListener("abort", onAbort);
+					cancel.dispose();
 					resetToIdle();
 				}
 			},
@@ -586,7 +562,7 @@ export class GrokAcpDriver implements WorkerDriver {
 			async close(): Promise<void> {
 				sessionState = { kind: "closed" };
 				rl.close();
-				killTree(child);
+				killProcessTreeNow(child);
 			},
 		};
 	}

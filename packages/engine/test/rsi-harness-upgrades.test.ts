@@ -1194,4 +1194,144 @@ describe("RSI Harness Upgrades: Field Guide, Semantic Auto-Repair, Fail-Closed T
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	it("enforces append-only accepted findings in TrustLayer and provides live closeoutSignal + auto workspaceSnapshot after work abort", async () => {
+		const root = mkdtempSync(join(tmpdir(), "rsi-pillars-trust-closeout-"));
+		const srcDir = join(root, "src");
+		const runDir = join(root, "run");
+		mkdirSync(srcDir, { recursive: true });
+		writeFileSync(join(srcDir, "target.txt"), "initial\n");
+
+		let allowPass = true;
+		const verifier: FindingVerifier = {
+			name: "append-only-check",
+			version: "1.0.0",
+			scopes: ["deliverable"],
+			defaultScope: "deliverable",
+			async check({ workspace }) {
+				const content = readFileSync(join(workspace, "target.txt"), "utf8").trim();
+				if (allowPass && content.includes("good")) {
+					return { status: "passed", message: "good", score: 1.0 };
+				}
+				return { status: "failed", message: "bad", score: 0.0 };
+			},
+		};
+
+		const drv: WorkerDriver = {
+			id: "mock-snap",
+			kind: "codex-exec",
+			capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema: true, supportsMcpHttp: false },
+			healthCheck: async () => ({ ok: true, driverId: "mock-snap", kind: "codex-exec" }),
+			async spawn(spec) {
+				return {
+					driverId: "mock-snap",
+					async runTurn(_prompt, opts) {
+						writeFileSync(join(spec.workspace, "target.txt"), "good-wip\n");
+						// Wait for wallSeconds hard timer (`hardMs = max(reserveMs+1000, wallSeconds*1000) = 2000ms`) to abort workSignal
+						await new Promise<void>((resolve) => {
+							if (opts?.signal?.aborted) return resolve();
+							opts?.signal?.addEventListener("abort", () => resolve(), { once: true });
+							setTimeout(resolve, 4500);
+						});
+						return { status: opts?.signal?.aborted ? "interrupted" : "completed", finalText: "wrote good-wip" };
+					},
+					async close() {},
+				};
+			},
+		};
+
+		const store = new SqliteStore(join(runDir, "trace.db"));
+		const router = new DriverQuotaRouter({
+			drivers: [{ driver: drv, config: { id: "mock-snap", kind: "codex-exec", maxConcurrent: 2 } }],
+			roles: { default: ["mock-snap"] },
+		});
+		const os = await SwarmOS.create({
+			runDir,
+			workspace: srcDir,
+			topology: "custom-closeout-test",
+			goal: { title: "Closeout test", text: "Write good-wip" },
+			wallSeconds: 1,
+			closeoutGraceMs: 10_000,
+			verifier,
+			store,
+			router,
+		});
+
+		try {
+			// 1. Append-only TrustLayer invariant: speculative revision against an accepted finding mints a NEW child finding!
+			const goodDir = join(root, "good-ws");
+			const badDir = join(root, "bad-ws");
+			mkdirSync(goodDir, { recursive: true });
+			mkdirSync(badDir, { recursive: true });
+			writeFileSync(join(goodDir, "target.txt"), "good\n");
+			writeFileSync(join(badDir, "target.txt"), "broken\n");
+
+			const accepted = await os.trust.submitFinding({
+				agentId: "a1",
+				workspace: goodDir,
+				claim: "Good candidate",
+				summary: "Passes check",
+				level: "empirical",
+			});
+			expect(accepted.status).toBe("accepted");
+
+			allowPass = false;
+			const speculative = await os.trust.submitFinding({
+				agentId: "a2",
+				findingId: accepted.id, // Attempt to reuse accepted ID -> MUST mint a fresh child finding!
+				workspace: badDir,
+				claim: "Broken speculative candidate",
+				summary: "Fails check",
+				level: "empirical",
+			});
+			expect(speculative.id).not.toBe(accepted.id);
+			expect(speculative.status).toBe("needs_work");
+			expect(speculative.buildsOn).toContain(accepted.id);
+			// Original accepted finding remains untouched in SQLite and still selected by bestVerifiedFinding()!
+			expect(store.get("findings", accepted.id)?.status).toBe("accepted");
+			expect(os.trust.bestVerifiedFinding(os.runId)?.finding.id).toBe(accepted.id);
+
+			// 2. Two-phase workSignal vs closeoutSignal + auto-captured workspaceSnapshot on interrupted turn!
+			allowPass = true;
+			let sawCloseoutAliveAfterWorkAbort = false;
+			let capturedSnapshotHasEdits = false;
+			const outcome = await os.execute({
+				name: "two-phase-probe",
+				description: "Verifies closeoutSignal stays live after wallSeconds aborts workSignal",
+				async run(api, { signal, closeoutSignal }) {
+					const worker = await api.spawnWorker({ role: "worker", handle: "w1", canSpawn: false });
+					try {
+						const res = await worker.runTurn("write good-wip", { signal });
+						capturedSnapshotHasEdits = Boolean(res.workspaceSnapshot?.hasEdits && res.workspaceSnapshot.treeSha);
+						sawCloseoutAliveAfterWorkAbort = signal.aborted && Boolean(closeoutSignal && !closeoutSignal.aborted);
+						// Verify under closeoutSignal without creating any ad-hoc AbortController!
+						const verified = await api.trust.submitFinding(
+							{
+								agentId: worker.agent.id,
+								workspace: worker.workspace,
+								claim: "Salvaged under closeoutSignal",
+								summary: "Verified cleanly after work cutoff",
+								level: "empirical",
+							},
+							closeoutSignal,
+						);
+						return {
+							status: verified.status === "accepted" ? "done" : "failed",
+							summary: `status=${verified.status}`,
+						};
+					} finally {
+						await worker.close();
+					}
+				},
+			});
+			expect(sawCloseoutAliveAfterWorkAbort).toBe(true);
+			expect(capturedSnapshotHasEdits).toBe(true);
+			expect(outcome.status).toBe("done");
+			expect(outcome.nominatedFindingId).toBeTruthy();
+		} finally {
+			await os.dispose();
+			store.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	}, 15_000);
 });
