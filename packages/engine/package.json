@@ -1,6 +1,6 @@
 {
 	"name": "@one-piece/engine",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"private": true,
 	"type": "module",
 	"license": "MIT",
@@ -8,17 +8,12 @@
 		".": "./src/index.ts"
 	},
 	"dependencies": {
-		"@one-piece/core": "0.1.0",
-		"@earendil-works/pi-ai": "1.6.0",
-		"@earendil-works/pi-agent-core": "1.6.0",
-		"@earendil-works/pi-schema": "1.6.0"
-	},
-	"devDependencies": {
-		"@one-piece/router": "0.1.0",
-		"@one-piece/module-workspace": "0.1.0",
-		"@one-piece/module-questions": "0.1.0",
-		"@one-piece/module-board": "0.1.0",
-		"@one-piece/module-secrets": "0.1.0",
-		"@one-piece/scheduler": "0.1.0"
+		"@one-piece/core": "0.2.0",
+		"@one-piece/drivers": "0.2.0",
+		"@one-piece/mcp-bus": "0.2.0",
+		"@one-piece/module-board": "0.2.0",
+		"@one-piece/module-secrets": "0.2.0",
+		"@one-piece/module-workspace": "0.2.0",
+		"@one-piece/scheduler": "0.2.0"
 	}
 }

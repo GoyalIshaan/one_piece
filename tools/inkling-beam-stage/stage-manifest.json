@@ -1,0 +1,78 @@
+{
+  "repo": "thinkingmachines/Inkling-2-Mini",
+  "revision": "ed40e7da625f594fc9c4990f5f66be24873c22d7",
+  "files": [
+    {
+      "path": "chat_template.jinja",
+      "size": 6868,
+      "sha256": "53a9035f3255945704b5857657cfb00c1165090c0641c4f782a0cbf268cc16dc"
+    },
+    {
+      "path": "config.json",
+      "size": 2722,
+      "sha256": "a7a349601f0984c4abf999c480ef775d8567d21f5f84b4e8a3e035b44f288dc2"
+    },
+    {
+      "path": "generation_config.json",
+      "size": 98,
+      "sha256": "a08737c07a65a8fdf69f7cf086576210e5aad4b241437090b26d7b0c4f7905f7"
+    },
+    {
+      "path": "hf_quant_config.json",
+      "size": 67924,
+      "sha256": "7c656207d3ce37879c7be209a036b0dde43bf01f78159bff06880b868ed57143"
+    },
+    {
+      "path": "model-00001-of-00001.safetensors",
+      "size": 19526019168,
+      "sha256": "65e60f51aa1284d4fb022584908c315270334d991828bb774af60584523539d1"
+    },
+    {
+      "path": "model.safetensors.index.json",
+      "size": 109300,
+      "sha256": "c1631065b7b00787993522dddc66a68b3abee869192977fb3dcb796e63bc5838"
+    },
+    {
+      "path": "processor_config.json",
+      "size": 461,
+      "sha256": "d7350adce18c8be4b607f261c8f0f7eabbf720bb7aaf648a43d4f8372bbacc2d"
+    },
+    {
+      "path": "special_tokens_map.json",
+      "size": 529,
+      "sha256": null,
+      "git_blob_sha1": "e4fe9735b528be1c630eb832d655fc8c4c2c309f"
+    },
+    {
+      "path": "tokenizer.json",
+      "size": 26178678,
+      "sha256": "7f332727f9a3f093dd452a39cc978e6757627e5dad1b0673aa4e75174f236dd6"
+    },
+    {
+      "path": "tokenizer_config.json",
+      "size": 13235,
+      "sha256": "bf09342d285139fd37ce10c70878af1d52cb390e9901e10248654293a80ee636"
+    }
+  ],
+  "supplemental": [
+    {
+      "path": "tiktoken/tokenizer.model",
+      "size": 3386494,
+      "sha256": "f170372dd655728909228220d77cf6b8104a59f38a91262a7d2c4027906ec0d8"
+    }
+  ],
+  "git_tree_evidence": [
+    {
+      "url": "https://huggingface.co/api/models/thinkingmachines/Inkling-2-Mini/tree/ed40e7da625f594fc9c4990f5f66be24873c22d7",
+      "raw_response_sha256": "afc4856aa67c8951640f1e9df98e1dc764e88b1f83f198158ac5558db86700d0"
+    },
+    {
+      "url": "https://huggingface.co/api/models/thinkingmachines/Inkling-2-Mini/tree/ed40e7da625f594fc9c4990f5f66be24873c22d7/tiktoken",
+      "raw_response_sha256": "cf84e81e5720f16d856a886cbbb02d4ac826ceb8b6e3c99d469946591a327ca6"
+    }
+  ],
+  "explicitly_excluded": [
+    "mtp.safetensors"
+  ],
+  "publisher_files_sha256": "7e4281bdfab144f266b7930a636c36df4f17788603f3752ea764d71093604a67"
+}

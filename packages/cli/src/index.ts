@@ -1,258 +1,299 @@
-#!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { createInterface } from "node:readline/promises";
-import { parseArgs } from "node:util";
-import { DEFAULT_PROFILES, type HarnessModule, type Run } from "@one-piece/core";
+import { pathToFileURL } from "node:url";
+import {
+	EventBus,
+	loadVerificationModule,
+	MemoryStore,
+	Redactor,
+	runCommand,
+} from "@one-piece/core";
 import { startDashboard } from "@one-piece/dashboard";
-import { createHarness, simPolicy } from "@one-piece/engine";
-import { boardModule } from "@one-piece/module-board";
-import { questionsModule } from "@one-piece/module-questions";
-import { KEYCHAIN_SERVICE, keychainLookup, secretsModule } from "@one-piece/module-secrets";
-import { workspaceModule } from "@one-piece/module-workspace";
-import { FileCredentialStore, PROVIDER_FACTORIES, Router } from "@one-piece/router";
-import { schedulerModule } from "@one-piece/scheduler";
+import { createDriver, DriverQuotaRouter } from "@one-piece/drivers";
+import { createTopology, SwarmOS, TOPOLOGY_NAMES } from "@one-piece/engine";
+import { McpBusServer } from "@one-piece/mcp-bus";
+import { KEYCHAIN_SERVICE } from "@one-piece/module-secrets";
+import { PROVIDER_FACTORIES, Router } from "@one-piece/router";
 import { SqliteStore } from "@one-piece/store";
-import { homeDir, loadConfig, PROVIDER_DEFAULTS } from "./config.ts";
+import { homeDir, loadConfig } from "./config.ts";
 
-const HELP = `one-piece: a harness for recursive agent swarms
+function parseArgs(argv: string[]) {
+	const flags: Record<string, string[]> = {};
+	const positional: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const token = argv[i]!;
+		if (token.startsWith("--")) {
+			const eq = token.indexOf("=");
+			if (eq >= 0) {
+				const k = token.slice(2, eq);
+				(flags[k] ??= []).push(token.slice(eq + 1));
+			} else {
+				const k = token.slice(2);
+				const next = argv[i + 1];
+				if (next !== undefined && !next.startsWith("--")) {
+					(flags[k] ??= []).push(next);
+					i += 1;
+				} else {
+					(flags[k] ??= []).push("true");
+				}
+			}
+		} else {
+			positional.push(token);
+		}
+	}
+	return { command: positional[0] ?? "help", args: positional.slice(1), flags };
+}
 
-Usage:
-  one-piece run "<goal>" [options]     Plan, search, verify and report on a goal
-  one-piece dashboard [--port 4747]    Open the telemetry dashboard for this project
-  one-piece runs                       List this project's runs
-  one-piece eval [--suite smoke|full]  Run the eval suite (hidden graders, health checks, report)
-                 [--task id] [--provider id] [--budget-scale 0.5] [--mode solo]
-  one-piece models <provider>          List a provider's models
-  one-piece login <provider>           Sign in (openai = Sign in with ChatGPT, openrouter, ...)
-  one-piece secrets set <name>         Store a secret in the macOS Keychain
-  one-piece secrets list               Show configured secret capabilities
+function splitCsv(values?: string[]): string[] {
+	if (!values?.length) return [];
+	return values.flatMap((v) => v.split(",")).map((s) => s.trim()).filter(Boolean);
+}
 
-Run options:
-  --title <text>            Short name for the run
-  --rubric <text>           What good looks like for the whole goal
-  --provider <id>           Repeatable: openai, openrouter, xai, anthropic, openai-codex, sim
-  --kind <kind>             code | literature | ml | kernels (picks the default modules)
-  --workspace <dir>         Project folder copied into each leaf's workspace
-  --budget-tokens <n>       Token budget for the whole run
-  --budget-usd <n>          Dollar budget for the whole run
-  --concurrency <n>         Agents running at once
-  --dashboard               Serve the dashboard while the run is going
-  --port <n>                Dashboard port (default 4747)
-  --project <dir>           Project folder (default: the current folder)
+function buildDrivers(cfg: ReturnType<typeof loadConfig>) {
+	let piRouter: Router | undefined;
+	if (cfg.drivers.some((d) => d.kind === "pi-in-process")) {
+		const providers = cfg.providers.length ? cfg.providers : [{ id: "sim", models: { default: "sim-1" } }];
+		const hasSim = providers.some((p) => p.id === "sim");
+		piRouter = new Router({
+			providers,
+			credentialsPath: join(homeDir(), "auth.json"),
+			providerFactories: PROVIDER_FACTORIES,
+			simPolicy: hasSim
+				? () => ({
+					role: "assistant" as const,
+					api: "faux",
+					provider: "sim",
+					model: "sim-1",
+					content: [{ type: "text" as const, text: JSON.stringify({ subtasks: [{ title: "Simulated subtask", description: "Execute goal in sim mode." }] }) }],
+					usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+					stopReason: "stop" as const,
+					timestamp: Date.now(),
+				})
+				: undefined,
+		});
+	}
+	return cfg.drivers.map((driverCfg) => ({
+		config: driverCfg,
+		driver: createDriver(driverCfg, { piRouter }),
+	}));
+}
 
-Everything (store, workspaces, reports) lives in ./.one_piece, so each project is isolated.
-Credentials live in ~/.one_piece/auth.json (chmod 600) and the Keychain.`;
-
-async function main(): Promise<void> {
-	const { values, positionals } = parseArgs({
-		allowPositionals: true,
-		options: {
-			title: { type: "string" },
-			rubric: { type: "string" },
-			provider: { type: "string", multiple: true },
-			kind: { type: "string" },
-			workspace: { type: "string" },
-			"budget-tokens": { type: "string" },
-			"budget-usd": { type: "string" },
-			concurrency: { type: "string" },
-			dashboard: { type: "boolean" },
-			port: { type: "string" },
-			project: { type: "string" },
-			suite: { type: "string" },
-			task: { type: "string", multiple: true },
-			"budget-scale": { type: "string" },
-			mode: { type: "string" },
-			help: { type: "boolean", short: "h" },
-		},
+async function cmdDoctor(projectDir: string, flags: Record<string, string[]>): Promise<void> {
+	const cfg = loadConfig(projectDir, {
+		drivers: splitCsv(flags.drivers ?? flags.driver),
+		providers: splitCsv(flags.provider),
 	});
-	const [command, ...rest] = positionals;
-	// `npm run one-piece` executes from the repo root; INIT_CWD is the folder the user ran it in.
-	const baseDir = process.env.INIT_CWD ?? process.cwd();
-	const projectDir = resolve(baseDir, values.project ?? ".");
-	if (!command || values.help) {
-		console.log(HELP);
+	console.log("one_piece v2 doctor\n");
+
+	// 1. Check all configured drivers
+	const drivers = buildDrivers(cfg);
+	const health = await Promise.all(drivers.map((d) => d.driver.healthCheck()));
+	console.log("Drivers:");
+	for (const h of health) {
+		const mark = h.ok ? "OK  " : "FAIL";
+		console.log(`  [${mark}] ${h.driverId} (${h.kind}) ${h.version ?? ""} ${h.binaryPath ?? ""} ${h.detail ?? ""}`.trimEnd());
+	}
+
+	// 2. Check embedded local MCP loopback server
+	const bus = new EventBus(new MemoryStore(), new Redactor());
+	const mcp = await McpBusServer.start(bus);
+	try {
+		const healthUrl = mcp.url.replace(/\/mcp$/, "/health");
+		const res = await fetch(healthUrl);
+		const body = await res.json();
+		console.log(`\nLocal MCP Bus:\n  [OK  ] ${mcp.url} (${JSON.stringify(body)})`);
+	} finally {
+		await mcp.close();
+	}
+
+	// 3. Check Seatbelt sandbox isolation
+	const sb = await runCommand({
+		command: "echo sandbox-ok",
+		cwd: projectDir,
+		profile: "job",
+		networkOff: true,
+		timeoutMs: 5_000,
+	});
+	console.log(`\nSandbox:\n  [${sb.exitCode === 0 ? "OK  " : "FAIL"}] platform=${process.platform} seatbelt=${sb.sandboxed} output=${sb.stdout.trim()}`);
+}
+
+async function cmdRun(projectDir: string, args: string[], flags: Record<string, string[]>): Promise<void> {
+	const goalText = args.join(" ").trim();
+	if (!goalText) {
+		console.error('Usage: one-piece run "<goal>" [--topology hierarchy|single|pull-refinery|substrate-peers|evolution] [--drivers codex,grok,gemini]');
+		process.exitCode = 1;
 		return;
 	}
-	const config = loadConfig(projectDir, values.provider);
-	const dbPath = join(config.dataDir, "one_piece.db");
 
-	switch (command) {
-		case "run": {
-			const goalText = rest.join(" ").trim();
-			if (!goalText) throw new Error('Give a goal: one-piece run "your goal"');
-			mkdirSync(config.dataDir, { recursive: true });
-			const store = new SqliteStore(dbPath);
-			const router = new Router({
-				providers: config.providers,
-				credentialsPath: join(homeDir(), "auth.json"),
-				providerFactories: PROVIDER_FACTORIES,
-				simPolicy,
-			});
-			const kind = (values.kind ?? config.kind) as keyof typeof DEFAULT_PROFILES;
-			const modules: HarnessModule[] = [
-				questionsModule({ deadlineMs: config.questionDeadlineMinutes * 60_000 }),
-				boardModule(),
-				workspaceModule(),
-				schedulerModule(config.pools),
-				secretsModule({ secrets: config.secrets }),
-			];
-			const runDir = join(config.dataDir, "runs", `${new Date().toISOString().replace(/[:.]/g, "-")}`);
-			const harness = createHarness({
-				store,
-				router,
-				modules,
-				config: {
-					runDir,
-					seedWorkspace: values.workspace ? resolve(baseDir, values.workspace) : undefined,
-					maxConcurrentAgents: Number(values.concurrency ?? config.maxConcurrentAgents),
-					profile: { ...(DEFAULT_PROFILES[kind] ?? DEFAULT_PROFILES.code), ...(config.secrets.length ? {} : { secrets: "off" }) },
-					caps: config.caps,
-					questionDeadlineMs: config.questionDeadlineMinutes * 60_000,
-				},
-			});
-			const budget: Record<string, number> = {};
-			const tokens = values["budget-tokens"] ?? config.budget.tokens;
-			const usd = values["budget-usd"] ?? config.budget.usd;
-			if (tokens !== undefined) budget.tokens = Number(tokens);
-			if (usd !== undefined) budget.usd = Number(usd);
-			for (const [k, v] of Object.entries(config.budget)) if (!(k in budget) && v !== undefined) budget[k] = v;
-			let dashboard: ReturnType<typeof startDashboard> | undefined;
-			if (values.dashboard) {
-				dashboard = startDashboard({ dbPath, port: Number(values.port ?? 4747) });
-				console.log(`Dashboard: ${dashboard.url}`);
-			}
-			const run: Run = await harness.start(
-				{ title: values.title ?? goalText.slice(0, 80), text: goalText, rubric: values.rubric },
-				budget,
-				{ workspace: values.workspace ? resolve(baseDir, values.workspace) : undefined, config: { kind, providers: config.providers.map((p) => p.id) } },
-			);
-			console.log(`Run ${run.id} started (${config.providers.map((p) => p.id).join(", ")}; budget ${JSON.stringify(budget)}).`);
-			console.log(`Run folder: ${runDir}`);
-			harness.bus.on((e) => {
-				if (["node.spawned", "finding.verdict", "epoch.started", "question.escalated_to_user", "run.finished", "agent.error"].includes(e.type)) {
-					const node = e.nodeId ? harness.tree.get(e.nodeId) : undefined;
-					console.log(`[${new Date(e.ts).toLocaleTimeString()}] ${e.type} ${node ? `${node.role} "${node.goal.title}"` : ""} ${JSON.stringify(e.data).slice(0, 160)}`);
-				}
-			});
-			const stop = () => {
-				console.log("\nStopping the run; everything so far is saved.");
-				harness.finishRun("stopped", "stopped by the user");
-			};
-			process.once("SIGINT", stop);
-			await harness.done;
-			process.removeListener("SIGINT", stop);
-			console.log(`\nDone. Report: ${join(runDir, "report.md")}`);
-			for (const module of modules) await module.dispose?.();
-			if (dashboard) console.log(`The dashboard keeps serving at ${dashboard.url} (Ctrl+C to quit).`);
-			else store.close();
-			return;
+	const workspace = resolve(projectDir, flags.workspace?.[0] ?? ".");
+	const cfg = loadConfig(projectDir, {
+		topology: flags.topology?.[0],
+		drivers: splitCsv(flags.drivers ?? flags.driver),
+		providers: splitCsv(flags.provider),
+		model: flags.model?.[0],
+	});
+
+	if (flags["budget-tokens"]?.[0]) cfg.budget.tokens = Number(flags["budget-tokens"][0]);
+	if (flags["budget-usd"]?.[0]) cfg.budget.usd = Number(flags["budget-usd"][0]);
+	if (flags["wall-seconds"]?.[0]) cfg.budget.wallSeconds = Number(flags["wall-seconds"][0]);
+
+	const store = new SqliteStore(join(cfg.dataDir, "one_piece.db"));
+	const drivers = buildDrivers(cfg);
+	const plugin = createTopology(cfg.topology);
+	const verifier = cfg.verification ? (await loadVerificationModule(projectDir, cfg.verification)).findingVerifier : undefined;
+
+	const runId = `run-${Date.now().toString(36)}`;
+	const runDir = join(cfg.dataDir, "runs", runId);
+
+	const router = new DriverQuotaRouter({
+		drivers,
+		roles: cfg.roles,
+		runId,
+	});
+
+	const os = await SwarmOS.create({
+		runId,
+		runDir,
+		workspace,
+		topology: plugin.name,
+		goal: { title: goalText.slice(0, 120), text: goalText, rubric: flags.rubric?.[0] },
+		budget: {
+			...(cfg.budget.tokens ? { tokens: cfg.budget.tokens } : {}),
+			...(cfg.budget.usd ? { usd: cfg.budget.usd } : {}),
+		},
+		reservePct: cfg.budget.reservePct,
+		wallSeconds: cfg.budget.wallSeconds,
+		pools: cfg.pools,
+		secrets: cfg.secrets,
+		verifier,
+		enableBlindReview: cfg.enableBlindReview,
+		networkOffWorkers: cfg.networkOffWorkers,
+		store,
+		router,
+	});
+
+	let dashboardHandle: Awaited<ReturnType<typeof startDashboard>> | undefined;
+	if (flags.dashboard) {
+		dashboardHandle = await startDashboard(store, { port: Number(flags.port?.[0] ?? 4747) });
+		console.log(`Dashboard: ${dashboardHandle.url}`);
+	}
+
+	os.bus.on((ev) => {
+		if (["run.started", "phase.changed", "agent.spawned", "agent.handoff", "agent.stalled", "finding.verdict", "run.nominated", "quota.cooldown", "quota.drained"].includes(ev.type)) {
+			console.log(`[${ev.type}] ${JSON.stringify(ev.data)}`);
 		}
-		case "eval": {
-			const { runEval } = await import("@one-piece/evals");
-			const providers = values.provider?.length ? config.providers : loadConfig(projectDir, ["openai", "openrouter"]).providers;
-			const router = new Router({ providers, credentialsPath: join(homeDir(), "auth.json"), providerFactories: PROVIDER_FACTORIES, simPolicy });
-			await router.prepare();
-			console.log(`Providers usable: ${[...new Set(router.menu().map((m) => m.provider))].join(", ")}; menu: ${router.menu().map((m) => m.key).join(", ")}`);
-			const { results, reportPath } = await runEval({
-				suite: values.suite ?? "smoke",
-				taskIds: values.task,
-				dataDir: config.dataDir,
-				router,
-				modules: () => [questionsModule({ deadlineMs: 3 * 60_000 }), boardModule(), workspaceModule({ maxCommandSeconds: 180, defaultFileLines: 80 }), schedulerModule(config.pools)],
-				profile: { questions: "active", board: "active", workspace: "active", scheduler: "active" },
-				maxConcurrentAgents: Number(values.concurrency ?? config.maxConcurrentAgents),
-				budgetScale: values["budget-scale"] ? Number(values["budget-scale"]) : undefined,
-				mode: values.mode === "solo" ? "solo" : "swarm",
-				log: (line) => console.log(line),
-			});
-			const broken = results.filter((r) => r.health.status === "fail").length;
-			const healthy = results.filter((r) => r.health.status === "ok").length;
-			console.log(`\nMean score ${(results.reduce((a, r) => a + r.score, 0) / results.length).toFixed(3)}. ${healthy}/${results.length} healthy, ${results.length - healthy - broken} with warnings, ${broken} failed.`);
-			console.log(`Report: ${reportPath}`);
-			process.exitCode = broken ? 1 : 0;
-			return;
+	});
+
+	const ac = new AbortController();
+	const onSig = () => ac.abort(new Error("SIGINT"));
+	process.on("SIGINT", onSig);
+
+	try {
+		console.log(`Starting run ${os.runId} (topology=${plugin.name}, drivers=${cfg.drivers.map((d) => d.id).join(",")}, mcp=${os.mcp.url})`);
+		const result = await os.execute(plugin, ac.signal);
+		console.log(`\nRun ${os.runId} finished: status=${result.status}`);
+		if (result.nominatedFindingId) {
+			console.log(`Nominated deliverable: ${result.nominatedFindingId} (rev ${result.nominatedRevision ?? 1})`);
 		}
-		case "dashboard": {
-			const dashboard = startDashboard({ dbPath, port: Number(values.port ?? 4747) });
-			console.log(`one_piece dashboard: ${dashboard.url}  (store: ${dbPath})`);
-			return;
-		}
-		case "runs": {
-			const store = new SqliteStore(dbPath);
-			for (const run of store.list<Run>("runs").sort((a, b) => b.createdAt - a.createdAt)) {
-				console.log(`${run.id}  ${run.status.padEnd(8)} epoch ${run.epoch}  ${new Date(run.createdAt).toLocaleString()}  ${run.goal.title}`);
-			}
-			store.close();
-			return;
-		}
-		case "models": {
-			const id = rest[0];
-			if (!id || !PROVIDER_FACTORIES[id]) throw new Error(`Usage: one-piece models <${Object.keys(PROVIDER_FACTORIES).join("|")}>`);
-			const router = new Router({ providers: [PROVIDER_DEFAULTS[id]], providerFactories: PROVIDER_FACTORIES });
-			for (const m of router.models.getModels(id)) console.log(`${m.id.padEnd(48)} ctx ${String(m.contextWindow).padStart(8)}  ${m.reasoning ? "reasoning" : ""}`);
-			return;
-		}
-		case "login": {
-			const id = rest[0];
-			const factory = id ? PROVIDER_FACTORIES[id] : undefined;
-			if (!factory) throw new Error(`Usage: one-piece login <${Object.keys(PROVIDER_FACTORIES).join("|")}>`);
-			const provider = factory();
-			const oauth = provider.auth.oauth;
-			if (!oauth) throw new Error(`${id} has no sign-in flow; set its API key environment variable instead`);
-			const store = new FileCredentialStore(join(homeDir(), "auth.json"));
-			const rl = createInterface({ input: process.stdin, output: process.stdout });
-			try {
-				const credential = await oauth.login(
-					{
-						signal: new AbortController().signal,
-						prompt: async (p: any) => {
-							if (p.type === "select") {
-								p.options.forEach((o: any, i: number) => console.log(`  ${i + 1}. ${o.label}`));
-								const choice = Number(await rl.question(`${p.message} (1-${p.options.length}): `)) - 1;
-								return p.options[choice]?.id ?? p.options[0].id;
-							}
-							return rl.question(`${p.message}: `);
-						},
-						notify: (event: any) => {
-							if (event.type === "auth_url") console.log(`\nOpen this URL in your browser:\n${event.url}\n${event.instructions ?? ""}`);
-							else if (event.type === "device_code") console.log(`\nOpen ${event.verificationUri} and enter ${event.userCode}`);
-							else if (event.message) console.log(event.message);
-						},
-					},
-					{ getDeviceId: randomUUID },
-				);
-				await store.modify(provider.id, async () => credential);
-				console.log(`Signed in to ${id}. Credentials saved to ${join(homeDir(), "auth.json")} (user-only).`);
-			} finally {
-				rl.close();
-			}
-			return;
-		}
-		case "secrets": {
-			const [sub, name] = rest;
-			if (sub === "set" && name) {
-				if (process.platform !== "darwin") throw new Error(`Set ONE_PIECE_SECRET_${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")} in your environment instead`);
-				// The Keychain prompts for the value itself, so it never passes through this program's arguments.
-				execFileSync("security", ["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", name, "-w"], { stdio: "inherit" });
-				console.log(`Stored ${name} in the Keychain (service "${KEYCHAIN_SERVICE}").`);
-				return;
-			}
-			if (sub === "list") {
-				if (!config.secrets.length) console.log('No secrets configured. Add {"secrets": [{"name": "gpu.modal", "env": "MODAL_TOKEN"}]} to one-piece.config.json.');
-				for (const s of config.secrets) console.log(`${s.name.padEnd(24)} -> $${s.env.padEnd(24)} ${keychainLookup(s.name) ? "stored" : "missing"}`);
-				return;
-			}
-			throw new Error("Usage: one-piece secrets set <name> | one-piece secrets list");
-		}
-		default:
-			console.log(HELP);
+		console.log(`Report: ${result.reportPath}`);
+	} finally {
+		process.off("SIGINT", onSig);
+		await os.dispose();
+		await dashboardHandle?.close();
+		store.close();
 	}
 }
 
-main().catch((error) => {
-	console.error(`one-piece: ${error instanceof Error ? error.message : String(error)}`);
-	process.exit(1);
-});
+async function cmdRuns(projectDir: string): Promise<void> {
+	const cfg = loadConfig(projectDir);
+	const store = new SqliteStore(join(cfg.dataDir, "one_piece.db"));
+	try {
+		const runs = store.list("runs").sort((a, b) => b.createdAt - a.createdAt);
+		if (!runs.length) {
+			console.log("No runs recorded yet.");
+			return;
+		}
+		for (const r of runs) {
+			console.log(`${r.id}  [${r.topology}]  ${r.status.padEnd(8)}  nominated=${r.nominatedFindingId ?? "-"}  ${r.goal.title}`);
+		}
+	} finally {
+		store.close();
+	}
+}
+
+async function cmdDashboard(projectDir: string, flags: Record<string, string[]>): Promise<void> {
+	const cfg = loadConfig(projectDir);
+	const store = new SqliteStore(join(cfg.dataDir, "one_piece.db"));
+	const handle = await startDashboard(store, { port: Number(flags.port?.[0] ?? 4747) });
+	console.log(`one_piece v2 dashboard running at ${handle.url} (Ctrl+C to stop)`);
+	await new Promise<void>((resolve) => {
+		process.once("SIGINT", () => {
+			void handle.close().finally(() => {
+				store.close();
+				resolve();
+			});
+		});
+	});
+}
+
+function cmdSecrets(args: string[]): void {
+	const sub = args[0];
+	if (sub === "set" && args[1] && args[2]) {
+		if (process.platform !== "darwin") {
+			console.error("Keychain storage is macOS-only; set ONE_PIECE_SECRET_<NAME> in your environment.");
+			process.exitCode = 1;
+			return;
+		}
+		execFileSync("security", ["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", args[1], "-w", args[2]]);
+		console.log(`Stored secret "${args[1]}" in macOS Keychain.`);
+		return;
+	}
+	console.log("Usage: one-piece secrets set <name> <value>");
+}
+
+function printHelp(): void {
+	console.log([
+		"one_piece v2 — Topology-Engineered Multi-CLI Swarm OS",
+		"",
+		"Commands:",
+		'  run "<goal>"       Run a swarm (--topology, --drivers, --workspace, --budget-tokens, --dashboard)',
+		"  doctor             Check codex/grok/gemini/pi drivers, local MCP bus, and Seatbelt sandbox",
+		"  runs               List runs recorded in this project",
+		"  dashboard          Launch the local telemetry dashboard (127.0.0.1:4747)",
+		"  secrets set <k> <v> Store a capability secret in macOS Keychain",
+		"",
+		`Topologies: ${TOPOLOGY_NAMES.join(", ")}`,
+		"Driver presets: codex, codex-exec, grok, grok-cli, agy, gemini, gemini-legacy, openrouter, openai, sim",
+	].join("\n"));
+}
+
+export async function main(argv = process.argv.slice(2)): Promise<void> {
+	const { command, args, flags } = parseArgs(argv);
+	const projectDir = resolve(flags.project?.[0] ?? process.cwd());
+	switch (command) {
+		case "doctor":
+			await cmdDoctor(projectDir, flags);
+			break;
+		case "run":
+			await cmdRun(projectDir, args, flags);
+			break;
+		case "runs":
+			await cmdRuns(projectDir);
+			break;
+		case "dashboard":
+			await cmdDashboard(projectDir, flags);
+			break;
+		case "secrets":
+			cmdSecrets(args);
+			break;
+		default:
+			printHelp();
+	}
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+	void main().catch((err) => {
+		console.error(err instanceof Error ? err.message : String(err));
+		process.exitCode = 1;
+	});
+}

@@ -1,0 +1,68 @@
+{
+  "signal_processing": {
+    "id": "trial-3",
+    "sha256": "267d13446d271e507ddbe0f3ca4d23551e31464c37f602054b89be724363e649",
+    "original_score": 0.5266151841772255,
+    "regraded": {
+      "combined_score": 0.5266151841772255,
+      "composite_score": 0.47825898006360623,
+      "slope_changes": 129.8,
+      "lag_error": 0.21430352817490156,
+      "avg_error": 0.42925906274558,
+      "false_reversals": 100.8,
+      "correlation": 0.8763189495966355,
+      "noise_reduction": 0.33345532539531964,
+      "smoothness_score": 0.13351134846461948,
+      "responsiveness_score": 0.8235173305499658,
+      "accuracy_score": 0.8763189495966355,
+      "efficiency_score": 1.0,
+      "execution_time": 0.008727931976318359,
+      "success_rate": 1.0
+    }
+  },
+  "erdos_min_overlap": {
+    "id": "trial-2",
+    "sha256": "6acb131cda8e2d78766c4bfd01afbe020738a556fcbc6bb9472f0ce3def3f32c",
+    "original_score": 0.9996381572961633,
+    "regraded": {
+      "c5_bound": 0.38106091922178786,
+      "combined_score": 0.9996381572961633,
+      "n_points": 144,
+      "eval_time": 6.880514144897461
+    }
+  },
+  "minimizing_max_min_dist_2d": {
+    "id": "trial-2",
+    "sha256": "b74813c908db12015ca7432ea856ff189517138d272da9c55dc76877ab5f56af",
+    "original_score": 1.0000028088804542,
+    "regraded": {
+      "min_max_ratio": 0.07758415414741453,
+      "combined_score": 1.0000028088804542,
+      "eval_time": 13.362592935562134
+    }
+  },
+  "minimizing_max_min_dist_3d": {
+    "id": "trial-2",
+    "sha256": "0d4a6bb19a6045f2b2d2403114d99e972c2b81edc60d84979468913be500e5b5",
+    "original_score": 1.0000159135539162,
+    "regraded": {
+      "min_max_ratio": 0.24005088264958455,
+      "combined_score": 1.0000159135539162,
+      "min_distance": 0.48994987769116194,
+      "max_distance": 1.0,
+      "eval_time": 10.106517791748047
+    }
+  },
+  "third_autocorr_ineq": {
+    "id": "trial-3",
+    "sha256": "01c4cd7cd324d67d718a3da0a8a03aaa519fa6d50db1df44eb0c9f9e57494b72",
+    "original_score": 0.9307083168237413,
+    "regraded": {
+      "c3": 1.564016103715781,
+      "combined_score": 0.9307083168237413,
+      "loss": 1.564016103715781,
+      "n_points": 1024,
+      "eval_time": 1.8953468799591064
+    }
+  }
+}

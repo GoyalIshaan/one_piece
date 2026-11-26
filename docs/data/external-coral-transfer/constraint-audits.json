@@ -1,0 +1,18 @@
+{
+  "signal_processing/trial-3": {
+    "max_prefix_change": 0.0,
+    "causal_on_probe": true
+  },
+  "signal_processing/trial-2": {
+    "max_prefix_change": 0.19584094442650635,
+    "causal_on_probe": false
+  },
+  "signal_processing/trial-1": {
+    "max_prefix_change": 0.21469510028985517,
+    "causal_on_probe": false
+  },
+  "prism": {
+    "all_models_once_within_capacity": 50,
+    "cases": 50
+  }
+}

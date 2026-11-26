@@ -4,8 +4,8 @@
 	"category": "engineering",
 	"inspiredBy": "LongCLI-Bench / Terminal-Bench (end-to-end tests on the final state)",
 	"suites": ["full"],
-	"goal": "Build ledger.py exactly as SPEC.md describes. Hidden end-to-end tests run the command-line tool and compare its output and exit codes against the spec character for character. Each worker leaves its ledger.py in its own workspace; the best one counts, so make sure at least one worker integrates everything into a complete, tested ledger.py.",
-	"rubric": "The spec is the contract: exact output formats, ordering, rounding, exit codes and error messages. Write your own end-to-end tests for every command and every error case before claiming completion.",
+	"goal": "Deliver ledger.py implementing SPEC.md. Hidden end-to-end tests compare command output and exit codes against the specification.",
+	"rubric": "Match the specified output formats, ordering, rounding, exit codes and error messages.",
 	"budget": { "tokens": 450000, "usd": 1.8, "cpu_seconds": 300 },
 	"caps": { "maxChildren": 3, "maxDepth": 2 },
 	"timeLimitMinutes": 25

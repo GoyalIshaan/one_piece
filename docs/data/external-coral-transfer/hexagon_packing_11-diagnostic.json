@@ -1,0 +1,35 @@
+{
+  "task": "hexagon_packing_11",
+  "from_sha256": "6c03c6a10cd0950101da2c4ac173216998d15369c921f58fa6d426974e2cfe11",
+  "to_sha256": "b1c1dfad49f7e3cae89cf07d7528a454427b1d92e08a64077f5c021d62b5421a",
+  "replacement": [
+    "expected ({{}}, 3)\".format(N_HEX)",
+    "expected ({{N_HEX}}, 3)\""
+  ],
+  "scores": {
+    "starter": {
+      "sha256": "4c23ff06244998cd6a6a91462500c9887bd7cfe7d967f27efabcfc3ad74e1b46",
+      "grader": {
+        "score": 0.4912615,
+        "inv_outer_hex_side_length": 0.125,
+        "eval_time": 7.152557373046875e-06
+      }
+    },
+    "trial-1": {
+      "sha256": "434229dc5735c9cbb7742b895764b3f174a41abeef866b75cb75053243ff30ba",
+      "grader": {
+        "score": 0.9970657523937403,
+        "inv_outer_hex_side_length": 0.25370035927752843,
+        "eval_time": 19.570582151412964
+      }
+    },
+    "trial-2": {
+      "sha256": "b7a74ece691428a293c707573ec646c7495fd7c66a5c015a8b98d6fe6084d540",
+      "grader": {
+        "score": 0.9923454695557155,
+        "inv_outer_hex_side_length": 0.2524992976133168,
+        "eval_time": 10.41689133644104
+      }
+    }
+  }
+}

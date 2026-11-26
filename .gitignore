@@ -9,3 +9,6 @@ runs/
 vendor/pi/packages/ai/src/providers/data/
 *.tsbuildinfo
 .claude/launch.json
+
+# Private local notes (never committed)
+notes/

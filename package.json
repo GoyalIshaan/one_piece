@@ -7,19 +7,14 @@
 	"workspaces": [
 		"vendor/pi/packages/telemetry",
 		"vendor/pi/packages/schema",
-		"vendor/pi/packages/chord",
-		"vendor/pi/packages/codemode",
-		"vendor/pi/packages/mcp",
 		"vendor/pi/packages/ai",
-		"vendor/pi/packages/durable",
-		"vendor/pi/packages/env",
 		"vendor/pi/packages/agent",
 		"packages/*"
 	],
 	"scripts": {
-		"build:pi": "cd vendor/pi/packages/telemetry && npm run build && cd ../schema && npm run build && cd ../chord && npm run build && cd ../codemode && npm run build && cd ../mcp && npm run build && cd ../ai && npm run build && cd ../durable && npm run build && cd ../env && npm run build && cd ../agent && npm run build",
+		"build:pi": "cd -P vendor/pi/packages/telemetry && npm run build && cd ../schema && npm run build && cd ../ai && npm run build && cd ../agent && npm run build",
 		"test": "vitest --run",
-		"typecheck": "tsc -p packages/tsconfig.json",
+		"typecheck": "tsc -p packages/tsconfig.json && node tools/typecheck-dashboard.mjs",
 		"one-piece": "node packages/cli/src/index.ts"
 	},
 	"engines": {

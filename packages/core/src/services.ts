@@ -1,9 +1,4 @@
-import type { StreamFn } from "@earendil-works/pi-agent-core";
-import type { Api, Model } from "@earendil-works/pi-ai";
-import type { Job, JobSpec, Role } from "./types.ts";
-
-// Interfaces for the swappable services. Implementations live in their own packages and are
-// registered at start-up; anything that needs one asks the registry, never the package.
+import type { FinishedJob, Job, JobSpec, Role, VerificationReceipt } from "./types.ts";
 
 export interface PoolInfo {
 	name: string;
@@ -13,82 +8,68 @@ export interface PoolInfo {
 	queued: number;
 	spentUnits: number;
 	capUnits?: number;
+	description?: string;
 }
 
 export interface ResourceScheduler {
-	submit(nodeId: string, spec: JobSpec): Job;
-	wait(jobId: string, signal?: AbortSignal): Promise<Job>;
+	submit(agentId: string, spec: JobSpec): Job;
+	withdraw(agentId: string, jobId: string, reason: string, reusedJobId?: string): FinishedJob;
+	resume(agentId: string, jobId: string, changes?: { command?: string; gate?: string }): Job;
+	wait(jobId: string, signal?: AbortSignal): Promise<FinishedJob>;
 	get(jobId: string): Job | undefined;
-	/** Cancel every queued or running job owned by the node's subtree. */
-	cancelSubtree(nodeId: string): void;
+	restoreQueued?(job: Extract<Job, { status: "queued" }>): boolean;
+	materializeOutputs?(jobId: string, paths: readonly string[], workspace: string): string;
+	cancelOwner(agentId: string): void;
 	pools(): PoolInfo[];
+	close?(): Promise<void>;
 }
 
 export interface SecretBroker {
-	/** Capability names this node may use (always a subset of its parent's). */
-	grantsOf(nodeId: string): string[];
-	grant(nodeId: string, capabilities: string[]): void;
-	/** Environment variables for one tool process. Values never reach a model. */
-	envFor(nodeId: string, capabilities: string[]): Record<string, string>;
+	grantsOf(agentId: string): string[];
+	grant(agentId: string, capabilities: string[]): void;
+	envFor(agentId: string, capabilities: string[]): Record<string, string>;
 	available(): string[];
 }
 
-export interface PickedModel {
-	provider: string;
-	id: string;
+/** Installed by the task owner. Agent-supplied checks are structured data, never checker code. */
+export interface FindingVerifier {
+	name: string;
+	version: string;
+	defaultScope: string;
+	scopes: readonly string[];
+	challengeHelp?: string;
+	previousVersion?(version: string): FindingVerifier | undefined;
+	check(input: {
+		workspace: string;
+		artifactSha256: string;
+		scope: string;
+		challenge?: string;
+		signal: AbortSignal;
+	}): Promise<Omit<VerificationReceipt, "checker" | "version" | "kind" | "durationMs">>;
 }
 
-export interface CallRecord {
-	provider: string;
-	model: string;
-	input: number;
-	output: number;
-	totalTokens: number;
-	usd: number;
-	waitedMs: number;
-	durationMs: number;
-	stopReason?: string;
-	error?: string;
+export interface VerificationModuleSpec {
+	module: string;
+	options?: Record<string, unknown>;
 }
 
-export interface QuotaInfo {
-	provider: string;
-	running: number;
-	queued: number;
-	calls: number;
-}
-
-/** One entry on the model menu managers choose from when they spawn children. */
-export interface ModelChoice {
-	/** What a manager passes: "provider:model-id". */
-	key: string;
-	provider: string;
-	id: string;
-	tier: "strong" | "fast" | "cheap" | "reasoning" | "coding";
-	note: string;
-	/** Dollars per million tokens, from the catalog. */
-	inputPerM?: number;
-	outputPerM?: number;
-}
-
-export interface ModelRouter {
-	/** Resolve credentials once before a run; providers without them are left off the menu. */
-	prepare?(): Promise<void>;
-	/** Models managers may assign to children. */
-	menu(): ModelChoice[];
-	/** Choose a model for a role, optionally avoiding providers (cross-provider review). */
-	pick(role: Role, options?: { avoidProviders?: string[] }): PickedModel;
-	resolve(picked: PickedModel): Model<Api>;
-	/** A Pi stream function for one agent; every call is reported through onCall. */
-	streamFn(onCall: (record: CallRecord) => void): StreamFn;
-	providers(): string[];
-	quota(): QuotaInfo[];
+/** Minimal module shape compatible with existing task verification plugins (e.g. perf-algos). */
+export interface VerificationModule {
+	readonly manifest: {
+		name: string;
+		version: string;
+		summary: string;
+		roles: Role[];
+		tools: string[];
+		contextCostTokens: number;
+	};
+	readonly findingVerifier: FindingVerifier;
+	prompt?(): string | undefined;
 }
 
 export interface ServiceMap {
 	scheduler: ResourceScheduler;
 	secrets: SecretBroker;
-	router: ModelRouter;
 }
 
 export class ServiceRegistry {
@@ -104,7 +85,7 @@ export class ServiceRegistry {
 
 	require<K extends keyof ServiceMap>(name: K): ServiceMap[K] {
 		const service = this.get(name);
-		if (!service) throw new Error(`Service "${name}" is not plugged into this harness`);
+		if (!service) throw new Error(`Service "${name}" is not plugged into this SwarmOS`);
 		return service;
 	}
 }

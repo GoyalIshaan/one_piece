@@ -1,6 +1,6 @@
 {
 	"name": "@one-piece/module-board",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"private": true,
 	"type": "module",
 	"license": "MIT",
@@ -8,7 +8,6 @@
 		".": "./src/index.ts"
 	},
 	"dependencies": {
-		"@one-piece/core": "0.1.0",
-		"@earendil-works/pi-schema": "1.6.0"
+		"@one-piece/core": "0.2.0"
 	}
 }

@@ -1,0 +1,33 @@
+{
+  "case": "3-isolated",
+  "endpoint": "Post-hoc diagnostic using the exact body and repaired sort-key adapter.",
+  "adapter_sha256": "9a058ca93347fa669526c197831d8414e747bc9553e7379af20c515285dd0da4",
+  "candidates": [
+    {
+      "body_sha256": "c54a19b5ab75227edcf5c5ab3f84e4f7850c4fe376875cffd8f8f8af31c63e29",
+      "id": "s1-1",
+      "cycles": 1527,
+      "passed": true,
+      "official_correct": 8,
+      "speed_thresholds_passed": 6,
+      "extra_correct": 32,
+      "extra_indices_correct": 32,
+      "program_sha256": "c977d2202495d4a789d70b408d01a21e2ab63ea98668f9e8f7042857da2dc02b",
+      "kernel_sha256": "f0a2ec83e49791364149a97214add7c6b806ed2c37bed8a85b2707ab1de6fcee",
+      "local_candidate": "independence-long-01/3-isolated/offline-guard-audit/s1-1"
+    },
+    {
+      "body_sha256": "28845fbaac750d23d28b12e1222469dd67c4c112daae936a0ec49aefc719b913",
+      "id": "s0-1",
+      "cycles": 1309,
+      "passed": true,
+      "official_correct": 8,
+      "speed_thresholds_passed": 8,
+      "extra_correct": 32,
+      "extra_indices_correct": 32,
+      "program_sha256": "6f88372f3b14cc56958b6be4d2bbd8848f420125260020002107fe398a03c25d",
+      "kernel_sha256": "a405e2030b2c013b2f1935ba26ee25cc6068ab70043a51b5da5d6b82c7153287",
+      "local_candidate": "independence-long-01/3-isolated/offline-guard-audit/s0-1"
+    }
+  ]
+}

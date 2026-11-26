@@ -1,171 +1,349 @@
-import { arr, lit, num, obj, opt, str, union } from "@earendil-works/pi-schema";
-import { defineTool, EVIDENCE_LEVELS, type EvidenceLevel, type Finding, newId, type ReviewRound, type SwarmNode } from "@one-piece/core";
-import type { Harness } from "./harness.ts";
+import { existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import {
+	type EventBus,
+	type Finding,
+	type FindingSubmission,
+	type FindingVerifier,
+	newId,
+	type ReviewRound,
+	type SpawnWorkerRequest,
+	type SubmitFindingInput,
+	type TrustService,
+	type WorkerHandle,
+} from "@one-piece/core";
+import { captureFrozenSnapshot, runExecutableCheck } from "./verification.ts";
 
-interface Verdict {
-	verdict: ReviewRound["verdict"];
-	message: string;
-	confidence?: number;
-	checks: string[];
+export interface TrustLayerOptions {
+	runId: string;
+	runDir: string;
+	bus: EventBus;
+	verifier?: FindingVerifier;
+	/** Spawn a blind cross-provider reviewer when executable verification alone isn't enough. */
+	spawnReviewer?: (req: SpawnWorkerRequest) => Promise<WorkerHandle>;
+	enableBlindReview?: boolean;
 }
 
-const verdicts = new Map<string, Verdict>();
+/**
+ * Decoupled v2 Trust & Verification Layer (zero WeakMaps, zero Pi coupling).
+ * - Captures frozen SHA-256 workspace snapshots before any async verification
+ * - Runs version-pinned executable FindingVerifier + replays saved counterexamples
+ * - Optionally spawns a blind cross-provider Evaluator (zero author CoT visibility)
+ * - Selects the best verified finding for mechanical auto-nomination closeout
+ */
+export class TrustLayer implements TrustService {
+	readonly verifier?: FindingVerifier;
+	private readonly runId: string;
+	private readonly runDir: string;
+	private readonly bus: EventBus;
+	private readonly spawnReviewer?: (req: SpawnWorkerRequest) => Promise<WorkerHandle>;
+	private readonly enableBlindReview: boolean;
+	private readonly savedCounterexamples = new Map<string, Set<string>>();
+	private readonly inFlight = new Set<Promise<unknown>>();
 
-function findingText(finding: Finding): string {
-	return [
-		`Finding ${finding.id} (round ${finding.rounds.length + 1})`,
-		`Claim: ${finding.claim}`,
-		`Stated evidence level: ${finding.level}`,
-		`Evidence: ${finding.evidence.join(", ") || "(none given)"}`,
-		`Assumptions: ${finding.assumptions.join("; ") || "(none)"}`,
-		`Reasoning:\n${finding.reasoning}`,
-		finding.rounds.length ? `Previous review rounds:\n${finding.rounds.map((r) => `- round ${r.round}: ${r.verdict}: ${r.message}`).join("\n")}` : "",
-	]
-		.filter(Boolean)
-		.join("\n");
-}
+	constructor(opts: TrustLayerOptions) {
+		this.runId = opts.runId;
+		this.runDir = opts.runDir;
+		this.bus = opts.bus;
+		this.verifier = opts.verifier;
+		this.spawnReviewer = opts.spawnReviewer;
+		this.enableBlindReview = opts.enableBlindReview ?? false;
+	}
 
-/** Run one claims-review round with a reviewer on a different provider. */
-async function claimsReview(harness: Harness, author: SwarmNode, finding: Finding): Promise<Verdict> {
-	const goal = author.goal;
-	let evidenceAccess = "The author's workspace is readable through your file tools.";
-	if (author.role === "internal") {
-		const descendants = new Set(finding.buildsOn.length
-			? harness.tree.subtree(author.id).filter((node) => node.id !== author.id).map((node) => node.id)
-			: author.children);
-		const sources = harness.store.list<Finding>("findings", { runId: author.runId }).filter((source) =>
-			source.status === "accepted" && descendants.has(source.nodeId) && (!finding.buildsOn.length || finding.buildsOn.includes(source.id)),
+	async submitFinding(input: SubmitFindingInput, signal?: AbortSignal): Promise<Finding> {
+		const now = Date.now();
+		const existing = input.findingId ? this.bus.store.get("findings", input.findingId) : undefined;
+		const findingId = existing?.id ?? newId("fnd");
+		const revision = (existing?.submissions.length ?? 0) + 1;
+
+		const snapshotDir = join(this.runDir, "submissions", findingId, String(revision));
+		if (existsSync(snapshotDir)) rmSync(snapshotDir, { recursive: true, force: true });
+
+		let artifactSha256: string | undefined;
+		let snapshotNote: string | undefined;
+		try {
+			artifactSha256 = captureFrozenSnapshot(input.workspace, snapshotDir);
+		} catch (error) {
+			snapshotNote = error instanceof Error ? error.message : String(error);
+		}
+
+		const scope = input.scope ?? this.verifier?.defaultScope;
+		const submission: FindingSubmission = {
+			revision,
+			claim: input.claim,
+			summary: input.summary,
+			evidence: input.evidence ?? [],
+			level: input.level,
+			scope,
+			artifactSha256,
+			snapshotDir: artifactSha256 ? snapshotDir : undefined,
+			snapshotNote,
+			verifier: this.verifier ? { name: this.verifier.name, version: this.verifier.version } : undefined,
+			score: input.score,
+			checks: [],
+			at: now,
+		};
+
+		const finding: Finding = existing
+			? {
+				...existing,
+				claim: input.claim,
+				summary: input.summary,
+				evidence: input.evidence ?? existing.evidence,
+				level: input.level,
+				status: "pending_review",
+				score: input.score ?? existing.score,
+				submissions: [...existing.submissions, submission],
+				updatedAt: now,
+			}
+			: {
+				id: findingId,
+				runId: this.runId,
+				authorAgentId: input.agentId,
+				authorDriverId: input.driverId,
+				taskId: input.taskId,
+				claim: input.claim,
+				summary: input.summary,
+				evidence: input.evidence ?? [],
+				level: input.level,
+				status: "pending_review",
+				score: input.score,
+				submissions: [submission],
+				rounds: [],
+				buildsOn: input.buildsOn ?? [],
+				createdAt: now,
+				updatedAt: now,
+			};
+
+		this.bus.save("findings", finding, input.agentId);
+		this.bus.emit(
+			this.runId,
+			"finding.reported",
+			{ findingId: finding.id, revision, claim: finding.claim, level: finding.level, artifactSha256 },
+			input.agentId,
 		);
-		evidenceAccess = [
-			"This is a synthesis. Check the inference against these accepted findings from descendants:",
-			...sources.map((source) => `- ${source.id} [${source.level}] ${source.claim}\n  Evidence: ${source.evidence.join(", ")}`),
-			...(sources.length ? [] : ["No matching accepted findings were provided."]),
-		].join("\n");
-	}
-	const reviewer = harness.tree.create({
-		runId: author.runId,
-		epoch: author.epoch,
-		role: "claims_reviewer",
-		parentId: author.id,
-		goal: {
-			title: `Review ${finding.id}`,
-			text: `${findingText(finding)}\n\nThe author's goal was: ${goal.title}: ${goal.text}${goal.rubric ? `\nIts rubric: ${goal.rubric}` : ""}\n\n${evidenceAccess}`,
-		},
-		budget: {},
-		modules: author.role === "internal" ? { ...author.modules, workspace: "off" } : author.modules,
-	});
-	harness.tree.update(reviewer.id, { targetNodeId: author.id, targetFindingId: finding.id });
-	await harness.runNode(reviewer, `${reviewer.goal.text}\n\nCheck it, then call submit_verdict.`);
-	const verdict = verdicts.get(reviewer.id);
-	verdicts.delete(reviewer.id);
-	return verdict ?? { verdict: "needs_work", message: "The reviewer ended without a verdict; resubmit with clearer evidence.", checks: [] };
-}
 
-export function trustTools(harness: Harness, node: SwarmNode) {
-	if (node.role === "claims_reviewer") {
-		return [
-			defineTool({
-				name: "submit_verdict",
-				description: "Your decision on the finding: accepted, needs_work or rejected, with a precise message and the checks you ran.",
-				parameters: obj({
-					verdict: union([lit("accepted"), lit("needs_work"), lit("rejected")]),
-					message: str(),
-					confidence: opt(num({ minimum: 0, maximum: 1 })),
-					checks_run: opt(arr(str())),
-				}),
-				async execute(params) {
-					verdicts.set(node.id, { verdict: params.verdict, message: params.message, confidence: params.confidence, checks: params.checks_run ?? [] });
-					node.finishedSummary = `verdict: ${params.verdict}`;
-					return "Verdict recorded.";
-				},
-			}),
-		];
+		const job = this.verifyAndReview(finding.id, { runBlindReviewer: this.enableBlindReview, signal });
+		this.inFlight.add(job);
+		try {
+			return await job;
+		} finally {
+			this.inFlight.delete(job);
+		}
 	}
-	if (node.role !== "leaf" && node.role !== "internal") return [];
-	return [
-		defineTool({
-			name: "report_finding",
-			description:
-				"Report a result (positive or negative) for review. A claims reviewer checks it before it reaches your parent. " +
-				"To answer a reviewer's pushback, call again with revises=<finding id>.",
-			parameters: obj({
-				claim: str(),
-				reasoning: str(),
-				evidence: arr(str(), { description: "File paths, commands with outputs, or citations" }),
-				level: union(EVIDENCE_LEVELS.map((l) => lit(l)) as any),
-				assumptions: opt(arr(str())),
-				revises: opt(str()),
-				builds_on: opt(arr(str(), { description: "Accepted finding ids this builds on" })),
-			}),
-			async execute(params) {
-				const now = Date.now();
-				let finding: Finding;
-				if (params.revises) {
-					const previous = harness.store.get<Finding>("findings", params.revises);
-					if (!previous || previous.nodeId !== node.id) throw new Error(`Unknown finding ${params.revises}`);
-					if (previous.status === "accepted" || previous.status === "rejected" || previous.status === "unreviewed") throw new Error(`Finding ${previous.id} is already ${previous.status}`);
-					if (previous.rounds.length >= harness.config.claimsMaxRounds) {
-						throw new Error(`Finding ${previous.id} used all ${harness.config.claimsMaxRounds} review rounds; report a narrower claim instead.`);
-					}
-					finding = { ...previous, claim: params.claim, reasoning: params.reasoning, evidence: params.evidence, level: params.level as EvidenceLevel, assumptions: params.assumptions ?? previous.assumptions, buildsOn: params.builds_on ?? previous.buildsOn, status: "pending_review", updatedAt: now };
-				} else {
-					finding = {
-						id: newId("finding"),
-						runId: node.runId,
-						nodeId: node.id,
-						epoch: node.epoch,
-						claim: params.claim,
-						reasoning: params.reasoning,
-						evidence: params.evidence,
-						level: params.level as EvidenceLevel,
-						assumptions: params.assumptions ?? [],
-						status: "pending_review",
-						rounds: [],
-						buildsOn: params.builds_on ?? [],
-						createdAt: now,
-						updatedAt: now,
-					};
-				}
-				for (const module of harness.modules) {
-					const veto = module.beforeReport?.({ node, harness }, finding);
-					if (veto) throw new Error(`Report refused by ${module.manifest.name}: ${veto}`);
-				}
-				harness.bus.save("findings", finding, node.id);
-				harness.bus.emit(node.runId, "finding.reported", { findingId: finding.id, claim: finding.claim, level: finding.level }, node.id);
 
-				const verdict = await harness.park(node.id, claimsReview(harness, node, finding));
-				const reviewer = harness.tree.all().find((n) => n.targetFindingId === finding.id && n.role === "claims_reviewer" && !finding.rounds.some((r) => r.reviewerNodeId === n.id));
-				finding.rounds.push({
+	async challengeFinding(findingId: string, challengeJson: string, actorId: string, signal?: AbortSignal): Promise<Finding> {
+		const finding = this.bus.store.get("findings", findingId);
+		if (!finding) throw new Error(`Finding ${findingId} not found`);
+		const submission = finding.submissions.at(-1);
+		if (!submission) throw new Error(`Finding ${findingId} has no submission`);
+		if (!this.verifier) throw new Error("No executable FindingVerifier is installed");
+
+		const receipt = await runExecutableCheck({
+			bus: this.bus,
+			finding,
+			submission,
+			verifier: this.verifier,
+			actorId,
+			challenge: challengeJson,
+			signal: signal ?? new AbortController().signal,
+		});
+		if (receipt.status === "failed" && receipt.counterexample) {
+			const scope = submission.scope ?? this.verifier.defaultScope;
+			if (!this.savedCounterexamples.has(scope)) this.savedCounterexamples.set(scope, new Set());
+			this.savedCounterexamples.get(scope)!.add(receipt.counterexample);
+			finding.status = "needs_work";
+		}
+		finding.updatedAt = Date.now();
+		this.bus.save("findings", finding, actorId);
+		return finding;
+	}
+
+	async verifyAndReview(findingId: string, opts: { runBlindReviewer?: boolean; signal?: AbortSignal } = {}): Promise<Finding> {
+		const finding = this.bus.store.get("findings", findingId);
+		if (!finding) throw new Error(`Finding ${findingId} not found`);
+		const submission = finding.submissions.at(-1);
+		if (!submission) return finding;
+
+		const sig = opts.signal ?? new AbortController().signal;
+		const checksRun: string[] = [];
+
+		// 1. Run executable FindingVerifier + replay all saved counterexamples for this scope (and integrated scope)
+		if (this.verifier && submission.snapshotDir && submission.artifactSha256) {
+			const suite = await runExecutableCheck({
+				bus: this.bus,
+				finding,
+				submission,
+				verifier: this.verifier,
+				actorId: "verifier",
+				signal: sig,
+			});
+			checksRun.push(`${this.verifier.name}@${this.verifier.version}:${suite.status}`);
+
+			if (suite.status === "failed" && suite.counterexample) {
+				const scope = submission.scope ?? this.verifier.defaultScope;
+				if (!this.savedCounterexamples.has(scope)) this.savedCounterexamples.set(scope, new Set());
+				this.savedCounterexamples.get(scope)!.add(suite.counterexample);
+			}
+
+			if (suite.status !== "passed") {
+				return this.recordVerdict(finding, {
 					round: finding.rounds.length + 1,
-					reviewerNodeId: reviewer?.id ?? "unknown",
-					reviewerModel: reviewer?.model,
-					verdict: verdict.verdict,
-					message: verdict.message,
-					confidence: verdict.confidence,
-					checksRun: verdict.checks,
+					revision: submission.revision,
+					reviewerAgentId: "verifier",
+					verdict: "needs_work",
+					message: suite.message,
+					confidence: 1.0,
+					checksRun,
 					at: Date.now(),
 				});
-				finding.status = verdict.verdict;
-				finding.confidence = verdict.confidence;
-				finding.updatedAt = Date.now();
-				harness.bus.save("findings", finding, node.id);
-				harness.bus.emit(node.runId, "finding.verdict", { findingId: finding.id, verdict: verdict.verdict, confidence: verdict.confidence }, node.id);
+			}
 
-				if (verdict.verdict === "accepted") {
-					if (node.parentId) {
-						harness.deliver(
-							node.parentId,
-							`[accepted finding ${finding.id} from child ${node.id} "${node.goal.title}"]\n${finding.claim}\n(level ${finding.level}, confidence ${finding.confidence ?? "n/a"}; evidence: ${finding.evidence.join(", ")})`,
-						);
-					}
-					return `ACCEPTED (confidence ${verdict.confidence ?? "n/a"}): ${verdict.message}\nYour parent has the finding.`;
+			// Replay saved counterexamples across matching scopes + integrated deliverable scope
+			const scope = submission.scope ?? this.verifier.defaultScope;
+			const toReplay = new Set<string>(this.savedCounterexamples.get(scope) ?? []);
+			if (scope === this.verifier.defaultScope) {
+				for (const set of this.savedCounterexamples.values()) for (const ex of set) toReplay.add(ex);
+			}
+			for (const ex of toReplay) {
+				const replay = await runExecutableCheck({
+					bus: this.bus,
+					finding,
+					submission,
+					verifier: this.verifier,
+					actorId: "verifier",
+					challenge: ex,
+					signal: sig,
+				});
+				checksRun.push(`replay:${replay.status}`);
+				if (replay.status !== "passed") {
+					return this.recordVerdict(finding, {
+						round: finding.rounds.length + 1,
+						revision: submission.revision,
+						reviewerAgentId: "verifier",
+						verdict: "needs_work",
+						message: `Failed replayed counterexample: ${replay.message}`,
+						confidence: 1.0,
+						checksRun,
+						at: Date.now(),
+					});
 				}
-				if (verdict.verdict === "needs_work") {
-					const left = harness.config.claimsMaxRounds - finding.rounds.length;
-					return `NEEDS WORK (${left} review rounds left): ${verdict.message}\nAddress this, then call report_finding again with revises="${finding.id}".`;
+			}
+		}
+
+		// 2. Optional blind cross-provider reviewer (zero access to author's CoT!)
+		if (opts.runBlindReviewer && this.spawnReviewer && submission.snapshotDir) {
+			try {
+				const reviewer = await this.spawnReviewer({
+					role: "reviewer",
+					avoidDrivers: finding.authorDriverId ? [finding.authorDriverId] : undefined,
+					workspace: submission.snapshotDir,
+					readOnly: true,
+					systemPrompt: [
+						"You are a blind independent evaluator. You have NO access to the author's reasoning trace.",
+						"Inspect the frozen files in your read-only workspace and verify the claim strictly against evidence.",
+						'Respond with JSON: {"verdict":"accepted"|"needs_work"|"rejected","confidence":0.0-1.0,"message":"concise rationale"}',
+					].join("\n"),
+				});
+				try {
+					const reviewPrompt = [
+						`Claim: ${finding.claim}`,
+						`Summary: ${finding.summary}`,
+						`Evidence: ${finding.evidence.join("; ") || "(none cited)"}`,
+						`Executable checks: ${checksRun.join(", ") || "(none configured)"}`,
+						`Inspect the workspace files and return your JSON verdict.`,
+					].join("\n");
+					const res = await reviewer.runTurn(reviewPrompt, { signal: sig });
+					const parsed = parseReviewJson(res.finalText);
+					return this.recordVerdict(finding, {
+						round: finding.rounds.length + 1,
+						revision: submission.revision,
+						reviewerAgentId: reviewer.agent.id,
+						reviewerDriverId: reviewer.agent.driverId,
+						verdict: parsed.verdict,
+						confidence: parsed.confidence,
+						message: parsed.message,
+						checksRun,
+						at: Date.now(),
+					});
+				} finally {
+					await reviewer.close();
 				}
-				return `REJECTED: ${verdict.message}`;
-			},
-		}),
-	];
+			} catch (error) {
+				finding.reviewError = error instanceof Error ? error.message : String(error);
+			}
+		}
+
+		// Executable suite passed (or no verifier/blind reviewer configured) -> accept with frozen receipt.
+		return this.recordVerdict(finding, {
+			round: finding.rounds.length + 1,
+			revision: submission.revision,
+			reviewerAgentId: this.verifier ? "verifier" : "harness",
+			verdict: "accepted",
+			confidence: this.verifier ? 0.95 : 0.7,
+			message: checksRun.length ? `Verified (${checksRun.join(", ")})` : "Recorded frozen snapshot (no verifier configured)",
+			checksRun,
+			at: Date.now(),
+		});
+	}
+
+	bestVerifiedFinding(runId: string): { finding: Finding; revision: number } | undefined {
+		const accepted = this.bus.store
+			.list("findings", { runId })
+			.filter((f) => f.status === "accepted" && f.submissions.length > 0);
+		if (!accepted.length) return undefined;
+		accepted.sort((a, b) => {
+			const scoreA = a.score ?? a.confidence ?? 0;
+			const scoreB = b.score ?? b.confidence ?? 0;
+			if (scoreB !== scoreA) return scoreB - scoreA;
+			return b.updatedAt - a.updatedAt;
+		});
+		const best = accepted[0]!;
+		return { finding: best, revision: best.submissions.at(-1)!.revision };
+	}
+
+	async drainPending(): Promise<void> {
+		await Promise.allSettled([...this.inFlight]);
+	}
+
+	private recordVerdict(finding: Finding, round: ReviewRound): Finding {
+		const updated: Finding = {
+			...finding,
+			status: round.verdict,
+			confidence: round.confidence ?? finding.confidence,
+			rounds: [...finding.rounds, round],
+			updatedAt: Date.now(),
+		};
+		this.bus.save("findings", updated, round.reviewerAgentId);
+		this.bus.emit(
+			updated.runId,
+			"finding.verdict",
+			{ findingId: updated.id, revision: round.revision, verdict: round.verdict, confidence: round.confidence },
+			round.reviewerAgentId,
+		);
+		return updated;
+	}
+}
+
+function parseReviewJson(text: string): { verdict: ReviewRound["verdict"]; confidence: number; message: string } {
+	const match = /\{[\s\S]*\}/.exec(text);
+	if (match) {
+		try {
+			const obj = JSON.parse(match[0]) as Record<string, unknown>;
+			const v = obj.verdict;
+			const verdict: ReviewRound["verdict"] = v === "accepted" || v === "rejected" || v === "needs_work" ? v : "needs_work";
+			const confidence = typeof obj.confidence === "number" ? Math.max(0, Math.min(1, obj.confidence)) : 0.7;
+			const message = typeof obj.message === "string" ? obj.message : text.slice(0, 400);
+			return { verdict, confidence, message };
+		} catch {
+			// Fall through to heuristic parsing.
+		}
+	}
+	const lower = text.toLowerCase();
+	const verdict: ReviewRound["verdict"] = lower.includes("reject")
+		? "rejected"
+		: lower.includes("needs_work") || lower.includes("needs work") || lower.includes("fail")
+			? "needs_work"
+			: "accepted";
+	return { verdict, confidence: 0.6, message: text.slice(0, 400) || "Blind review completed" };
 }

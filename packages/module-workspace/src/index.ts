@@ -1,45 +1,35 @@
-import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
-import { arr, num, obj, opt, str } from "@earendil-works/pi-schema";
-import { defineTool, type HarnessApi, type HarnessEvent, type HarnessModule, type NodeContext, runCommand } from "@one-piece/core";
-
-// Each leaf gets a private folder: a copy of the seed with its own git history, where every
-// reported finding is a commit (commit-as-attempt). Reviewers read it but cannot change it.
+import { createHash } from "node:crypto";
+import { constants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { cp, lstat, rm } from "node:fs/promises";
+import { basename, dirname, join, relative, resolve } from "node:path";
+import {
+	type EventBus,
+	isOperatorArchivePath,
+	runCommand,
+	type SecretBroker,
+	type ToolDefinition,
+} from "@one-piece/core";
 
 const SKIP = new Set([".git", "node_modules", ".venv", "__pycache__", "dist", ".one_piece"]);
 
-function git(cwd: string, args: string[]): string {
-	try {
-		return execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, GIT_AUTHOR_NAME: "one_piece", GIT_AUTHOR_EMAIL: "agent@one-piece.local", GIT_COMMITTER_NAME: "one_piece", GIT_COMMITTER_EMAIL: "agent@one-piece.local" } }).toString();
-	} catch {
-		return "";
-	}
-}
-
-export function ensureWorkspace(harness: HarnessApi, nodeId: string): string {
-	const dir = harness.workspaceOf(nodeId);
-	if (!dir) throw new Error("This agent has no workspace");
-	if (existsSync(dir)) return dir;
-	mkdirSync(dir, { recursive: true });
-	// An integrating leaf starts from another leaf's workspace (its latest state, not its history).
-	const from = harness.tree.get(nodeId)?.startFrom;
-	const fromDir = from ? harness.workspaceOf(from) : undefined;
-	const seed = fromDir && existsSync(fromDir) ? fromDir : harness.run().workspace;
-	if (seed && existsSync(seed)) {
-		cpSync(seed, dir, { recursive: true, filter: (src) => !SKIP.has(src.split("/").pop() ?? "") });
-	}
-	git(dir, ["init", "-q"]);
-	git(dir, ["add", "-A"]);
-	git(dir, ["commit", "-q", "--allow-empty", "-m", "seed"]);
-	return dir;
-}
-
-function inside(root: string, path: string): string {
-	const full = resolve(root, path);
+function inside(root: string, target: string): string {
+	const full = resolve(root, target);
 	const rel = relative(root, full);
-	if (rel.startsWith("..") || resolve(rel) === rel) throw new Error(`Path ${path} is outside your workspace`);
+	if (rel.startsWith("..") || resolve(rel) === rel) throw new Error(`Path ${target} is outside workspace`);
+	if (isOperatorArchivePath(full)) throw new Error("Path is outside workspace");
 	return full;
+}
+
+function writePath(root: string, target: string): string {
+	const full = inside(root, target);
+	let existing = full;
+	while (!existsSync(existing)) existing = dirname(existing);
+	inside(realpathSync(root), realpathSync(existing));
+	return full;
+}
+
+function sha256File(path: string): string {
+	return createHash("sha256").update(readFileSync(path)).digest("hex").slice(0, 12);
 }
 
 function listTree(root: string, dir: string, depth: number, out: string[]): void {
@@ -47,139 +37,246 @@ function listTree(root: string, dir: string, depth: number, out: string[]): void
 	for (const name of readdirSync(dir).sort()) {
 		if (SKIP.has(name)) continue;
 		const full = join(dir, name);
+		if (isOperatorArchivePath(full)) continue;
 		const stat = statSync(full);
 		out.push(`${relative(root, full)}${stat.isDirectory() ? "/" : ` (${stat.size} B)`}`);
 		if (stat.isDirectory() && depth > 0) listTree(root, full, depth - 1, out);
 	}
 }
 
-export function workspaceModule(options: { maxCommandSeconds?: number; defaultFileLines?: number } = {}): HarnessModule {
-	let harness: HarnessApi;
-	const commandLimit = options.maxCommandSeconds ?? 3600;
-	const defaultFileLines = options.defaultFileLines ?? 400;
-	const timeoutMs = (seconds: number | undefined) => Math.min(seconds ?? 300, commandLimit) * 1000;
-	const limitText = options.maxCommandSeconds ? ` Commands have a ${commandLimit}-second limit per call. Save intermediate results for longer searches.` : "";
-	return {
-		manifest: {
-			name: "workspace",
-			version: "0.1.0",
-			summary: "Private sandboxed folder per leaf: shell, read, write, edit; reviewers read only",
-			roles: ["leaf", "claims_reviewer", "hidden_reviewer"],
-			tools: ["bash", "read_file", "write_file", "edit_file", "list_files", "run_check"],
-			contextCostTokens: 900,
-		},
-		setup(h) {
-			harness = h;
-			h.bus.on((event: HarnessEvent) => {
-				if (event.type !== "finding.reported" && event.type !== "finding.verdict") return;
-				const node = event.nodeId ? h.tree.get(event.nodeId) : undefined;
-				const dir = node?.role === "leaf" ? h.workspaceOf(node.id) : undefined;
-				if (!dir || !existsSync(dir)) return;
-				git(dir, ["add", "-A"]);
-				const label = event.type === "finding.reported" ? `attempt ${event.data.findingId}` : `${event.data.verdict} ${event.data.findingId}`;
-				git(dir, ["commit", "-q", "--allow-empty", "-m", label]);
-			});
-		},
-		prompt(ctx: NodeContext) {
-			if (ctx.node.role === "leaf") return "Workspace: you have a private folder (a copy of the project). Use bash, read_file, write_file, edit_file, list_files. Commands run sandboxed: no sudo, no writes outside your folder. Every reported finding is committed." + limitText;
-			if (ctx.node.role === "claims_reviewer") return "You can read the author's workspace with read_file and list_files, and rerun commands in a scratch copy with run_check." + limitText;
-			return "You can inspect the worker's workspace with read_file and list_files.";
-		},
-		tools(ctx: NodeContext) {
-			const { node } = ctx;
-			const root = () => ensureWorkspace(harness, node.id);
-			const read = [
-				defineTool({
-					name: "read_file",
-					description: `Read a text file from the workspace (up to ${defaultFileLines} lines by default, or specify an exact line range). For large data, use a shell command to return a small excerpt or summary.`,
-					parameters: obj({ path: str(), start_line: opt(num()), end_line: opt(num()) }),
-					async execute(params) {
-						const text = readFileSync(inside(root(), params.path), "utf8");
-						const lines = text.split("\n");
-						const from = Math.max(1, params.start_line ?? 1);
-						const to = Math.min(lines.length, params.end_line ?? from + defaultFileLines - 1);
-						return lines
-							.slice(from - 1, to)
-							.map((l, i) => `${from + i}\t${l}`)
-							.join("\n") + (to < lines.length ? `\n[${lines.length - to} more lines]` : "");
-					},
-				}),
-				defineTool({
-					name: "list_files",
-					description: "List files in the workspace (or a subfolder).",
-					parameters: obj({ path: opt(str()), depth: opt(num({ minimum: 0, maximum: 6 })) }),
-					async execute(params) {
-						const base = root();
-						const out: string[] = [];
-						listTree(base, inside(base, params.path ?? "."), params.depth ?? 2, out);
-						return out.join("\n") || "(empty)";
-					},
-				}),
-			];
-			if (node.role === "hidden_reviewer") return read;
-			if (node.role === "claims_reviewer") {
-				return [
-					...read,
-					defineTool({
-						name: "run_check",
-						description: "Rerun a command in a scratch copy of the author's workspace (the original is never changed).",
-						parameters: obj({ command: str(), timeout_seconds: opt(num({ minimum: 1, maximum: 3600 })) }),
-						async execute(params, signal) {
-							const workspace = root();
-							// The agent can request multiple checks in the same tool batch.
-							const scratch = mkdtempSync(join(dirname(workspace), `.check-${node.id}-`));
-							try {
-								cpSync(workspace, scratch, { recursive: true });
-								const result = await runCommand({ command: params.command, cwd: scratch, profile: "job", timeoutMs: timeoutMs(params.timeout_seconds), signal });
-								return harness.bus.redactor.redactText(`exit ${result.exitCode}${result.timedOut ? " (timed out)" : ""}\n${result.stdout}\n${result.stderr}`.trim());
-							} finally {
-								rmSync(scratch, { recursive: true, force: true });
-							}
-						},
-					}),
-				];
-			}
-			return [
-				...read,
-				defineTool({
-					name: "write_file",
-					description: "Create or overwrite a file in your workspace.",
-					parameters: obj({ path: str(), content: str() }),
-					async execute(params) {
-						const full = inside(root(), params.path);
-						mkdirSync(dirname(full), { recursive: true });
-						writeFileSync(full, params.content);
-						return `Wrote ${params.path} (${params.content.length} chars).`;
-					},
-				}),
-				defineTool({
-					name: "edit_file",
-					description: "Replace an exact, unique piece of text in a file.",
-					parameters: obj({ path: str(), old_text: str(), new_text: str() }),
-					async execute(params) {
-						const full = inside(root(), params.path);
-						const text = readFileSync(full, "utf8");
-						const at = text.indexOf(params.old_text);
-						if (at < 0) throw new Error("old_text not found");
-						if (text.indexOf(params.old_text, at + 1) >= 0) throw new Error("old_text appears more than once; include more context");
-						writeFileSync(full, text.slice(0, at) + params.new_text + text.slice(at + params.old_text.length));
-						return "Edited.";
-					},
-				}),
-				defineTool({
-					name: "bash",
-					description:
-						"Run a shell command in your workspace (sandboxed: writes only inside it, no sudo or destructive system commands). " +
-						"Pass capabilities to inject named secrets as environment variables.",
-					parameters: obj({ command: str(), timeout_seconds: opt(num({ minimum: 1, maximum: 3600 })), capabilities: opt(arr(str())) }),
-					async execute(params, signal) {
-						const secrets = params.capabilities?.length ? harness.services.require("secrets").envFor(node.id, params.capabilities) : {};
-						const result = await runCommand({ command: params.command, cwd: root(), profile: "worker", env: secrets, timeoutMs: timeoutMs(params.timeout_seconds), signal });
-						harness.bus.emit(node.runId, "workspace.command", { command: params.command.slice(0, 500), exitCode: result.exitCode, durationMs: result.durationMs, sandboxed: result.sandboxed }, node.id);
-						return harness.bus.redactor.redactText(`exit ${result.exitCode}${result.timedOut ? " (timed out)" : ""}\n${result.stdout}${result.stderr ? `\n[stderr]\n${result.stderr}` : ""}`.trim());
-					},
-				}),
-			];
-		},
+async function copyReviewInputs(workspace: string, scratch: string, files: string[] | undefined, signal?: AbortSignal): Promise<void> {
+	let bytes = 0;
+	let entries = 0;
+	const filter = async (source: string) => {
+		signal?.throwIfAborted();
+		if (source !== workspace && SKIP.has(basename(source))) return false;
+		const info = await lstat(source);
+		bytes += info.isFile() ? info.size : 0;
+		if (++entries > 4096 || bytes > 64 * 1024 * 1024) {
+			throw new Error("Review inputs exceed 64 MiB / 4096 files; pass explicit `files` paths.");
+		}
+		return true;
 	};
+	const opts = { recursive: true, mode: constants.COPYFILE_FICLONE, filter };
+	if (!files?.length) {
+		await cp(workspace, scratch, opts);
+		return;
+	}
+	for (const file of new Set(files)) {
+		const source = inside(workspace, file);
+		const subpath = relative(workspace, source);
+		if (subpath.split("/").some((p) => SKIP.has(p))) throw new Error("Select files outside VCS/cache folders");
+		inside(realpathSync(workspace), realpathSync(source));
+		await cp(source, join(scratch, subpath), opts);
+	}
+}
+
+export interface WorkspaceToolOptions {
+	bus: EventBus;
+	secrets?: SecretBroker;
+	readOnly?: boolean;
+	networkOff?: boolean;
+	maxCommandSeconds?: number;
+	defaultFileLines?: number;
+}
+
+/**
+ * Runtime-agnostic workspace tools for in-process workers and blind reviewers.
+ * Fixes the v1 silent edit bug: `apply_workspace_change` verifies post-write content/hash
+ * and fails loudly (isError=true) on any missing file, non-unique match, or no-op mismatch.
+ */
+export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
+	const defaultLines = opts.defaultFileLines ?? 200;
+	const maxSec = opts.maxCommandSeconds ?? 300;
+
+	const readOnlyTools: ToolDefinition[] = [
+		{
+			name: "read_file",
+			description: `Read a text file from your workspace (default up to ${defaultLines} lines).`,
+			inputSchema: {
+				type: "object",
+				properties: {
+					path: { type: "string" },
+					start_line: { type: "number" },
+					end_line: { type: "number" },
+				},
+				required: ["path"],
+			},
+			execute(args, ctx) {
+				if (!ctx.workspace) return { text: "No workspace attached", isError: true };
+				const full = inside(ctx.workspace, String(args.path ?? ""));
+				if (!existsSync(full) || !statSync(full).isFile()) {
+					return { text: `File not found: ${String(args.path ?? "")}`, isError: true };
+				}
+				const lines = readFileSync(full, "utf8").split("\n");
+				const from = Math.max(1, typeof args.start_line === "number" ? Math.floor(args.start_line) : 1);
+				const to = Math.min(lines.length, typeof args.end_line === "number" ? Math.floor(args.end_line) : from + defaultLines - 1);
+				const body = lines.slice(from - 1, to).map((l, i) => `${from + i}\t${l}`).join("\n");
+				return { text: body + (to < lines.length ? `\n[${lines.length - to} more lines]` : "") };
+			},
+		},
+		{
+			name: "list_files",
+			description: "List files in the workspace or a subdirectory.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					path: { type: "string" },
+					depth: { type: "number", minimum: 0, maximum: 6 },
+				},
+			},
+			execute(args, ctx) {
+				if (!ctx.workspace) return { text: "No workspace attached", isError: true };
+				const base = ctx.workspace;
+				const target = inside(base, typeof args.path === "string" ? args.path : ".");
+				const out: string[] = [];
+				listTree(base, target, typeof args.depth === "number" ? Math.floor(args.depth) : 2, out);
+				return { text: out.join("\n") || "(empty)" };
+			},
+		},
+	];
+
+	if (opts.readOnly) {
+		return [
+			...readOnlyTools,
+			{
+				name: "run_check",
+				description: "Run an offline verification command in a scratch copy of the frozen snapshot.",
+				inputSchema: {
+					type: "object",
+					properties: {
+						command: { type: "string" },
+						files: { type: "array", items: { type: "string" } },
+						timeout_seconds: { type: "number", minimum: 1, maximum: 3600 },
+					},
+					required: ["command"],
+				},
+				async execute(args, ctx) {
+					if (!ctx.workspace) return { text: "No snapshot workspace attached", isError: true };
+					const scratch = mkdtempSync(join(dirname(ctx.workspace), `.check-${ctx.agentId}-`));
+					try {
+						const files = Array.isArray(args.files) ? args.files.filter((f): f is string => typeof f === "string") : undefined;
+						await copyReviewInputs(ctx.workspace, scratch, files, ctx.signal);
+						const timeoutMs = Math.min(typeof args.timeout_seconds === "number" ? args.timeout_seconds : 120, maxSec) * 1000;
+						const result = await runCommand({
+							command: String(args.command ?? ""),
+							cwd: scratch,
+							profile: "job",
+							isolatedWrites: true,
+							networkOff: true,
+							timeoutMs,
+							signal: ctx.signal,
+						});
+						const text = opts.bus.redactor.redactText(
+							`exit ${result.exitCode}${result.timedOut ? " (timed out)" : ""}\n${result.stdout}${result.stderr ? `\n[stderr]\n${result.stderr}` : ""}`.trim(),
+						);
+						return { text, isError: result.exitCode !== 0 || result.timedOut };
+					} finally {
+						await rm(scratch, { recursive: true, force: true });
+					}
+				},
+			},
+		];
+	}
+
+	return [
+		...readOnlyTools,
+		{
+			name: "apply_workspace_change",
+			description: "Create, replace, or edit one exact unique text match in a workspace file (verifies post-write state loudly).",
+			inputSchema: {
+				type: "object",
+				properties: {
+					operation: { type: "string", enum: ["create", "replace", "edit"] },
+					path: { type: "string" },
+					content: { type: "string" },
+					old_text: { type: "string" },
+					new_text: { type: "string" },
+				},
+				required: ["operation", "path"],
+			},
+			execute(args, ctx) {
+				if (!ctx.workspace) return { text: "No workspace attached", isError: true };
+				const op = String(args.operation ?? "");
+				const relPath = String(args.path ?? "");
+				const full = writePath(ctx.workspace, relPath);
+
+				if (op === "create") {
+					if (typeof args.content !== "string") return { text: "create requires string content", isError: true };
+					if (existsSync(full)) return { text: `File already exists: ${relPath}`, isError: true };
+					mkdirSync(dirname(full), { recursive: true });
+					writeFileSync(full, args.content, { flag: "wx" });
+					return { text: `Created ${relPath} (sha=${sha256File(full)})` };
+				}
+				if (op === "replace") {
+					if (typeof args.content !== "string") return { text: "replace requires string content", isError: true };
+					if (!existsSync(full) || !statSync(full).isFile()) return { text: `Cannot replace missing file: ${relPath}`, isError: true };
+					const before = sha256File(full);
+					writeFileSync(full, args.content, "utf8");
+					const after = sha256File(full);
+					return { text: `Replaced ${relPath} (${before} -> ${after})` };
+				}
+				if (op === "edit") {
+					if (typeof args.old_text !== "string" || !args.old_text.length || typeof args.new_text !== "string") {
+						return { text: "edit requires nonempty old_text and string new_text", isError: true };
+					}
+					if (!existsSync(full) || !statSync(full).isFile()) return { text: `File not found: ${relPath}`, isError: true };
+					const text = readFileSync(full, "utf8");
+					const at = text.indexOf(args.old_text);
+					if (at < 0) return { text: `Edit failed: old_text not found in ${relPath}`, isError: true };
+					if (text.indexOf(args.old_text, at + 1) >= 0) {
+						return { text: `Edit failed: old_text matched multiple times in ${relPath}; include more context`, isError: true };
+					}
+					const updated = text.slice(0, at) + args.new_text + text.slice(at + args.old_text.length);
+					const before = sha256File(full);
+					writeFileSync(full, updated, "utf8");
+					const after = sha256File(full);
+					if (before === after && args.old_text !== args.new_text) {
+						return { text: `Edit failed: post-write verification detected unchanged file ${relPath}`, isError: true };
+					}
+					return { text: `Edited ${relPath} (${before} -> ${after})` };
+				}
+				return { text: `Unsupported operation: ${op}`, isError: true };
+			},
+		},
+		{
+			name: "bash",
+			description: "Run a sandboxed shell command inside your workspace.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					command: { type: "string" },
+					timeout_seconds: { type: "number", minimum: 1, maximum: 3600 },
+					capabilities: { type: "array", items: { type: "string" } },
+				},
+				required: ["command"],
+			},
+			async execute(args, ctx) {
+				if (!ctx.workspace) return { text: "No workspace attached", isError: true };
+				const command = String(args.command ?? "");
+				const caps = Array.isArray(args.capabilities) ? args.capabilities.filter((c): c is string => typeof c === "string") : [];
+				const env = caps.length && opts.secrets ? opts.secrets.envFor(ctx.agentId, caps) : {};
+				const timeoutMs = Math.min(typeof args.timeout_seconds === "number" ? args.timeout_seconds : 180, maxSec) * 1000;
+				const result = await runCommand({
+					command,
+					cwd: ctx.workspace,
+					profile: "worker",
+					networkOff: opts.networkOff,
+					env,
+					timeoutMs,
+					signal: ctx.signal,
+				});
+				opts.bus.emit(
+					ctx.runId,
+					"workspace.command",
+					{ command: command.slice(0, 500), exitCode: result.exitCode, durationMs: result.durationMs, sandboxed: result.sandboxed },
+					ctx.agentId,
+				);
+				const text = opts.bus.redactor.redactText(
+					`exit ${result.exitCode}${result.timedOut ? " (timed out)" : ""}\n${result.stdout}${result.stderr ? `\n[stderr]\n${result.stderr}` : ""}`.trim(),
+				);
+				return { text, isError: result.exitCode !== 0 || result.timedOut };
+			},
+		},
+	];
 }

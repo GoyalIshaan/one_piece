@@ -1,12 +1,31 @@
 {
 	"id": "wide-audit",
-	"title": "Audit 16 sensor logs, each with its own correction",
+	"title": "Audit sensor logs, each with its own correction",
 	"category": "coordination",
 	"inspiredBy": "SwarmBench wide search (decompose, delegate, aggregate)",
 	"suites": ["smoke", "full"],
 	"prepare": true,
-	"goal": "Follow TASK.md: audit all 16 sensor logs in data/, applying each file's own correction from its note, and produce answers.json covering every file. A hidden grader checks every field. The workspace that holds the final, complete answers.json is the one that counts, so make sure one worker integrates all results into a single answers.json.",
-	"rubric": "Read each file's short correction note, then process the raw rows with a script that reads the CSVs locally. Return only notes, checks and summary results to model context. Exactness matters: rounding and the definitions in TASK.md are the specification. Split the files across workers if useful, but the final answers.json must cover all 16 files.",
+	"fixtureOptions": { "shards": "16", "fleet": "off" },
+	"fixedWorkers": [
+		{
+			"budgetShare": 0.68,
+			"goal": {
+				"title": "Primary audit and final artifact",
+				"text": "Own the complete audit described in TASK.md. Read all sensor correction notes, compute the requested fields with a local script and produce the single final answers.json in your workspace. Report the exact file once checked.",
+				"rubric": "Apply each file's correction before computation. Return compact notes and summaries to model context and keep raw rows in the workspace. Verify coverage and rounding before reporting."
+			}
+		},
+		{
+			"budgetShare": 0.18,
+			"goal": {
+				"title": "Independent audit check",
+				"text": "Independently check the interpretation of TASK.md and test representative sensors from the different correction types. Report reproducible examples and potential edge cases for the delivery owner.",
+				"rubric": "Keep raw rows in the workspace. Verify the sampled calculations against the written spec. The primary worker owns the final answers.json."
+			}
+		}
+	],
+	"goal": "Audit all sensor logs in data/ using the per-file corrections in their notes. Deliver the JSON outputs specified by TASK.md together in one workspace.",
+	"rubric": "The hidden grader checks every field against the definitions, corrections and rounding rules in TASK.md.",
 	"budget": { "tokens": 350000, "usd": 1.5, "cpu_seconds": 300 },
 	"caps": { "maxChildren": 4, "maxDepth": 2 },
 	"timeLimitMinutes": 20

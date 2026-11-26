@@ -1,0 +1,1221 @@
+{
+  "upstream_commit": "0123dfb939b35228cf2c1fde224cd0561e727408",
+  "model": "openai:gpt-6.2-sol",
+  "tasks": {
+    "erdos_min_overlap": {
+      "kind": "math",
+      "run": "run-mwslitjm-11-65a2",
+      "raw_receipt": ".one_piece/external-coral/transfer-01/erdos_min_overlap/result.json",
+      "usage": {
+        "calls": 27,
+        "tokens": 38358,
+        "elapsed_ms": 135010,
+        "peak_input_plus_cache": 4158,
+        "provider_errors": 12,
+        "provider_aborts": 1,
+        "model_usd": 0.069476
+      },
+      "timed_out": true,
+      "hashes": {
+        "yaml": "455e18e5114a5e4d7a52c3f2d5edd852e61f7f7b3a5f908a021fcb51d1e85ca2",
+        "seed": "99b4f655e01017311113c6840460d7e17869419f3dd9b3ef14cc406e56a5d41f",
+        "grader": "ba69cb7e4f22fef76e2f44e51cbbe34471f260be6cf5ef1fe3f571823e9330c4",
+        "runner": "4733499bd1f89074b35e20036f50e16637b18c261f8ee2326dbd54f930d18da7",
+        "adapter": "1a7713ba0be61ba8e21b8d61968d44d2bb258b5b25b5e0237f0aa14605dcb332"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "c5_bound": 0.4251613317267845,
+        "combined_score": 0.8959493883447458,
+        "n_points": 200,
+        "eval_time": 2.8941149711608887
+      },
+      "nominated": null,
+      "replay": null,
+      "best_new_candidate": "trial-2",
+      "attempts": [
+        {
+          "id": "trial-1",
+          "seat": 0,
+          "sha256": "c597187d18f426c28dc3bedbb6a80ed33ab419bd7a3a479864286eb2acd57193",
+          "grader": {
+            "c5_bound": 0.3814295869984916,
+            "combined_score": 0.9986719648729204,
+            "n_points": 200,
+            "eval_time": 4.1856629848480225
+          }
+        },
+        {
+          "id": "trial-2",
+          "seat": 1,
+          "sha256": "6acb131cda8e2d78766c4bfd01afbe020738a556fcbc6bb9472f0ce3def3f32c",
+          "grader": {
+            "c5_bound": 0.38106091922178786,
+            "combined_score": 0.9996381572961633,
+            "n_points": 144,
+            "eval_time": 9.928931713104248
+          }
+        }
+      ],
+      "programs": {
+        "trial-2": {
+          "source": "import os\nos.environ['OPENBLAS_NUM_THREADS']='1'\nimport numpy as np\nfrom scipy.optimize import minimize\n\ndef opt(h,it):\n n=len(h); i=np.arange(n); d=i[None,:]-np.arange(1-n,n)[:,None]; e=i[None,:]+np.arange(1-n,n)[:,None]; a=(d>=0)&(d<n); b=(e>=0)&(e<n); d=d.clip(0,n-1); e=e.clip(0,n-1); dx=2/n\n def f(x):return x[-1]-dx*np.correlate(x[:-1],1-x[:-1],'full')\n def jac(x):\n  h=x[:-1];return np.column_stack((dx*(b*h[e]-a*(1-h[d])),np.ones(2*n-1)))\n r=minimize(lambda x:x[-1],np.r_[h,.5],jac=lambda x:np.r_[np.zeros(n),1.],bounds=[(0,1)]*n+[(0,1)],constraints=[{'type':'ineq','fun':f,'jac':jac},{'type':'eq','fun':lambda x:x[:-1].mean()-.5,'jac':lambda x:np.r_[np.full(n,1/n),0.]}],method='SLSQP',options={'maxiter':it,'ftol':1e-10});return r.x[:-1],max(dx*np.correlate(r.x[:-1],1-r.x[:-1],'full'))\ndef run():\n rng=np.random.default_rng(303); best=(None,1.)\n for j in range(14):\n  n=48; t=(np.arange(n)+.5)/n\n  h=.5+rng.uniform(-.23,.23,n) if j%3 else .5+.35*np.cos(2*np.pi*t*(1+j//3));h-=h.mean()-.5\n  h,v=opt(h,115)\n  if v<best[1]:best=h,v\n h,v=best\n for n,it in [(96,105),(144,80)]:\n  g,w=opt(np.interp((np.arange(n)+.5)/n,(np.arange(len(h))+.5)/len(h),h),it)\n  if w<v:h,v=g,w\n return h,v,len(h)\n",
+          "sha256": "6acb131cda8e2d78766c4bfd01afbe020738a556fcbc6bb9472f0ce3def3f32c"
+        }
+      }
+    },
+    "first_autocorr_ineq": {
+      "kind": "math",
+      "run": "run-mwsllret-29-3b02",
+      "raw_receipt": ".one_piece/external-coral/transfer-01/first_autocorr_ineq/result.json",
+      "usage": {
+        "calls": 23,
+        "tokens": 52710,
+        "elapsed_ms": 151557,
+        "peak_input_plus_cache": 4326,
+        "provider_errors": 4,
+        "provider_aborts": 0,
+        "model_usd": 0.0984728
+      },
+      "timed_out": true,
+      "hashes": {
+        "yaml": "5934b3fc9d01ec92aa73dff8754019fad9b58733c00fe76387367096053d8503",
+        "seed": "53935b2ebe12d52ff4e09d2b217fc5f3db8c7aa182f1e91f9e80bc69623dcd9f",
+        "grader": "5f0d471a12bb413e73b9b5e4ce97061246751d3e9d884ba062ba47b948732a1a",
+        "runner": "4733499bd1f89074b35e20036f50e16637b18c261f8ee2326dbd54f930d18da7",
+        "adapter": "1a7713ba0be61ba8e21b8d61968d44d2bb258b5b25b5e0237f0aa14605dcb332"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "c1": 1.9702534277601338,
+        "combined_score": 0.7640103284334552,
+        "loss": 1.9702534277601338,
+        "n_points": 600,
+        "eval_time": 1.746553897857666
+      },
+      "nominated": null,
+      "replay": null,
+      "best_new_candidate": "trial-2",
+      "attempts": [
+        {
+          "id": "trial-1",
+          "seat": 0,
+          "sha256": "ccdc0783ce53d42410a05a27d8f6a0cb9d154c8f98386e93f7ea1846d7f38a66",
+          "grader": {
+            "c1": 1.578998751282344,
+            "combined_score": 0.9533218232235295,
+            "loss": 1.578998751282344,
+            "n_points": 48,
+            "eval_time": 4.1698949337005615
+          }
+        },
+        {
+          "id": "trial-2",
+          "seat": 1,
+          "sha256": "094439fed034c115e70ce8e36fd3ebb3a8ccf1f2abdb26219131ea930eb7244c",
+          "grader": {
+            "c1": 1.5631021048645095,
+            "combined_score": 0.9630170439637661,
+            "loss": 1.5631021048645095,
+            "n_points": 640,
+            "eval_time": 3.6789140701293945
+          }
+        },
+        {
+          "id": "trial-3",
+          "seat": 0,
+          "sha256": "5054bc28656f65495c523f7cbcce78edf28b17d48ee464aa34db3c19ab8ebfdd",
+          "grader": {
+            "error": "Local grader subprocess error; full command diagnostic in raw receipt."
+          }
+        }
+      ],
+      "programs": {
+        "trial-2": {
+          "source": "import numpy as np\nfrom scipy.optimize import minimize\nfrom scipy.special import gammaln\nfrom threadpoolctl import threadpool_limits\n\ndef solve(x, betas, nit):\n    n=len(x);best=x.copy();bc=np.convolve(x,x).max()*2*n/x.sum()**2\n    def fun(x):\n        s=x.sum();y=x/s\n        z=np.convolve(y,y)*2*n\n        m=z.max();w=np.exp((z-m)*b);ws=w.sum()\n        g=np.correlate(w,y)*4*n/ws\n        return m+np.log(ws)/b, (g-g.dot(y))/s\n    for b in betas:\n        def cb(x):\n            nonlocal best,bc\n            c=np.convolve(x,x).max()*2*n/x.sum()**2\n            if c<bc:bc=c;best=x.copy()\n        x=minimize(fun,x,method='L-BFGS-B',jac=True,bounds=[(0,None)]*n,callback=cb,options={'maxiter':nit,'ftol':1e-14,'gtol':1e-12,'maxcor':20}).x\n        cb(x)\n    return best,bc\n\ndef init(n):\n    i=np.arange(n);x=np.exp(gammaln(i+.5)-gammaln(i+1));return x/x.mean()\n\ndef run():\n    x=init(40);best=x;bc=2\n    with threadpool_limits(limits=1):\n        for n in [40,80,160,320,640]:\n            if len(x)!=n:x=np.repeat(x,2);x=x/x.mean()\n            x,c=solve(x,[50,200,1000,5000,25000],180)\n            if c<bc:best=x;bc=c\n    return best,bc,bc,len(best)\n",
+          "sha256": "094439fed034c115e70ce8e36fd3ebb3a8ccf1f2abdb26219131ea930eb7244c"
+        }
+      }
+    },
+    "heilbronn_convex_13": {
+      "kind": "math",
+      "run": "run-mwsllo6l-18-3455",
+      "raw_receipt": ".one_piece/external-coral/transfer-01/heilbronn_convex_13/result.json",
+      "usage": {
+        "calls": 19,
+        "tokens": 32093,
+        "elapsed_ms": 142739,
+        "peak_input_plus_cache": 3372,
+        "provider_errors": 4,
+        "provider_aborts": 1,
+        "model_usd": 0.0759892
+      },
+      "timed_out": true,
+      "hashes": {
+        "yaml": "e57165568c1b26295e85fdeb7bd30d92ca5fe43f18ab27ad8467f40c7ddb6c7e",
+        "seed": "0d354eaf711208998c032aa057d05cbacebd524a36353d29b6622d70cfa65e1a",
+        "grader": "3dfb40c3a1f85816f1e49f05ca59547f0d6f4dfe682704ceaf91f260135337c5",
+        "runner": "4733499bd1f89074b35e20036f50e16637b18c261f8ee2326dbd54f930d18da7",
+        "adapter": "1a7713ba0be61ba8e21b8d61968d44d2bb258b5b25b5e0237f0aa14605dcb332"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "min_area_normalized": 0.00032245840426786953,
+        "combined_score": 0.010423103755007445,
+        "eval_time": 9.703636169433594e-05
+      },
+      "nominated": null,
+      "replay": null,
+      "best_new_candidate": null,
+      "attempts": [
+        {
+          "id": "trial-1",
+          "seat": 1,
+          "sha256": "d97874b3d8c0088e9d825eb961bb43ae77c5821b481c04c5932d9989d302e81e",
+          "grader": {
+            "error": "Local grader subprocess error; full command diagnostic in raw receipt."
+          }
+        }
+      ],
+      "programs": {}
+    },
+    "heilbronn_convex_14": {
+      "kind": "math",
+      "run": "run-mwsllo7m-23-f9ee",
+      "raw_receipt": ".one_piece/external-coral/transfer-01/heilbronn_convex_14/result.json",
+      "usage": {
+        "calls": 22,
+        "tokens": 40388,
+        "elapsed_ms": 143606,
+        "peak_input_plus_cache": 3418,
+        "provider_errors": 4,
+        "provider_aborts": 1,
+        "model_usd": 0.08908
+      },
+      "timed_out": true,
+      "hashes": {
+        "yaml": "96f633c9906fc8ab288b7c92b307f268426676178b0762cf1ef775722466de97",
+        "seed": "45fdadedc3e523fa3fb3bc51ccb1b51e02ce051d0e1f3f967557a8903630386f",
+        "grader": "43f5870de2915335474cb31041cf5a961cf2bcab37b2786212eb9b86631d5cc9",
+        "runner": "4733499bd1f89074b35e20036f50e16637b18c261f8ee2326dbd54f930d18da7",
+        "adapter": "1a7713ba0be61ba8e21b8d61968d44d2bb258b5b25b5e0237f0aa14605dcb332"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "min_area_normalized": 0.0003104973351240682,
+        "combined_score": 0.011154695910848725,
+        "eval_time": 0.00013065338134765625
+      },
+      "nominated": null,
+      "replay": null,
+      "best_new_candidate": "trial-1",
+      "attempts": [
+        {
+          "id": "trial-1",
+          "seat": 1,
+          "sha256": "8926f414679b2038052758eceaf101a16d653ff0d237e1fc3e4d791be831ce0b",
+          "grader": {
+            "min_area_normalized": 0.017245214557721388,
+            "combined_score": 0.6195387288327567,
+            "eval_time": 9.925606727600098
+          }
+        },
+        {
+          "id": "trial-2",
+          "seat": 0,
+          "sha256": "a83891d374e9e4dad1fd25083416d0bd70fc9efa24ed9851df23f8d93ea14dda",
+          "grader": {
+            "error": "Local grader subprocess error; full command diagnostic in raw receipt."
+          }
+        }
+      ],
+      "programs": {
+        "trial-1": {
+          "source": "import numpy as np\nfrom scipy.spatial import ConvexHull\nfrom scipy.optimize import minimize\nfrom itertools import combinations\nfrom time import monotonic\n\ndef run():\n r=np.random.default_rng(7126); start=monotonic(); n=14\n I=np.array(list(combinations(range(n),3))); a,b,c=I.T; rows=np.arange(len(a))\n g=np.array([(i+j*.5,j*.8660254) for i in range(-3,4) for j in range(-3,4) if max(abs(i),abs(j),abs(i+j))<=3]);\n def cross(u,v):return u[:,0]*v[:,1]-u[:,1]*v[:,0]\n def det(p):return cross(p[b]-p[a],p[c]-p[a])\n def actual(p):return np.min(abs(det(p)))/(2*ConvexHull(p).volume)\n def optimize(p):\n  h=ConvexHull(p).vertices; hn=np.roll(h,-1); hp=np.roll(h,1); s=np.where(det(p)>0,1.,-1.); S=s[:,None]\n  def rot(p): return p[:,[1,0]]*np.array([1.,-1.])\n  def fun(z):\n   p=z[:-1].reshape(n,2); A=cross(p[h],p[hn]).sum(); return s*det(p)-z[-1]*A\n  def jac(z):\n   p=z[:-1].reshape(n,2); A=cross(p[h],p[hn]).sum(); J=np.zeros((len(a),n,2)); J[rows,a]=S*rot(p[b]-p[c]); J[rows,b]=S*rot(p[c]-p[a]); J[rows,c]=S*rot(p[a]-p[b]); J[:,h]-=z[-1]*rot(p[hn]-p[hp]); return np.column_stack((J.reshape(len(a),-1),np.full(len(a),-A)))\n  f=np.zeros(2*n+1); f[-1]=-1\n  z=minimize(lambda z:-z[-1],np.r_[p.ravel(),actual(p)],jac=lambda z:f,method='SLSQP',constraints=[dict(type='ineq',fun=fun,jac=jac)],bounds=[(-2.6,2.6)]*(2*n)+[(0,.1)],options={'maxiter':38,'ftol':1e-9}).x\n  return z[:-1].reshape(n,2)\n elite=[]; bp=g[np.argsort(np.linalg.norm(g,axis=1))[:n]]/2.5+r.normal(0,.12,(n,2)); best=actual(bp)\n for k in range(1500):\n  if monotonic()-start>9.8:break\n  if elite and k%5!=0:\n   p=elite[r.integers(min(len(elite),9))][1].copy(); p-=p.mean(0); p/=np.max(np.linalg.norm(p,axis=1))\n   sig=r.choice([.018,.035,.06,.1,.17,.25]); idx=r.choice(n,r.integers(1,n+1),replace=False); p[idx]+=r.normal(0,sig,(len(idx),2))\n  elif k%10==0:\n   p=r.uniform(-1,1,(n,2));\n  else:\n   d=np.linalg.norm(g-r.normal(0,.27,2),axis=1)+r.normal(0,.5,len(g)); p=g[np.argsort(d)[:n]]/2.5+r.normal(0,.12,(n,2));\n  try:\n   q=optimize(p); val=actual(q)\n  except (ValueError,FloatingPointError):continue\n  if val>best:best=val;bp=q.copy()\n  if all(abs(val-v)>1e-6 for v,_ in elite):\n   elite.append((val,q)); elite.sort(key=lambda z:-z[0]); elite=elite[:20]\n return bp",
+          "sha256": "8926f414679b2038052758eceaf101a16d653ff0d237e1fc3e4d791be831ce0b"
+        }
+      }
+    },
+    "heilbronn_triangle": {
+      "kind": "math",
+      "run": "run-mwslirb3-01-9279",
+      "raw_receipt": ".one_piece/external-coral/transfer-01/heilbronn_triangle/result.json",
+      "usage": {
+        "calls": 25,
+        "tokens": 29957,
+        "elapsed_ms": 135025,
+        "peak_input_plus_cache": 3742,
+        "provider_errors": 12,
+        "provider_aborts": 0,
+        "model_usd": 0.07281
+      },
+      "timed_out": true,
+      "hashes": {
+        "yaml": "ed247fe907b8ad128ec92cd6fde26b3d48773886dc9c3ae0efce2b296ef4b2e6",
+        "seed": "52fb31b0dcf34b6c26d695c07d2937f72d5ccdac9d4add414ec1bf2f120610e3",
+        "grader": "1179668d49e8a0db465743b0c5cb959745ec1779dcc642984261ca777a08ddea",
+        "runner": "4733499bd1f89074b35e20036f50e16637b18c261f8ee2326dbd54f930d18da7",
+        "adapter": "1a7713ba0be61ba8e21b8d61968d44d2bb258b5b25b5e0237f0aa14605dcb332"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "min_area_normalized": 0,
+        "combined_score": 0,
+        "eval_time": 9.5367431640625e-07
+      },
+      "nominated": null,
+      "replay": null,
+      "best_new_candidate": "trial-2",
+      "attempts": [
+        {
+          "id": "trial-1",
+          "seat": 1,
+          "sha256": "fced1b330535ee9110c568726ca09caea7e03419a63618b2d948d0c826d74713",
+          "grader": {
+            "error": "Local grader subprocess error; full command diagnostic in raw receipt."
+          }
+        },
+        {
+          "id": "trial-2",
+          "seat": 0,
+          "sha256": "aa6815094cb8b3c7e653ac5a35b335fdb388e7c11df18b513651f16e038c9d7a",
+          "grader": {
+            "min_area_normalized": 0.028228694978860394,
+            "combined_score": 0.7727560929301408,
+            "eval_time": 13.64503288269043
+          }
+        }
+      ],
+      "programs": {
+        "trial-2": {
+          "source": "import numpy as np\nfrom scipy.optimize import minimize\nfrom itertools import combinations\n\ndef run():\n I,J,K=np.array(list(combinations(range(11),3))).T\n R=np.arange(len(I)); D=np.zeros((165,23));D[:,22]=-1\n A=np.zeros((8,17));A[np.repeat(np.arange(8),2),np.arange(16)]=-1\n P=np.array([[0.,0.],[1.,0.],[0.,1.]])\n rng=np.random.default_rng(9217);best=-1;bx=None; pool=[]\n def raw(x):\n  p=np.vstack((P,x[:-1].reshape(-1,2)));u=p[J]-p[I];v=p[K]-p[I];return p,u,v,u[:,0]*v[:,1]-u[:,1]*v[:,0]\n def f(x):return np.r_[s*raw(x)[3]-x[-1],1+A@x]\n def j(x):\n  p,u,v,_=raw(x)\n  D[R,2*I]=(u[:,1]-v[:,1])*s;D[R,2*I+1]=(v[:,0]-u[:,0])*s\n  D[R,2*J]=v[:,1]*s;D[R,2*J+1]=-v[:,0]*s\n  D[R,2*K]=-u[:,1]*s;D[R,2*K+1]=u[:,0]*s\n  return np.vstack((D[:,6:],A))\n g=np.r_[np.zeros(16),-1.];bounds=[(0,1)]*16+[(-1,1)]\n for i in range(1050):\n  if pool and i%5:\n   z=pool[int(rng.random()**2*len(pool))][1];q=z[:-1].reshape(-1,2).copy();q+=rng.normal(0,rng.choice([.023,.04,.065,.10,.18]),(8,2));q=np.maximum(q,0);q/=np.maximum(1,q.sum(1,keepdims=True))\n  else:q=rng.dirichlet([.65,.65,.65],size=8)[:,:2]\n  x=np.r_[q.ravel(),0.];s=np.where(raw(x)[3]>=0,1.,-1.)\n  v=minimize(lambda x:-x[-1],x,jac=lambda x:g,method='SLSQP',bounds=bounds,constraints=[{'type':'ineq','fun':f,'jac':j}],options={'maxiter':32,'ftol':2e-9}).x\n  q=v[:-1].reshape(-1,2);q/=np.maximum(1,q.sum(1,keepdims=True));score=np.min(abs(raw(v)[3]))\n  if score>best:best=score;bx=v.copy()\n  if (len(pool)<20 or score>pool[-1][0]) and all(abs(score-k)>1e-6 for k,_ in pool):\n   pool.append((score,v.copy()));pool.sort(key=lambda t:-t[0]);del pool[20:]\n return raw(bx)[0]@np.array([[1,0],[.5,np.sqrt(3)/2]])\n",
+          "sha256": "aa6815094cb8b3c7e653ac5a35b335fdb388e7c11df18b513651f16e038c9d7a"
+        }
+      }
+    },
+    "hexagon_packing_11": {
+      "kind": "math",
+      "run": "run-mwslp0ha-52-4d80",
+      "raw_receipt": ".one_piece/external-coral/transfer-01/hexagon_packing_11/result.json",
+      "usage": {
+        "calls": 19,
+        "tokens": 61820,
+        "elapsed_ms": 94773,
+        "peak_input_plus_cache": 4818,
+        "provider_errors": 0,
+        "provider_aborts": 0,
+        "model_usd": 0.09612
+      },
+      "timed_out": false,
+      "hashes": {
+        "yaml": "05a5d3e8ef711f2a5a34a92619111a084772c1a5b7b7819ed896dd956daccfa2",
+        "seed": "4c23ff06244998cd6a6a91462500c9887bd7cfe7d967f27efabcfc3ad74e1b46",
+        "grader": "6c03c6a10cd0950101da2c4ac173216998d15369c921f58fa6d426974e2cfe11",
+        "runner": "4733499bd1f89074b35e20036f50e16637b18c261f8ee2326dbd54f930d18da7",
+        "adapter": "1a7713ba0be61ba8e21b8d61968d44d2bb258b5b25b5e0237f0aa14605dcb332"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "error": "File \"<string>\", line 103\n    print(json.dumps({\"error\": f\"Invalid inner_hex_data shape: {inner_hex_data.shape}, expected ({}, 3)\".format(N_HEX)}))\n                                                                                                  ^\nSyntaxError: f-string: valid expression required bef"
+      },
+      "nominated": null,
+      "replay": null,
+      "best_new_candidate": null,
+      "attempts": [
+        {
+          "id": "trial-1",
+          "seat": 1,
+          "sha256": "434229dc5735c9cbb7742b895764b3f174a41abeef866b75cb75053243ff30ba",
+          "grader": {
+            "error": "File \"<string>\", line 103\n    print(json.dumps({\"error\": f\"Invalid inner_hex_data shape: {inner_hex_data.shape}, expected ({}, 3)\".format(N_HEX)}))\n                                                                                                  ^\nSyntaxError: f-string: valid expression required bef"
+          }
+        },
+        {
+          "id": "trial-2",
+          "seat": 0,
+          "sha256": "b7a74ece691428a293c707573ec646c7495fd7c66a5c015a8b98d6fe6084d540",
+          "grader": {
+            "error": "File \"<string>\", line 103\n    print(json.dumps({\"error\": f\"Invalid inner_hex_data shape: {inner_hex_data.shape}, expected ({}, 3)\".format(N_HEX)}))\n                                                                                                  ^\nSyntaxError: f-string: valid expression required bef"
+          }
+        }
+      ],
+      "programs": {}
+    },
+    "hexagon_packing_12": {
+      "kind": "math",
+      "run": "run-mwslqzm8-64-c99c",
+      "raw_receipt": ".one_piece/external-coral/transfer-01/hexagon_packing_12/result.json",
+      "usage": {
+        "calls": 20,
+        "tokens": 59296,
+        "elapsed_ms": 129157,
+        "peak_input_plus_cache": 4461,
+        "provider_errors": 1,
+        "provider_aborts": 0,
+        "model_usd": 0.1131456
+      },
+      "timed_out": false,
+      "hashes": {
+        "yaml": "be6955163c2b806777adfe5e88b627c6c9127e260cff04c3fcb2b23885c9b738",
+        "seed": "899727dd9a5bd3dc9c90d02f7f83cd77322a4afa623c82e565d035905e3b2a3e",
+        "grader": "6847b927ca6535c5d7bdeec81be58942c8d40c8edfa214ee022736beea74fc12",
+        "runner": "4733499bd1f89074b35e20036f50e16637b18c261f8ee2326dbd54f930d18da7",
+        "adapter": "1a7713ba0be61ba8e21b8d61968d44d2bb258b5b25b5e0237f0aa14605dcb332"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "error": "File \"<string>\", line 103\n    print(json.dumps({\"error\": f\"Invalid inner_hex_data shape: {inner_hex_data.shape}, expected ({}, 3)\".format(N_HEX)}))\n                                                                                                  ^\nSyntaxError: f-string: valid expression required bef"
+      },
+      "nominated": null,
+      "replay": null,
+      "best_new_candidate": null,
+      "attempts": [
+        {
+          "id": "trial-1",
+          "seat": 0,
+          "sha256": "bc2fbc186d04431122de96d0a44fad4e8eeacd67bbaf4cd11a409bf3c159f251",
+          "grader": {
+            "error": "File \"<string>\", line 103\n    print(json.dumps({\"error\": f\"Invalid inner_hex_data shape: {inner_hex_data.shape}, expected ({}, 3)\".format(N_HEX)}))\n                                                                                                  ^\nSyntaxError: f-string: valid expression required bef"
+          }
+        },
+        {
+          "id": "trial-2",
+          "seat": 1,
+          "sha256": "c3c651d55842fc8ddc7b6a13ee0bd93d694a21ce50198e8314d06644a443593b",
+          "grader": {
+            "error": "File \"<string>\", line 103\n    print(json.dumps({\"error\": f\"Invalid inner_hex_data shape: {inner_hex_data.shape}, expected ({}, 3)\".format(N_HEX)}))\n                                                                                                  ^\nSyntaxError: f-string: valid expression required bef"
+          }
+        }
+      ],
+      "programs": {}
+    },
+    "matmul": {
+      "kind": "math",
+      "run": "run-mwslirbk-06-92fe",
+      "raw_receipt": ".one_piece/external-coral/transfer-01/matmul/result.json",
+      "usage": {
+        "calls": 28,
+        "tokens": 35582,
+        "elapsed_ms": 135026,
+        "peak_input_plus_cache": 3115,
+        "provider_errors": 13,
+        "provider_aborts": 1,
+        "model_usd": 0.0524184
+      },
+      "timed_out": true,
+      "hashes": {
+        "yaml": "afadadbf3534d5a3b95966c2945752e5171f3da43a4110135589c453f96622d8",
+        "seed": "2327bc00e118b9479f2f83b96a76a7a71f698ef3a33e8ebddb88f662e8839ead",
+        "grader": "86d6260d00b5482a1afd8dcc1c0f717c62d1cb5ae43c8379f5cdba4fc71ab1c7",
+        "runner": "4733499bd1f89074b35e20036f50e16637b18c261f8ee2326dbd54f930d18da7",
+        "adapter": "1a7713ba0be61ba8e21b8d61968d44d2bb258b5b25b5e0237f0aa14605dcb332"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "error": "Traceback (most recent call last):\n  File \"<string>\", line 8, in <module>\n    program = __import__(module_name)\n  File \"/Users/ishaankundesu/Documents/one_piece/.one_piece/external-coral/upstream/examples/math/matmul/seed/initial_program.py\", line 11, in <module>\n    import jax\nModuleNotFoundError: "
+      },
+      "nominated": null,
+      "replay": null,
+      "best_new_candidate": "trial-1",
+      "attempts": [
+        {
+          "id": "trial-1",
+          "seat": 0,
+          "sha256": "19b2ab3093c70e72b1cd6e7820b71726c8db3aa62447f489d324f8a77df11699",
+          "grader": {
+            "combined_score": 0.8888888888888888,
+            "loss": 0,
+            "rank": 36,
+            "eval_time": 0.00016307830810546875
+          }
+        }
+      ],
+      "programs": {
+        "trial-1": {
+          "source": "import numpy as np\n\ndef run():\n    a,b,c,d=np.eye(8,dtype=int)[[0,1,4,5]]\n    e,f,g,h=np.eye(20,dtype=int)[[0,1,5,6]]\n    x,z,y,t=np.eye(10,dtype=int)[:4]\n    U,V,W=[],[],[]\n    for j in (0,2):\n        a,b,c,d=np.eye(8,dtype=int)[[j,j+1,4+j,5+j]]\n        for k in (0,2):\n            e,f,g,h=np.eye(20,dtype=int)[[j*5+k,j*5+k+1,(j+1)*5+k,(j+1)*5+k+1]]\n            x,z,y,t=np.eye(10,dtype=int)[2*k:2*k+4]\n            U.extend([a+d,c+d,a,d,a+b,c-a,b-d]); V.extend([e+h,e,f-h,g-e,h,e+f,g+h]); W.extend([x+t,z-t,y+t,x+z,y-x,t,x])\n    for i in range(2):\n        for j in range(4):\n            U.append(np.eye(8,dtype=int)[4*i+j]); V.append(np.eye(20,dtype=int)[5*j+4]); W.append(np.eye(10,dtype=int)[8+i])\n    return (np.array(U).T,np.array(V).T,np.array(W).T),2,4,5,0.,len(U)\n",
+          "sha256": "19b2ab3093c70e72b1cd6e7820b71726c8db3aa62447f489d324f8a77df11699"
+        }
+      }
+    },
+    "minimizing_max_min_dist_2d": {
+      "kind": "math",
+      "run": "run-mwslr1k2-71-bd7e",
+      "raw_receipt": ".one_piece/external-coral/transfer-01/minimizing_max_min_dist_2d/result.json",
+      "usage": {
+        "calls": 23,
+        "tokens": 61756,
+        "elapsed_ms": 124190,
+        "peak_input_plus_cache": 4578,
+        "provider_errors": 1,
+        "provider_aborts": 0,
+        "model_usd": 0.100872
+      },
+      "timed_out": false,
+      "hashes": {
+        "yaml": "d0d79ccabe353d499cb9c42c1f01bd33e4676ae216eec1725ff27d5037157652",
+        "seed": "9833ac062fe5adc3ac4dacdba6f4a72eef135df01e279eed1ce5e6122a1d3e0c",
+        "grader": "45b6f7b27a0a6a7a431561f3ed10a1a80a52ab4cbd99c3d75911751f8979296a",
+        "runner": "4733499bd1f89074b35e20036f50e16637b18c261f8ee2326dbd54f930d18da7",
+        "adapter": "1a7713ba0be61ba8e21b8d61968d44d2bb258b5b25b5e0237f0aa14605dcb332"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "min_max_ratio": 0.0015354732902234823,
+        "combined_score": 0.01979112384555867,
+        "eval_time": 0.0013191699981689453
+      },
+      "nominated": null,
+      "replay": null,
+      "best_new_candidate": "trial-2",
+      "attempts": [
+        {
+          "id": "trial-1",
+          "seat": 0,
+          "sha256": "618e9dd19e9a25f38098117ced9590cb711f5d51733d11043cf90ee226c2a55f",
+          "grader": {
+            "min_max_ratio": 0.0775841541474144,
+            "combined_score": 1.0000028088804527,
+            "eval_time": 8.651320219039917
+          }
+        },
+        {
+          "id": "trial-2",
+          "seat": 1,
+          "sha256": "b74813c908db12015ca7432ea856ff189517138d272da9c55dc76877ab5f56af",
+          "grader": {
+            "min_max_ratio": 0.07758415414741453,
+            "combined_score": 1.0000028088804542,
+            "eval_time": 10.63506007194519
+          }
+        },
+        {
+          "id": "trial-3",
+          "seat": 0,
+          "sha256": "595d71d68f617c0b5b1c253630ed13ee2c1dfcf57d0e832a1dc5b1e3cb4c34de",
+          "grader": {
+            "min_max_ratio": 0.0775841541474144,
+            "combined_score": 1.0000028088804527,
+            "eval_time": 0.02384781837463379
+          }
+        },
+        {
+          "id": "trial-4",
+          "seat": 0,
+          "sha256": "14cc1857a56abdecec4daf473e31a1b83f4a4ae0cbafc81bbb4fde782948ad5f",
+          "grader": {
+            "min_max_ratio": 0.0775841541474144,
+            "combined_score": 1.0000028088804527,
+            "eval_time": 0.05929708480834961
+          }
+        }
+      ],
+      "programs": {
+        "trial-2": {
+          "source": "import numpy as np\nfrom scipy.optimize import minimize\nfrom scipy.spatial.distance import pdist\nI,J=np.triu_indices(16,1)\nU=np.arange(120)\ndef opt(p):\n p=p-p[0]; d=pdist(p)**2\n def con(z):\n  v=np.r_[0.,0.,z[:-1]].reshape(16,2); w=v[I]-v[J]; d=np.einsum('ij,ij->i',w,w); return np.r_[d-1,z[-1]-d]\n def jac(z):\n  v=np.r_[0.,0.,z[:-1]].reshape(16,2); w=2*(v[I]-v[J]); h=np.zeros((240,33)); h[U,2*I]=w[:,0];h[U,2*I+1]=w[:,1];h[U,2*J]=-w[:,0];h[U,2*J+1]=-w[:,1];h[120:,:32]=-h[:120,:32];h[120:,32]=1;return h[:,2:]\n c=np.r_[np.zeros(30),1.]\n z=minimize(lambda z:z[-1],np.r_[p.ravel()[2:],max(d)],jac=lambda z:c,constraints=[{'type':'ineq','fun':con,'jac':jac}],method='SLSQP',options={'maxiter':75,'ftol':3e-11}).x\n return np.r_[0.,0.,z[:-1]].reshape(16,2)\ndef ring(n,r,f):\n a=(np.arange(n)+f)*2*np.pi/n\n return r*np.c_[np.cos(a),np.sin(a)]\ndef run():\n rng=np.random.default_rng(118)\n best=0\n for k in range(420):\n  if k%3==0 or best==0:\n   o=[11,10,12,9,13,8][(k//3)%6]; center=(k//18)%2; n=16-o-center\n   p=np.vstack([ring(o,1.8,0),ring(n,1 if center else .86,rng.random()),np.zeros((center,2))]); p+=rng.normal(0,rng.choice([.05,.15,.27]),p.shape)\n  else:\n   p=b+rng.normal(0,rng.choice([.09,.17,.25,.37,.49]),b.shape)\n  p=opt(p); d=pdist(p); score=12.889266112*(min(d)/max(d))**2\n  if score>best+1e-10:\n   best=score;b=p\n return b\n",
+          "sha256": "b74813c908db12015ca7432ea856ff189517138d272da9c55dc76877ab5f56af"
+        }
+      }
+    },
+    "minimizing_max_min_dist_3d": {
+      "kind": "math",
+      "run": "run-mwslr2jl-77-1b38",
+      "raw_receipt": ".one_piece/external-coral/transfer-01/minimizing_max_min_dist_3d/result.json",
+      "usage": {
+        "calls": 26,
+        "tokens": 57105,
+        "elapsed_ms": 143951,
+        "peak_input_plus_cache": 4521,
+        "provider_errors": 3,
+        "provider_aborts": 1,
+        "model_usd": 0.0993668
+      },
+      "timed_out": true,
+      "hashes": {
+        "yaml": "96d553d59641eaf8a03509c7fbd2b65a8afd554b4076959cee7fca73c077c8c3",
+        "seed": "03330e0a429ccc6c572bbd4243eda12261f6ec17d813e2f027f1f31b8f3a8a7c",
+        "grader": "46ec8e6d80ccdc9418e1a2eaacd40ea94b731bd15635b6f06f1cf32158a758f2",
+        "runner": "4733499bd1f89074b35e20036f50e16637b18c261f8ee2326dbd54f930d18da7",
+        "adapter": "1a7713ba0be61ba8e21b8d61968d44d2bb258b5b25b5e0237f0aa14605dcb332"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "min_max_ratio": 0.004318762217790128,
+        "combined_score": 0.017991314578709408,
+        "min_distance": 0.2774185792711296,
+        "max_distance": 4.221394078461589,
+        "eval_time": 6.4849853515625e-05
+      },
+      "nominated": null,
+      "replay": null,
+      "best_new_candidate": "trial-2",
+      "attempts": [
+        {
+          "id": "trial-1",
+          "seat": 1,
+          "sha256": "140f304939e7827184e48abe578c58d1f50ca2cc644b9cd0d188ad7b1d3bad9b",
+          "grader": {
+            "min_max_ratio": 0.24005088264958382,
+            "combined_score": 1.000015913553913,
+            "min_distance": 0.48994987769116144,
+            "max_distance": 1.0000000000000004,
+            "eval_time": 0.613610029220581
+          }
+        },
+        {
+          "id": "trial-2",
+          "seat": 0,
+          "sha256": "0d4a6bb19a6045f2b2d2403114d99e972c2b81edc60d84979468913be500e5b5",
+          "grader": {
+            "min_max_ratio": 0.24005088264958455,
+            "combined_score": 1.0000159135539162,
+            "min_distance": 0.48994987769116194,
+            "max_distance": 1,
+            "eval_time": 9.000638008117676
+          }
+        },
+        {
+          "id": "trial-3",
+          "seat": 1,
+          "sha256": "eab58c41ee3902269621ea4fb65f6e1d100fc8fc2eb9d40fa36f991f30676e19",
+          "grader": {
+            "min_max_ratio": 0.24005088264958455,
+            "combined_score": 1.0000159135539162,
+            "min_distance": 0.48994987769116205,
+            "max_distance": 1.0000000000000002,
+            "eval_time": 14.792732954025269
+          }
+        }
+      ],
+      "programs": {
+        "trial-2": {
+          "source": "import numpy as np\nfrom scipy.optimize import minimize\nfrom scipy.spatial.distance import pdist\nfrom threadpoolctl import threadpool_limits\nI,J=np.triu_indices(14,1)\nk=np.arange(91)[:,None]; c=np.arange(3)\njac=np.zeros((182,43));jac[:91,-1]=-1\nf=np.zeros(43);f[-1]=-1\n\ndef cons(z):\n x=z[:-1].reshape(14,3); d=x[I]-x[J];q=np.einsum('ij,ij->i',d,d);return np.r_[q-z[-1],1-q]\n\ndef dc(z):\n x=z[:-1].reshape(14,3); d=x[I]-x[J];a=jac.copy();a[k,3*I[:,None]+c]=2*d;a[k,3*J[:,None]+c]=-2*d;a[91:,:42]=-a[:91,:42];return a\n\ndef opt(x):\n x=x-x.mean(axis=0);x=x/pdist(x).max();z=np.r_[x.ravel(),pdist(x).min()**2]; r=minimize(lambda z:-z[-1],z,jac=lambda z:f,method='SLSQP',bounds=[(-1,1)]*42+[(0,1)],constraints=[{'type':'ineq','fun':cons,'jac':dc}],options={'ftol':1e-11,'maxiter':75});x=r.x[:-1].reshape(14,3);d=pdist(x);return (d.min()/d.max())**2,x\n\ndef ring(n,r,z,t):\n a=2*np.pi*(np.arange(n)+t)/n;return np.c_[r*np.cos(a),r*np.sin(a),np.full(n,z)]\n\ndef run():\n rng=np.random.default_rng(490);best=(0,None);pool=[]\n with threadpool_limits(limits=1):\n  for ns in [(1,6,6,1),(1,4,4,4,1),(4,6,4),(3,4,4,3),(3,3,5,3),(5,4,5),(2,5,5,2),(7,7),(5,5,4),(1,5,7,1),(4,3,3,4),(3,6,3,2),(1,3,6,3,1),(1,4,5,4),(3,5,6)]:\n   for j in range(5):\n    zz=np.linspace(-.84,.84,len(ns));rr=np.sqrt(1-zz**2);rr[np.array(ns)==1]=0\n    x=np.concatenate([ring(n,r,z,t) for n,r,z,t in zip(ns,rr,zz,np.arange(len(ns))*.5 if j==0 else rng.random(len(ns)))])\n    x+=rng.normal(0,.002 if j<2 else .10,x.shape);s,x=opt(x)\n    if s>best[0]:best=s,x\n    if all(abs(s-a)>1e-7 for a,b in pool):pool=sorted(pool+[(s,x)],key=lambda v:-v[0])[:9]\n  for i in range(85):\n   x=pool[int(rng.integers(len(pool)))][1].copy();x+=rng.normal(0,rng.choice([.04,.075,.12,.18,.25]),x.shape);s,x=opt(x)\n   if s>best[0]:best=s,x\n   if all(abs(s-a)>1e-7 for a,b in pool):pool=sorted(pool+[(s,x)],key=lambda v:-v[0])[:9]\n return best[1]\n",
+          "sha256": "0d4a6bb19a6045f2b2d2403114d99e972c2b81edc60d84979468913be500e5b5"
+        }
+      }
+    },
+    "second_autocorr_ineq": {
+      "kind": "math",
+      "run": "run-mwsloqqw-40-b02a",
+      "raw_receipt": ".one_piece/external-coral/transfer-01/second_autocorr_ineq/result.json",
+      "usage": {
+        "calls": 19,
+        "tokens": 57617,
+        "elapsed_ms": 106388,
+        "peak_input_plus_cache": 4922,
+        "provider_errors": 0,
+        "provider_aborts": 0,
+        "model_usd": 0.0788372
+      },
+      "timed_out": false,
+      "hashes": {
+        "yaml": "580483b03a8e8686b6bf7f8cd5b0f0a0725d5bfed75e12e97414581a1d553dbb",
+        "seed": "cea3502f7fca11556f2a59b5b393adf6dce4884d50559faefa4ced4d37f62a1c",
+        "grader": "ffd227a28c6348e95fead41f95c3560f8a79f6edcad3fe76d8e8e6a63ac31e23",
+        "runner": "4733499bd1f89074b35e20036f50e16637b18c261f8ee2326dbd54f930d18da7",
+        "adapter": "1a7713ba0be61ba8e21b8d61968d44d2bb258b5b25b5e0237f0aa14605dcb332"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "c2": 0.8205315867012954,
+        "combined_score": 0.9154858278955543,
+        "loss": -0.8205315867012958,
+        "n_points": 50,
+        "eval_time": 0.28832268714904785
+      },
+      "nominated": null,
+      "replay": null,
+      "best_new_candidate": "trial-1",
+      "attempts": [
+        {
+          "id": "trial-1",
+          "seat": 1,
+          "sha256": "39bdbcb907c2e6f9f9f102fbb2b71165f2ed9d381ed63f477a242c92c5669a26",
+          "grader": {
+            "c2": 0.8818846058565635,
+            "combined_score": 0.983938792346391,
+            "loss": -0.8818846058565619,
+            "n_points": 200,
+            "eval_time": 1.4192800521850586
+          }
+        },
+        {
+          "id": "trial-2",
+          "seat": 0,
+          "sha256": "17dd7d7cd3d2ff61a53b2085c74b9d5883201a70c89ec3379a343006d3698723",
+          "grader": {
+            "c2": 0.880753162785093,
+            "combined_score": 0.9826764154753602,
+            "loss": -0.8807531627850924,
+            "n_points": 384,
+            "eval_time": 9.399685859680176
+          }
+        },
+        {
+          "id": "trial-3",
+          "seat": 1,
+          "sha256": "ec356b2f640a1c1d9efb1765b358587f2c4f2e43af86c441ada6f1d7959936c8",
+          "grader": {
+            "error": "Local grader subprocess error; full command diagnostic in raw receipt."
+          }
+        }
+      ],
+      "programs": {
+        "trial-1": {
+          "source": "import numpy as np\nfrom scipy.optimize import minimize\nfrom scipy.interpolate import PchipInterpolator\n\ndef score(f):\n g=np.convolve(f,f); return (2*np.dot(g,g)+np.dot(g[1:],g[:-1]))/(3*g.max()*g.sum())\ndef sol(f,it):\n n=len(f); ix=np.arange(2*n-1)[:,None]-np.arange(n); mask=(ix>=0)&(ix<n); ix=np.clip(ix,0,n-1)\n def obj(x):\n  g=np.convolve(x,x); v=(2*(g@g)+g[1:]@g[:-1])/3; s=x.sum(); w=4*g.copy(); w[1:]+=g[:-1]; w[:-1]+=g[1:]; d=2*np.correlate(w,x,'valid')/3\n  return -v/s**2,-d/s**2+2*v/s**3\n def c(x):return 1-np.convolve(x,x)\n def j(x):return -2*x[ix]*mask\n f=f/np.sqrt(np.convolve(f,f).max()); r=minimize(obj,f,method='SLSQP',jac=True,bounds=[(0,None)]*n,constraints={'type':'ineq','fun':c,'jac':j}, options={'maxiter':it,'ftol':2e-11}); x=np.maximum(0,r.x)\n return x if score(x)>score(f) else f\n\ndef grow(f,n):\n x=np.linspace(0,1,len(f)+1); y=np.linspace(0,1,n+1); return np.diff(PchipInterpolator(np.sqrt(x),np.r_[0,np.cumsum(f)])(np.sqrt(y)))\n\ndef run():\n best=None; b=0\n for n,it in [(48,80),(80,80),(120,70),(160,45),(200,25)]:\n  f=np.diff(np.sqrt(np.arange(n+1))) if best is None else grow(best,n)\n  f=sol(f,it); s=score(f); print(n,s)\n  if s>b:best,b=f,s\n return best,float(b),-float(b),len(best)\n",
+          "sha256": "39bdbcb907c2e6f9f9f102fbb2b71165f2ed9d381ed63f477a242c92c5669a26"
+        }
+      }
+    },
+    "signal_processing": {
+      "kind": "math",
+      "run": "run-mwsl6fql-11-6a8d",
+      "raw_receipt": ".one_piece/external-coral/transfer-01/signal_processing/result.json",
+      "usage": {
+        "calls": 17,
+        "tokens": 58738,
+        "elapsed_ms": 76100,
+        "peak_input_plus_cache": 5188,
+        "provider_errors": 0,
+        "provider_aborts": 0,
+        "model_usd": 0.0705848
+      },
+      "timed_out": false,
+      "hashes": {
+        "yaml": "a8268ee106879376cdca049e6a6e12fa961adb51d0739967ddf4dbd854b340c3",
+        "seed": "17d493d65542b562cb551e7f042b60770b523b8eadfb76dd0b5dc14f5fc3fe95",
+        "grader": "457ff5f88c711d8f987e4d33c780bd89ecf5ae4a69f37f5e4efc2003aa560ce0",
+        "runner": "4733499bd1f89074b35e20036f50e16637b18c261f8ee2326dbd54f930d18da7",
+        "adapter": "1a7713ba0be61ba8e21b8d61968d44d2bb258b5b25b5e0237f0aa14605dcb332"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "combined_score": 0.49904861783269006,
+        "composite_score": 0.4518100150842093,
+        "slope_changes": 223.4,
+        "lag_error": 0.3090769071827435,
+        "avg_error": 0.4664988183834896,
+        "false_reversals": 175.4,
+        "correlation": 0.8420816095203836,
+        "noise_reduction": 0.3347443615622788,
+        "smoothness_score": 0.08216926869350863,
+        "responsiveness_score": 0.7638970594570291,
+        "accuracy_score": 0.8420816095203836,
+        "efficiency_score": 1,
+        "execution_time": 0.0033372879028320313,
+        "success_rate": 1
+      },
+      "nominated": null,
+      "replay": null,
+      "best_new_candidate": "trial-2",
+      "attempts": [
+        {
+          "id": "trial-1",
+          "seat": 1,
+          "sha256": "e328b89b1716c2a76a287d8cd60e7d198123819e8d5268728e65cfdaa9757cc5",
+          "grader": {
+            "combined_score": 0.6641439708138891,
+            "composite_score": 0.6075538794742543,
+            "slope_changes": 41,
+            "lag_error": 0.10344570492130337,
+            "avg_error": 0.34678022955386073,
+            "false_reversals": 30,
+            "correlation": 0.9562217635379202,
+            "noise_reduction": 0.6430429582479997,
+            "smoothness_score": 0.3278688524590164,
+            "responsiveness_score": 0.9062521114904507,
+            "accuracy_score": 0.9562217635379202,
+            "efficiency_score": 1,
+            "execution_time": 0.003817892074584961,
+            "success_rate": 1
+          }
+        },
+        {
+          "id": "trial-2",
+          "seat": 1,
+          "sha256": "c33519a003d1b43639f40a254cc94f61dccdaf075ffc96b19324406cc3583282",
+          "grader": {
+            "combined_score": 0.7207121569731775,
+            "composite_score": 0.6877885084181237,
+            "slope_changes": 28.8,
+            "lag_error": 0.10182974372448002,
+            "avg_error": 0.3396480358918641,
+            "false_reversals": 17.6,
+            "correlation": 0.9621552166050267,
+            "noise_reduction": 0.7119849717016855,
+            "smoothness_score": 0.4098360655737705,
+            "responsiveness_score": 0.9075812353909887,
+            "accuracy_score": 0.9621552166050267,
+            "efficiency_score": 1,
+            "execution_time": 0.0029944419860839845,
+            "success_rate": 1
+          }
+        },
+        {
+          "id": "trial-3",
+          "seat": 0,
+          "sha256": "267d13446d271e507ddbe0f3ca4d23551e31464c37f602054b89be724363e649",
+          "grader": {
+            "combined_score": 0.5266151841772255,
+            "composite_score": 0.47825898006360623,
+            "slope_changes": 129.8,
+            "lag_error": 0.21430352817490156,
+            "avg_error": 0.42925906274558,
+            "false_reversals": 100.8,
+            "correlation": 0.8763189495966355,
+            "noise_reduction": 0.33345532539531964,
+            "smoothness_score": 0.13351134846461948,
+            "responsiveness_score": 0.8235173305499658,
+            "accuracy_score": 0.8763189495966355,
+            "efficiency_score": 1,
+            "execution_time": 0.0054972171783447266,
+            "success_rate": 1
+          }
+        }
+      ],
+      "programs": {
+        "trial-1": {
+          "source": "import numpy as np\nfrom scipy.ndimage import gaussian_filter1d, median_filter\n\ndef run_signal_processing(noisy_signal=None,window_size=20,signal_length=1000,noise_level=.3):\n    if noisy_signal is None:\n        t=np.linspace(0,10,signal_length); noisy_signal=np.sin(t)+np.random.default_rng(42).normal(0,noise_level,signal_length)\n    x=np.asarray(noisy_signal,dtype=float).ravel(); w=max(1,int(window_size))\n    if len(x)<w:return {'filtered_signal':np.empty(0)}\n    sigma=np.median(np.abs(np.diff(x,2)))/1.652 if len(x)>2 else 0\n    z=median_filter(x,size=3,mode='nearest'); x=np.where(abs(x-z)>4.2*sigma,z,x) if sigma>0 else x\n    g=gaussian_filter1d(x,max(1,min(5,w/4)),mode='nearest')\n    return {'filtered_signal':g[w-1:]}\n",
+          "sha256": "e328b89b1716c2a76a287d8cd60e7d198123819e8d5268728e65cfdaa9757cc5"
+        },
+        "trial-2": {
+          "source": "import numpy as np\nfrom scipy.ndimage import gaussian_filter1d,median_filter\nfrom scipy.signal import find_peaks\n\ndef monotone(z,h):\n    n=len(z)\n    if n<3:return z\n    turns=[0]; mode=0; hi=lo=0\n    for j in range(1,n):\n        if mode>=0 and z[j]>=z[hi]: hi=j\n        if mode<=0 and z[j]<=z[lo]: lo=j\n        if mode>=0 and z[hi]-z[j]>h:\n            if hi>turns[-1]:turns.append(hi)\n            mode=-1;lo=j\n        elif mode<=0 and z[j]-z[lo]>h:\n            if lo>turns[-1]:turns.append(lo)\n            mode=1;hi=j\n    if turns[-1]!=n-1:turns.append(n-1)\n    y=z.copy()\n    for a,b in zip(turns,turns[1:]):\n        v=z[a:b+1]; s=1 if v[-1]>=v[0] else -1; v=v*s\n        y[a:b+1]=s*(np.clip(np.maximum.accumulate(v),v[0],v[-1])+np.clip(np.minimum.accumulate(v[::-1])[::-1],v[0],v[-1]))*.5\n    return y\n\ndef run_signal_processing(noisy_signal=None,window_size=20,signal_length=1000,noise_level=.3):\n    if noisy_signal is None:\n        t=np.linspace(0,10,signal_length); noisy_signal=np.sin(t)+np.random.default_rng(42).normal(0,noise_level,signal_length)\n    x=np.asarray(noisy_signal,dtype=float).ravel();w=max(1,int(window_size))\n    if len(x)<w:return {'filtered_signal':np.empty(0)}\n    sigma=np.median(np.abs(np.diff(x,2)))/1.652 if len(x)>2 else 0\n    z=median_filter(x,size=3,mode='nearest'); x=np.where(abs(x-z)>4.5*sigma,z,x) if sigma>0 else x\n    g=gaussian_filter1d(x,max(1,min(4,w/5)),mode='nearest')\n    return {'filtered_signal':monotone(g,1.25*sigma)[w-1:]}\n",
+          "sha256": "c33519a003d1b43639f40a254cc94f61dccdaf075ffc96b19324406cc3583282"
+        },
+        "trial-3": {
+          "source": "import numpy as np\n\ndef run_signal_processing(noisy_signal=None,window_size=20,signal_length=1000,noise_level=.3):\n    if noisy_signal is None:\n        t=np.arange(signal_length)*.01\n        noisy_signal=np.sin(t*3)+noise_level*np.random.default_rng(42).normal(size=t.size)\n    x=np.asarray(noisy_signal,dtype=float).ravel(); w=max(1,int(window_size))\n    if len(x)<w or w<4:return {'filtered_signal':x[w-1:].copy()}\n    y=np.empty(x.size); y[0]=x[0]\n    a=2/(w*.55+1); m=x[0]; v=0.; nv=0.; slope=0.; ref=x[0]\n    for i in range(1,x.size):\n        d=x[i]-x[i-1]; nv=.96*nv+.04*d*d\n        if i>=2:\n            dd=d-(x[i-1]-x[i-2]); v=.96*v+.04*dd*dd/6\n        s=np.sqrt(max(v,1e-15)); m+=a*(x[i]-m); ref+=.36*(x[i]-ref)\n        slope+=(a*.5)*(a*(x[i]-m)-slope)\n        target=m+(.55/a)*slope\n        target+=.65*np.sign(ref-target)*max(0,abs(ref-target)-1.15*s)\n        delta=target-y[i-1]; y[i]=y[i-1]+np.sign(delta)*max(0,abs(delta)-.13*s)*.66\n    return {'filtered_signal':y[w-1:]}\n",
+          "sha256": "267d13446d271e507ddbe0f3ca4d23551e31464c37f602054b89be724363e649"
+        }
+      }
+    },
+    "sums_diffs_finite_sets": {
+      "kind": "math",
+      "run": "run-mwsltr4w-91-2c12",
+      "raw_receipt": ".one_piece/external-coral/transfer-01/sums_diffs_finite_sets/result.json",
+      "usage": {
+        "calls": 20,
+        "tokens": 58106,
+        "elapsed_ms": 70256,
+        "peak_input_plus_cache": 4613,
+        "provider_errors": 0,
+        "provider_aborts": 0,
+        "model_usd": 0.0898168
+      },
+      "timed_out": false,
+      "hashes": {
+        "yaml": "92c68c48be67c03b2882f2d184a8d03896960c0bf93b9dc2a5dc2e5d0255c44d",
+        "seed": "c8b73c249fe1e2d73e9deca4ab1fc24fb484db7be710df2cd236a62818a6cc5a",
+        "grader": "ca9f8f84010a486eeffc9d7249a6630261bd75e81a079962b8b011e4e111b8ee",
+        "runner": "4733499bd1f89074b35e20036f50e16637b18c261f8ee2326dbd54f930d18da7",
+        "adapter": "1a7713ba0be61ba8e21b8d61968d44d2bb258b5b25b5e0237f0aa14605dcb332"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "c6_bound": 1.0853625015915367,
+        "combined_score": 0.936935695687158,
+        "set_size": 11,
+        "max_val": 158,
+        "eval_time": 1.9466540813446045
+      },
+      "nominated": null,
+      "replay": null,
+      "best_new_candidate": "trial-1",
+      "attempts": [
+        {
+          "id": "trial-1",
+          "seat": 1,
+          "sha256": "ad9b309852ac75df37208a4690508c9b7e0e599114cdadf34f33f0d056e7bf86",
+          "grader": {
+            "c6_bound": 1.109184661243966,
+            "combined_score": 0.9575000985424162,
+            "set_size": 7,
+            "max_val": 20,
+            "eval_time": 3.6309378147125244
+          }
+        }
+      ],
+      "programs": {
+        "trial-1": {
+          "source": "import numpy as np\nimport random, math\n\ndef run():\n r=random.Random(5291); best=(1.,[0,1]); shift=int.bit_count\n for j in range(250):\n  n=r.choice((12,16,20,24,28,32,40,48,60,75,90,110,140,180,230,300,420))\n  if j%4==0 and max(best[1])>5:\n   n=max(best[1]); a=best[1][:]\n  else:\n   a=[0,n]+r.sample(range(1,n),r.randint(3,min(n-1,int(2*math.sqrt(n)))))\n  mask=sum(1<<x for x in a); rev=sum(1<<(n-x) for x in a); den=math.log(2*n+1)\n  def eval(a,mask,rev):\n   p=q=0\n   for x in a:\n    p|=mask<<x; q|=rev<<x\n   return math.log(shift(q)/shift(p))/den\n  val=eval(a,mask,rev)\n  for i in range(2200):\n   x=r.randrange(1,n); y=0\n   if r.random()<0.35:\n    y=r.randrange(1,n)\n    if y==x: continue\n   b=a[:]; bm=mask; br=rev\n   for z in (x,y) if y else (x,):\n    if bm>>z&1: b.remove(z)\n    else: b.append(z)\n    bm^=1<<z; br^=1<<(n-z)\n   v=eval(b,bm,br)\n   if v>best[0]-1: best=(1+v,b[:])\n   t=(.003+.006*(j%7)/6)*(1-i/2200)**1.7+.00015\n   if v>=val or r.random()<math.exp((v-val)/t): a,mask,rev,val=b,bm,br,v\n return np.array(sorted(best[1]),dtype=np.int64),best[0]\n",
+          "sha256": "ad9b309852ac75df37208a4690508c9b7e0e599114cdadf34f33f0d056e7bf86"
+        }
+      }
+    },
+    "third_autocorr_ineq": {
+      "kind": "math",
+      "run": "run-mwslorwz-46-f1ab",
+      "raw_receipt": ".one_piece/external-coral/transfer-01/third_autocorr_ineq/result.json",
+      "usage": {
+        "calls": 21,
+        "tokens": 62719,
+        "elapsed_ms": 102675,
+        "peak_input_plus_cache": 4356,
+        "provider_errors": 0,
+        "provider_aborts": 0,
+        "model_usd": 0.1071052
+      },
+      "timed_out": false,
+      "hashes": {
+        "yaml": "36c3df8b2bd5eb621f1409c9c0ac7b6a86f1f5d56d1cec3d1c79d6cea859169b",
+        "seed": "62a9359637ae2c75b99d314525657c4590f1549917f788c6389a374ca9e3fdbb",
+        "grader": "477cd2398d7dbb829d6bfd93b499fea3cc8ee82a5ab9dabc7771dcc817ba7a29",
+        "runner": "4733499bd1f89074b35e20036f50e16637b18c261f8ee2326dbd54f930d18da7",
+        "adapter": "1a7713ba0be61ba8e21b8d61968d44d2bb258b5b25b5e0237f0aa14605dcb332"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "c3": 2.7584174135550397,
+        "combined_score": 0.5277093989551468,
+        "loss": 2.7584174135550397,
+        "n_points": 400,
+        "eval_time": 0.7271170616149902
+      },
+      "nominated": null,
+      "replay": null,
+      "best_new_candidate": "trial-3",
+      "attempts": [
+        {
+          "id": "trial-1",
+          "seat": 1,
+          "sha256": "bb455d7c72d955c0ceb55b31bef64d95dbab502d813f48bb1012180204d78df7",
+          "grader": {
+            "c3": 1.5738672785613963,
+            "combined_score": 0.9248828126759713,
+            "loss": 1.5738672785613963,
+            "n_points": 128,
+            "eval_time": 3.364964723587036
+          }
+        },
+        {
+          "id": "trial-2",
+          "seat": 0,
+          "sha256": "6073fe4a5cca5e9018449eb7311294562b2f75e4ddd74400f1c48880723a3332",
+          "grader": {
+            "c3": 1.5725823356688435,
+            "combined_score": 0.9256385261096254,
+            "loss": 1.5725823356688435,
+            "n_points": 220,
+            "eval_time": 2.380763053894043
+          }
+        },
+        {
+          "id": "trial-3",
+          "seat": 1,
+          "sha256": "01c4cd7cd324d67d718a3da0a8a03aaa519fa6d50db1df44eb0c9f9e57494b72",
+          "grader": {
+            "c3": 1.564016103715781,
+            "combined_score": 0.9307083168237413,
+            "loss": 1.564016103715781,
+            "n_points": 1024,
+            "eval_time": 2.161173105239868
+          }
+        }
+      ],
+      "programs": {
+        "trial-3": {
+          "source": "import numpy as np\nfrom scipy.optimize import minimize\nfrom threadpoolctl import threadpool_limits\n\ndef opt(f,its):\n n=len(f); ix=np.arange(2*n-1)[:,None]-np.arange(n); mask=(ix>=0)&(ix<n); ix=ix.clip(0,n-1)\n def con(x):\n  c=np.convolve(x[:-1],x[:-1])/n\n  return np.r_[x[-1]-c,x[-1]+c]\n def jac(x):\n  j=2/n*x[:-1][ix]*mask\n  return np.c_[np.r_[-j,j],np.ones(4*n-2)]\n f=f/f.mean(); t=max(abs(np.convolve(f,f)))/n\n r=minimize(lambda x:x[-1],np.r_[f,t],jac=lambda x:np.r_[np.zeros(n),1],constraints=[{'type':'ineq','fun':con,'jac':jac},{'type':'eq','fun':lambda x:x[:-1].mean()-1,'jac':lambda x:np.r_[np.ones(n)/n,0]}],method='SLSQP',options={'maxiter':its,'ftol':1e-10});f=r.x[:-1];return f,2*max(abs(np.convolve(f,f)))/n/f.mean()**2\n\nfrom scipy.fft import rfft,irfft,next_fast_len\nfrom scipy.special import logsumexp\n\ndef smooth(f,temps,its):\n n=len(f); l=next_fast_len(2*n-1,real=True)\n def fun(x):\n  x=x-x.mean()+1\n  X=rfft(x,l); c=irfft(X*X,l)[:2*n-1]/n\n  z=np.r_[c,-c]/tau; zmax=z.max(); p=np.exp(z-zmax); s=p.sum(); w=(p[:2*n-1]-p[2*n-1:])/s\n  g=2/n*irfft(rfft(w,l)*X.conj(),l)[:n]\n  return tau*(zmax+np.log(s)),g-g.mean()\n for tau in temps:\n  f=minimize(fun,f,jac=True,method='L-BFGS-B',options={'maxiter':its,'ftol':1e-14,'gtol':1e-11,'maxcor':15}).x\n  f=f-f.mean()+1\n return f\n\ndef run():\n best=None; b=np.inf\n with threadpool_limits(limits=1):\n  for n in [32,64,128,256,512,1024]:\n   for a in ([.4,.55,.75,0] if n==32 else ([0,.5] if n<=256 else [0])):\n    f=(np.arange(n)+.3)**-a if a else np.repeat(best,n//len(best)); f=f/f.mean()\n    if n<=64: f,v=opt(f,100)\n    else:\n     f=smooth(f,[.02,.006,.002,.0006,.0002,.00006,.00002],180)\n     v=2*max(abs(np.convolve(f,f)))/n/f.mean()**2\n    if v<b: best,b=f,v\n return best,b,b,len(best)\n",
+          "sha256": "01c4cd7cd324d67d718a3da0a8a03aaa519fa6d50db1df44eb0c9f9e57494b72"
+        }
+      }
+    },
+    "uncertainty_ineq": {
+      "kind": "math",
+      "run": "run-mwslu5ea-97-cf4e",
+      "raw_receipt": ".one_piece/external-coral/transfer-01/uncertainty_ineq/result.json",
+      "usage": {
+        "calls": 16,
+        "tokens": 60156,
+        "elapsed_ms": 31058,
+        "peak_input_plus_cache": 4705,
+        "provider_errors": 0,
+        "provider_aborts": 0,
+        "model_usd": 0.0709888
+      },
+      "timed_out": false,
+      "hashes": {
+        "yaml": "61640e3926bf678794874cdf0e4cb8b9fe24e3f929ceb64115f3e992a630eed8",
+        "seed": "226d28cd30485a814c2bb7a3b5121031b540c0511bc8dacf0325fe2e70230880",
+        "grader": "4c24bcc6b7c5c97c00987e8559cef62b32d0042f9a92441ed2ae66b0205b1caa",
+        "runner": "4733499bd1f89074b35e20036f50e16637b18c261f8ee2326dbd54f930d18da7",
+        "adapter": "1a7713ba0be61ba8e21b8d61968d44d2bb258b5b25b5e0237f0aa14605dcb332"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "error": "Local grader subprocess error; full command diagnostic in raw receipt."
+      },
+      "nominated": null,
+      "replay": null,
+      "best_new_candidate": null,
+      "attempts": [],
+      "programs": {}
+    },
+    "cloudcast": {
+      "kind": "systems",
+      "run": "run-mwsll5as-02-9afc",
+      "raw_receipt": ".one_piece/external-coral/systems-01/cloudcast/result.json",
+      "usage": {
+        "calls": 26,
+        "tokens": 82165,
+        "elapsed_ms": 109209,
+        "peak_input_plus_cache": 6088,
+        "provider_errors": 7,
+        "provider_aborts": 1,
+        "model_usd": 0.1002548
+      },
+      "timed_out": false,
+      "hashes": {
+        "starter": "a3f0eab844a68407c9bee2e65e8f945bf8d4cfd76beffddba138e460eb661178",
+        "task": "375915b5958be4f08331c267f9358eaac3d71b0a46554377e381006213fbe752",
+        "evaluator": "7db622237f2294413b0e679b13016439f7d4d56c090e40e29fc95db6ba48ef06",
+        "runner": "e2c5c0963862480fffa30761d7ea77a9a4e4707e1fdd42e5857b09dd02244fcb",
+        "adapter": "1b88e7d142adc6a7d9b9c2dd3bafa6fe5806facf97cb64d512de6ba77c7c7bc9"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "combined_score": 0.0009652509652509653,
+        "runs_successfully": 1.0,
+        "total_cost": 1035.0,
+        "avg_cost": 207.0,
+        "successful_configs": 5,
+        "failed_configs": 0,
+        "cost_score": 0.0009652509652509653,
+        "success_rate": 1.0
+      },
+      "grader": {
+        "combined_score": 0.0016155088852988692,
+        "runs_successfully": 1,
+        "total_cost": 618,
+        "avg_cost": 123.6,
+        "successful_configs": 5,
+        "failed_configs": 0,
+        "cost_score": 0.0016155088852988692,
+        "success_rate": 1
+      },
+      "nominated": {
+        "function_source": "def search_algorithm(src, dsts, G, num_partitions):\n    import heapq\n    import math\n    import random\n\n    topology = BroadCastTopology(src, dsts, num_partitions)\n    targets = list(dict.fromkeys(d for d in dsts if d != src))\n    if not targets or num_partitions <= 0:\n        for j in range(num_partitions):\n            if src in dsts:\n                topology.set_dst_partition_paths(src, j, [])\n        return topology\n\n    nodes = list(G)\n    index = {v: i for i, v in enumerate(nodes)}\n    root = index[src]\n    terminals = [index[d] for d in targets]\n    n = len(nodes)\n    k = len(terminals)\n    inf = float('inf')\n    incoming = [[] for _ in nodes]\n    weights = {}\n    for x, y, data in G.edges(data=True):\n        if x == y or y == src:\n            continue\n        try:\n            w = float(data.get('cost', 1))\n        except (ValueError, TypeError):\n            continue\n        if not math.isfinite(w) or w < 0:\n            continue\n        u, v = index[x], index[y]\n        weights[u, v] = w\n        incoming[v].append((u, w))\n\n    def close(dist, choice, seeds):\n        heap = [(dist[u], u) for u in seeds]\n        heapq.heapify(heap)\n        while heap:\n            cost, v = heapq.heappop(heap)\n            if cost != dist[v]:\n                continue\n            for u, w in incoming[v]:\n                value = cost + w\n                if value < dist[u]:\n                    dist[u] = value\n                    choice[u] = v\n                    heapq.heappush(heap, (value, u))\n\n    def reverse_paths(t):\n        dist = [inf] * n\n        nxt = [None] * n\n        dist[t] = 0.0\n        close(dist, nxt, [t])\n        return dist, nxt\n\n    routes = {t: reverse_paths(t) for t in terminals}\n    for t in terminals:\n        if routes[t][0][root] == inf:\n            raise nx.NetworkXNoPath(f'No finite-cost route from {src} to {nodes[t]}')\n\n    def path(parent, t):\n        result = []\n        while t != root:\n            u = parent[t]\n            result.append((u, t))\n            t = u\n        return result\n\n    best = None\n    best_cost = inf\n\n    def consider(parent):\n        nonlocal best, best_cost\n        used = {}\n        for t in terminals:\n            while t != root and t not in used:\n                u = parent[t]\n                used[t] = u\n                t = u\n        cost = math.fsum(weights[u, v] for v, u in used.items())\n        if cost < best_cost:\n            best, best_cost = used, cost\n\n    baseline = set()\n    for t in terminals:\n        nxt = routes[t][1]\n        u = root\n        while u != t:\n            v = nxt[u]\n            baseline.add((u, v))\n            u = v\n\n    def from_edges(edges):\n        out = {}\n        for u, v in sorted(edges):\n            out.setdefault(u, []).append(v)\n        parent = {root: None}\n        queue = [root]\n        for u in queue:\n            for v in out.get(u, ()):\n                if v not in parent:\n                    parent[v] = u\n                    queue.append(v)\n        return parent\n\n    consider(from_edges(baseline))\n    exact = k <= 11 and n * 3 ** k <= 9000000 and len(weights) * (1 << k) <= 9000000\n    if exact and best_cost > 0:\n        end = (1 << k) - 1\n        dp = [None] * (end + 1)\n        decisions = [None] * (end + 1)\n        for i, t in enumerate(terminals):\n            dp[1 << i], decisions[1 << i] = routes[t]\n        for mask in range(1, end + 1):\n            if dp[mask] is not None:\n                continue\n            dist = [inf] * n\n            choice = [None] * n\n            anchor = mask & -mask\n            rest = mask ^ anchor\n            part = (rest - 1) & rest\n            while True:\n                a = part | anchor\n                da, db = dp[a], dp[mask ^ a]\n                marker = -a - 1\n                for u, (ca, cb) in enumerate(zip(da, db)):\n                    z = ca + cb\n                    if z < dist[u]:\n                        dist[u] = z\n                        choice[u] = marker\n                if not part:\n                    break\n                part = (part - 1) & rest\n            close(dist, choice, [u for u in range(n) if dist[u] < inf])\n            dp[mask], decisions[mask] = dist, choice\n        edges = set()\n        todo = [(root, end)]\n        seen = set()\n        while todo:\n            u, mask = todo.pop()\n            if (u, mask) in seen:\n                continue\n            seen.add((u, mask))\n            v = decisions[mask][u]\n            if v is None:\n                continue\n            if v < 0:\n                a = -v - 1\n                todo.extend(((u, a), (u, mask ^ a)))\n            else:\n                edges.add((u, v))\n                todo.append((v, mask))\n        consider(from_edges(edges))\n    elif best_cost > 0:\n        rng = random.Random(17103)\n        scale = {t: routes[t][0][root] for t in terminals}\n\n        def grow(seed=None, first=(), order=None, power=0, jitter=None):\n            parent = {root: None}\n            if seed:\n                parent.update(seed)\n            live = set(parent)\n            source = {}\n            remaining = set(terminals) - live\n            for t in remaining:\n                d = routes[t][0]\n                a = min(live, key=lambda u: (d[u], u))\n                source[t] = (d[a], a)\n\n            def attach(t):\n                if t in live:\n                    return\n                if t not in routes:\n                    routes[t] = reverse_paths(t)\n                d, nxt = routes[t]\n                if t in source:\n                    cost, a = source[t]\n                else:\n                    a = min(live, key=lambda u: (d[u], u))\n                    cost = d[a]\n                if cost == inf:\n                    return\n                chain = []\n                while a != t:\n                    b = nxt[a]\n                    if b in live:\n                        chain.clear()\n                    else:\n                        chain.append((a, b))\n                    a = b\n                for u, v in chain:\n                    parent[v] = u\n                    live.add(v)\n                    remaining.discard(v)\n                for p in remaining:\n                    dd = routes[p][0]\n                    cur = source[p]\n                    for _, v in chain:\n                        if dd[v] < cur[0]:\n                            cur = (dd[v], v)\n                    source[p] = cur\n\n            for t in first:\n                attach(t)\n            if order is not None:\n                for t in order:\n                    attach(t)\n            else:\n                factors = {t: (scale[t] or 1.0) ** power * (jitter[t] if jitter else 1.0) for t in terminals}\n                while remaining:\n                    t = min(remaining, key=lambda p: (source[p][0] * factors[p], p))\n                    attach(t)\n            consider(parent)\n\n        for power in (0, -0.5, -1, 0.5):\n            grow(power=power)\n        far = sorted(terminals, key=lambda t: (-scale[t], t))\n        grow(order=far)\n        grow(order=far[::-1])\n        hubs = []\n        for u in range(n):\n            if u == root:\n                continue\n            gains = sorted((scale[t] - routes[t][0][u] for t in terminals if routes[t][0][u] < scale[t]), reverse=True)\n            if gains:\n                hubs.append((sum(gains), gains[0], u))\n        # Price the trip to each prospective relay as well as its downstream savings.\n        h = nx.DiGraph()\n        h.add_nodes_from(range(n))\n        h.add_weighted_edges_from((u, v, w) for (u, v), w in weights.items())\n        forward = nx.single_source_dijkstra_path_length(h, root)\n        ranked = sorted(((s - forward[u], peak - forward[u], u) for s, peak, u in hubs if u in forward), reverse=True)\n        budget = max(10, min(72, 1600000 // max(1, n * k)))\n        for _, _, u in ranked[:budget // 3]:\n            grow(first=(u,))\n            grow(first=(u,), power=-0.5)\n        for t in far[:min(10, budget // 4)]:\n            grow(first=(t,))\n        for i in range(budget // 2):\n            if i % 3 == 0:\n                order = terminals[:]\n                rng.shuffle(order)\n                grow(order=order)\n            else:\n                grow(power=(-0.5 if i % 3 == 1 else 0), jitter={t: math.exp(rng.uniform(-1.6, 1.6)) for t in terminals})\n\n        for _ in range(2):\n            base = best.copy()\n            term_paths = {t: path(base, t) for t in terminals}\n            below = {}\n            for t, edges in term_paths.items():\n                for u, v in edges:\n                    below.setdefault(v, set()).add(t)\n            cuts = sorted(base, key=lambda v: (weights[base[v], v], len(below[v])), reverse=True)\n            tried = set()\n            for v in cuts:\n                detached = frozenset(below[v])\n                if detached in tried or len(detached) == k:\n                    continue\n                tried.add(detached)\n                seed = {}\n                for t in terminals:\n                    if t not in detached:\n                        seed.update((b, a) for a, b in term_paths[t])\n                grow(seed=seed)\n                if len(detached) > 1:\n                    grow(seed=seed, order=far)\n                if len(tried) >= budget // 3:\n                    break\n            if best == base:\n                break\n\n    for d in dict.fromkeys(dsts):\n        t = index[d]\n        edges = path(best, t)\n        edges.reverse()\n        for j in range(num_partitions):\n            topology.set_dst_partition_paths(d, j, [[nodes[u], nodes[v], G[nodes[u]][nodes[v]]] for u, v in edges])\n    return topology",
+        "function_sha256": "73579676f971c6886a08af5bbc92ed740f377e70575cb8ffb2966e3fabe1a72d",
+        "assembled_sha256": "23d0358b7bb7ad52ec9c87701f52acb8715d97634f60f71b77d760df7494e97f"
+      }
+    },
+    "eplb": {
+      "kind": "systems",
+      "run": "run-mwslqhvl-63-8a6d",
+      "raw_receipt": ".one_piece/external-coral/systems-01/eplb/result.json",
+      "usage": {
+        "calls": 17,
+        "tokens": 113154,
+        "elapsed_ms": 142205,
+        "peak_input_plus_cache": 8668,
+        "provider_errors": 0,
+        "provider_aborts": 0,
+        "model_usd": 0.1425448
+      },
+      "timed_out": false,
+      "hashes": {
+        "starter": "948095aeea2353d3fad0b4d64537a4eba8b00149c90ad65ac70d89ef7743d463",
+        "task": "6e00907ac5b492927dbc22d5709df869011eab7e8633d31470c30af2bb958452",
+        "evaluator": "193c012bbc71edc33fbf9cbffec34fea099695e2fafa6a247dbf1b46703454f2",
+        "runner": "e2c5c0963862480fffa30761d7ea77a9a4e4707e1fdd42e5857b09dd02244fcb",
+        "adapter": "2014bcd9192e7f18b4be47890ebf272868bb52a1b71943d78e17ae601753a18a"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "balancedness_score_gpu": 0.6624244828344464,
+        "balancedness_score_expert": 0.25059911075530844,
+        "times_algorithm": 1.7959941136363733,
+        "times_inference": 3.2481941818181834,
+        "speed_score": 0.0006157267355489491,
+        "combined_score": 0.1256074187454287
+      },
+      "grader": {
+        "balancedness_score_gpu": 0.6626770848055241,
+        "balancedness_score_expert": 0.25059911075530844,
+        "times_algorithm": 0.019607708272711865,
+        "times_inference": 0.34026428781818263,
+        "speed_score": 0.005877784039060494,
+        "combined_score": 0.12823844739718446
+      },
+      "nominated": {
+        "function_source": "def rebalance_experts(\n    weight: torch.Tensor,\n    num_replicas: int,\n    num_groups: int,\n    num_nodes: int,\n    num_gpus: int,\n) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:\n    \"\"\"Balance equal-capacity GPU slots, keeping expert groups within nodes.\"\"\"\n    import heapq\n    import numpy as np\n\n    layers, experts = weight.shape\n    assert num_replicas >= experts and num_replicas % num_gpus == 0\n    if num_groups % num_nodes:\n        num_nodes = num_groups = 1\n    assert experts % num_groups == 0 and num_gpus % num_nodes == 0\n    extra = num_replicas - experts\n    width = extra + 1\n    if not layers:\n        return (torch.empty((0, num_replicas), dtype=torch.long),\n                torch.empty((0, experts, width), dtype=torch.long),\n                torch.empty((0, experts), dtype=torch.long))\n    w = weight.detach().to(device='cpu', dtype=torch.float32).numpy().astype(np.float64)\n\n    def pack(values, bins):\n        n, size = values.shape\n        k = size // bins\n        if bins == 1 or k == 1:\n            return np.broadcast_to(np.arange(size), (n, size))\n        order = np.argsort(-values, axis=1, kind='stable')\n        ordered = np.take_along_axis(values, order, axis=1)\n        if k == 2:\n            # Opposite sorted items minimize the largest pair sum.\n            return np.stack((order[:, :bins], order[:, :bins-1:-1]), axis=2).reshape(n, size)\n\n        # Assign a round of descending items to ascending-load bins. The\n        # number of Python iterations is the slot capacity, not item count.\n        out = np.empty((n, bins, k), dtype=np.int64)\n        out[:, :, 0] = order[:, :bins]\n        sums = ordered[:, :bins].copy()\n        r = np.arange(n)[:, None]\n        for j in range(1, k):\n            dst = np.argsort(sums, axis=1, kind='stable')\n            block = slice(j * bins, (j + 1) * bins)\n            out[r, dst, j] = order[:, block]\n            sums[r, dst] += ordered[:, block]\n        mean = ordered.sum(axis=1) / bins\n        bound = np.maximum(mean, ordered[:, 0] + ordered[:, -(k - 1):].sum(axis=1))\n        tol = np.maximum(np.abs(mean), np.abs(bound)) * 0.001\n\n        # On harder rows also try individual largest-first placement.\n        # Keep whichever has lower peak load, with squared load as a tie-break.\n        for i in np.flatnonzero(sums.max(axis=1) > bound + tol):\n            ids = order[i].tolist()\n            vals = ordered[i].tolist()\n            slots = [[v] for v in ids[:bins]]\n            heap = [(vals[b], b) for b in range(bins)]\n            heapq.heapify(heap)\n            totals = vals[:bins]\n            for item, load in zip(ids[bins:], vals[bins:]):\n                current, b = heap[0]\n                slots[b].append(item)\n                total = current + load\n                totals[b] = total\n                if len(slots[b]) == k:\n                    heapq.heappop(heap)\n                else:\n                    heapq.heapreplace(heap, (total, b))\n            peak = max(totals)\n            old_peak = sums[i].max()\n            if peak < old_peak or (peak == old_peak and\n                    sum(x*x for x in totals) < np.dot(sums[i], sums[i])):\n                out[i] = slots\n                sums[i] = totals\n\n        # Search for beneficial slot-preserving swaps between the hottest bin\n        # and a few light bins. Bound the temporary array size and search work.\n        q = min(4, bins - 1, max(1, 65536 // (k * k)))\n        if k * k <= 262144:\n            pending = np.flatnonzero(sums.max(axis=1) > bound + tol)\n            chunk = max(1, 65536 // (q * k * k))\n            for start in range(0, len(pending), chunk):\n                rows = pending[start:start + chunk]\n                for _ in range(3):\n                    if rows.size == 0:\n                        break\n                    loads = sums[rows]\n                    hot = loads.argmax(axis=1)\n                    cold = np.argpartition(loads, q - 1, axis=1)[:, :q]\n                    a = values[rows[:, None], out[rows, hot]]\n                    b = values[rows[:, None, None], out[rows[:, None], cold]]\n                    gap = loads[np.arange(rows.size), hot, None] - np.take_along_axis(loads, cold, axis=1)\n                    delta = a[:, None, :, None] - b[:, :, None, :]\n                    gain = np.minimum(delta, gap[:, :, None, None] - delta)\n                    gains = gain.reshape(rows.size, -1)\n                    best = gains.argmax(axis=1)\n                    ok = gains[np.arange(rows.size), best] > tol[rows] * 0.1\n                    if not ok.any():\n                        break\n                    rows = rows[ok]\n                    h = hot[ok]\n                    j, rem = np.divmod(best[ok], k*k)\n                    u, v = np.divmod(rem, k)\n                    c = cold[ok, j]\n                    x, y = out[rows, h, u], out[rows, c, v]\n                    d = values[rows, x] - values[rows, y]\n                    out[rows, h, u], out[rows, c, v] = y, x\n                    sums[rows, h] -= d\n                    sums[rows, c] += d\n                    rows = rows[sums[rows].max(axis=1) > bound[rows] + tol[rows]]\n        return out.reshape(n, size)\n\n    physical_per_node = num_replicas // num_nodes\n    logical_per_node = experts // num_nodes\n    batch = layers * num_nodes\n    if num_nodes == 1:\n        logical = np.broadcast_to(np.arange(experts), (layers, experts))\n        local_weight = w\n    else:\n        group_size = experts // num_groups\n        group_weight = w.reshape(layers, num_groups, group_size).sum(axis=2)\n        group_order = pack(group_weight, num_nodes)\n        logical = (group_order[..., None] * group_size + np.arange(group_size)).reshape(batch, logical_per_node)\n        local_weight = np.take_along_axis(w, logical.reshape(layers, experts), axis=1).reshape(batch, logical_per_node)\n\n    replica = np.empty((batch, physical_per_node), dtype=np.int64)\n    replica[:, :logical_per_node] = np.arange(logical_per_node)\n    rank = np.zeros_like(replica)\n    counts = np.ones((batch, logical_per_node), dtype=np.int64)\n    if extra:\n        quotient = local_weight.copy()\n        rows = np.arange(batch)\n        for slot in range(logical_per_node, physical_per_node):\n            hot = quotient.argmax(axis=1)\n            old = counts[rows, hot]\n            replica[:, slot] = hot\n            rank[:, slot] = old\n            new = old + 1\n            counts[rows, hot] = new\n            quotient[rows, hot] = local_weight[rows, hot] / new\n        values = np.take_along_axis(quotient, replica, axis=1)\n    else:\n        values = local_weight\n\n    order = pack(values, num_gpus // num_nodes)\n    local_ids = np.take_along_axis(replica, order, axis=1)\n    phy2log = np.take_along_axis(logical, local_ids, axis=1).reshape(layers, num_replicas)\n    ranks = np.take_along_axis(rank, order, axis=1).reshape(layers, num_replicas)\n    if num_nodes == 1:\n        logcnt = counts\n    else:\n        logcnt = np.empty((layers, experts), dtype=np.int64)\n        np.put_along_axis(logcnt, logical.reshape(layers, experts), counts.reshape(layers, experts), axis=1)\n    log2phy = np.full((layers, experts * width), -1, dtype=np.int64)\n    log2phy[np.arange(layers)[:, None], phy2log * width + ranks] = np.arange(num_replicas)\n    return (torch.from_numpy(phy2log),\n            torch.from_numpy(log2phy.reshape(layers, experts, width)),\n            torch.from_numpy(logcnt))",
+        "function_sha256": "bb0aa1483925f75de3e3880d312b65016dc3e6447bc8fa98d1a7a78e54b54485",
+        "assembled_sha256": "061745cdbb073016e5bc7ec083886f3597093e0b0077e009ee68eb08c00ab215"
+      }
+    },
+    "llm_sql": {
+      "kind": "systems",
+      "run": "run-mwslnm7l-35-8bfa",
+      "raw_receipt": ".one_piece/external-coral/systems-01/llm_sql/result.json",
+      "usage": {
+        "calls": 19,
+        "tokens": 114790,
+        "elapsed_ms": 117618,
+        "peak_input_plus_cache": 9030,
+        "provider_errors": 2,
+        "provider_aborts": 0,
+        "model_usd": 0.161332
+      },
+      "timed_out": false,
+      "hashes": {
+        "starter": "45b39e086e1accf7bec49a2e881922119cef59ea5c185eccee6d1fa14695f1aa",
+        "task": "3a0b3372fbbceb76f4e32c8bd86b28cb65bc9f8e729432cee073be519af2c176",
+        "evaluator": "f3360624e9e9226a3fd3c22994ed22568ea30eed3fe5e6b725f5791a77cf177c",
+        "runner": "e2c5c0963862480fffa30761d7ea77a9a4e4707e1fdd42e5857b09dd02244fcb",
+        "adapter": "2014bcd9192e7f18b4be47890ebf272868bb52a1b71943d78e17ae601753a18a"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "error": "RuntimeError('task grader exceeded local wall limit')"
+      },
+      "grader": {
+        "combined_score": 0.7270683890867733,
+        "runs_successfully": 1,
+        "hit_rates": [
+          0.7938716988424014,
+          0.7003961990601995,
+          0.8249577636758468,
+          0.43423472451037426,
+          0.8418964967262161
+        ],
+        "total_runtime": 7.259302377700806
+      },
+      "nominated": {
+        "function_source": "def reorder(\n    self,\n    df: pd.DataFrame,\n    early_stop: int = 0,\n    row_stop: int = None,\n    col_stop: int = None,\n    col_merge: List[List[str]] = [],\n    one_way_dep: List[Tuple[str, str]] = [],\n    distinct_value_threshold: float = 0.8,\n    parallel: bool = True,\n) -> Tuple[pd.DataFrame, List[List[str]]]:\n    import heapq\n    import numpy as np\n    from collections import Counter\n\n    n, m = df.shape\n    columns = df.columns.tolist()\n    self.num_rows, self.num_cols = n, m\n    if not n or not m:\n        return df.copy(), [columns.copy() for _ in range(n)]\n    values = df.astype(str).to_numpy(dtype=object)\n    if n == 1:\n        return pd.DataFrame(values, index=df.index, columns=df.columns), [columns]\n    flat, vocabulary = pd.factorize(values.ravel(), sort=False)\n    tokens = flat.reshape(n, m).tolist()\n    weights = [len(s) ** 2 for s in vocabulary]\n    support = [0] * len(weights)\n    for row in tokens:\n        for t in set(row):\n            support[t] += 1\n    rank = [(-w * (s - 1), -s, t) for t, (w, s) in enumerate(zip(weights, support))]\n    base = range(m)\n\n    def canonical(rows, tails):\n        items = []\n        for r in rows:\n            cols = sorted(tails[r] if tails is not None else base, key=lambda c: rank[tokens[r][c]])\n            items.append((tuple(tokens[r][c] for c in cols), r, cols))\n        items.sort()\n        return [(r, cols) for _, r, cols in items]\n\n    def exact(rows, tails):\n        k = len(rows)\n        end = 1 << k\n        common = [Counter() for _ in range(end)]\n        for j, r in enumerate(rows):\n            common[1 << j] = Counter(tokens[r][c] for c in tails[r])\n        scores = [0] * end\n        split = [0] * end\n        for mask in range(1, end):\n            bit = mask & -mask\n            rem = mask ^ bit\n            if rem:\n                common[mask] = common[bit] & common[rem]\n                best = -1\n                sub = (rem - 1) & rem\n                while True:\n                    a = sub | bit\n                    gain = scores[a] + scores[mask ^ a]\n                    if gain > best:\n                        best, split[mask] = gain, a\n                    if not sub:\n                        break\n                    sub = (sub - 1) & rem\n                scores[mask] = best + sum(weights[t] * qty for t, qty in common[mask].items())\n        result = []\n\n        def emit(mask, parent, prefix):\n            a = split[mask]\n            if a:\n                added = tuple((common[mask] - common[parent]).elements())\n                chain = prefix + added\n                emit(a, mask, chain)\n                emit(mask ^ a, mask, chain)\n            else:\n                r = rows[mask.bit_length() - 1]\n                by_token = {}\n                for c in reversed(tails[r]):\n                    by_token.setdefault(tokens[r][c], []).append(c)\n                cols = [by_token[t].pop() for t in prefix]\n                used = set(cols)\n                cols.extend(c for c in tails[r] if c not in used)\n                result.append((r, cols))\n        emit(end - 1, 0, ())\n        return result\n\n    def build(mode):\n        tails = [list(base) for _ in range(n)]\n        prefixes = [[] for _ in range(n)]\n        result = []\n        stack = [(list(range(n)), False)]\n        budget = max(10000, 9 * n * m)\n        exact_budget = 65000 if mode == 0 else 12000\n        while stack:\n            rows, leaf = stack.pop()\n            width = len(tails[rows[0]])\n            if leaf or len(rows) == 1 or not width:\n                result.extend((r, prefixes[r] + tails[r]) for r in rows)\n                continue\n            k = len(rows)\n            if k <= (11 if k == n else 7):\n                cost = 3 ** k + (1 << k) * width\n                if cost <= exact_budget or (k == n and cost <= 400000):\n                    exact_budget -= cost\n                    result.extend((r, prefixes[r] + cols) for r, cols in exact(rows, tails))\n                    continue\n            budget -= k * width\n            if budget < 0:\n                result.extend((r, prefixes[r] + cols) for r, cols in canonical(rows, tails))\n                continue\n            incidence = {}\n            for r in rows:\n                ts = tokens[r]\n                for c in tails[r]:\n                    t = ts[c]\n                    if support[t] < 2:\n                        continue\n                    bucket = incidence.get(t)\n                    if bucket is None:\n                        incidence[t] = [r]\n                    elif bucket[-1] != r:\n                        bucket.append(r)\n            grouped = {}\n            for t, hits in incidence.items():\n                if len(hits) > 1:\n                    grouped.setdefault(tuple(hits), []).append(t)\n            if not grouped:\n                result.extend((r, prefixes[r] + tails[r]) for r in rows)\n                continue\n            hits_list = list(grouped)\n            bundles = [sorted(grouped[h], key=rank.__getitem__) for h in hits_list]\n            gains = [sum(weights[t] for t in bundle) for bundle in bundles]\n            counts = list(map(len, hits_list))\n            representatives = {bundle[0]: j for j, bundle in enumerate(bundles)}\n\n            def entry(j):\n                count = counts[j]\n                if mode == 1:\n                    priority = gains[j] * (count - 1) ** 0.55\n                elif mode == 2:\n                    priority = gains[j] * (count - 1) ** 1.45\n                else:\n                    priority = gains[j] * (count - 1)\n                return (-priority, -count, j)\n\n            heap = [entry(j) for j in range(len(counts))]\n            heapq.heapify(heap)\n            active = set(rows)\n            children = []\n            while heap and len(active) > 1:\n                neg, size, j = heapq.heappop(heap)\n                count = counts[j]\n                if count != -size or count < 2:\n                    continue\n                if early_stop > 0 and gains[j] * (count - 1) < early_stop and mode == 0:\n                    continue\n                members = [r for r in hits_list[j] if r in active]\n                active.difference_update(members)\n                selected = {t: p for p, t in enumerate(bundles[j])}\n                width_selected = len(selected)\n                touched = set()\n                update = len(active) > 1\n                for r in members:\n                    ts = tokens[r]\n                    chosen = [-1] * width_selected\n                    rest = []\n                    affected = set()\n                    for c in tails[r]:\n                        t = ts[c]\n                        p = selected.get(t)\n                        if p is not None and chosen[p] == -1:\n                            chosen[p] = c\n                        else:\n                            rest.append(c)\n                        if update:\n                            rep = representatives.get(t)\n                            if rep is not None:\n                                affected.add(rep)\n                    for rep in affected:\n                        counts[rep] -= 1\n                    touched.update(affected)\n                    tails[r] = rest\n                    prefixes[r].extend(chosen)\n                for rep in touched:\n                    if counts[rep] > 1:\n                        heapq.heappush(heap, entry(rep))\n                children.append((members, False))\n            if active:\n                children.append(([r for r in rows if r in active], True))\n            stack.extend(reversed(children))\n        return result\n\n    def score(order):\n        prev = None\n        total = 0\n        for r, cols in order:\n            cur = [tokens[r][c] for c in cols]\n            if prev is not None:\n                for a, b in zip(prev, cur):\n                    if a != b:\n                        break\n                    total += weights[a]\n            prev = cur\n        return total\n\n    best = build(0)\n    if n > 11 or 3 ** n + (1 << n) * m > 400000:\n        top = score(best)\n        candidate = canonical(range(n), None)\n        value = score(candidate)\n        if value > top:\n            best, top = candidate, value\n        if n * m <= 350000:\n            for mode in (1, 2) if n * m <= 85000 else (1,):\n                candidate = build(mode)\n                value = score(candidate)\n                if value > top:\n                    best, top = candidate, value\n    row_ids = np.fromiter((r for r, _ in best), dtype=np.intp, count=n)\n    positions = np.asarray([cols for _, cols in best], dtype=np.intp)\n    reordered = pd.DataFrame(values[row_ids[:, None], positions], index=df.index.take(row_ids), columns=df.columns)\n    return reordered, [[columns[c] for c in cols] for _, cols in best]",
+        "function_sha256": "4f7ed28ea8acadeb9390e1cd9cc5f532f073712983ce8518ef8940d5d8277240",
+        "assembled_sha256": "e1ef60453410ac596a083d5336939763edf614a56eba706457ce41fae83753b6"
+      }
+    },
+    "prism": {
+      "kind": "systems",
+      "run": "run-mwsll5am-01-b26b",
+      "raw_receipt": ".one_piece/external-coral/systems-01/prism/result.json",
+      "usage": {
+        "calls": 22,
+        "tokens": 63506,
+        "elapsed_ms": 109968,
+        "peak_input_plus_cache": 4964,
+        "provider_errors": 6,
+        "provider_aborts": 1,
+        "model_usd": 0.0870568
+      },
+      "timed_out": false,
+      "hashes": {
+        "starter": "4679530731916cf034bba4cac2a21413f7a6a3176cc333d3731b8305d6447042",
+        "task": "5eb7b3d3762db022593562f143a85a53e3c8c3bee5339fa49b870bdfcabb815e",
+        "evaluator": "1a712bd1888be5f129a2cde8cdf2f906a4e571d07c140fbe09c85faf13c2555d",
+        "runner": "e2c5c0963862480fffa30761d7ea77a9a4e4707e1fdd42e5857b09dd02244fcb",
+        "adapter": "1b88e7d142adc6a7d9b9c2dd3bafa6fe5806facf97cb64d512de6ba77c7c7bc9"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "max_kvpr": 20.891622105209393,
+        "execution_time": 0.00044766902923583986,
+        "success_rate": 1.0,
+        "combined_score": 21.891622105209393
+      },
+      "grader": {
+        "max_kvpr": 25.255971749535238,
+        "execution_time": 0.07843005657196045,
+        "success_rate": 1,
+        "combined_score": 26.255971749535238
+      },
+      "nominated": {
+        "function_source": "def compute_model_placement(gpu_num, models):\n    import math\n    import random\n\n    models = list(models)\n    n = len(models)\n    if not n:\n        return {b: [] for b in range(gpu_num)}\n    if gpu_num <= 0:\n        raise ValueError('No GPUs available')\n    c = GPU_MEM_SIZE\n    g = min(n, gpu_num)\n    s = [m.model_size for m in models]\n    w = [m.req_rate / m.slo for m in models]\n    inf = float('inf')\n    if max(s) > c or math.fsum(s) > g*c:\n        raise ValueError('Insufficient GPU memory')\n\n    def ratio(a, v):\n        if a < c:\n            return v / (c-a)\n        return inf if v else 0.0\n\n    if g == n:\n        return {b: [models[b]] if b < n else [] for b in range(gpu_num)}\n    ids = list(range(n))\n    by_size = sorted(ids, key=lambda i: (s[i], w[i]), reverse=True)\n    total_w = math.fsum(w)\n    lower = max(max(ratio(s[i], w[i]) for i in ids), ratio(math.fsum(s)/g, total_w/g))\n    scale = lower if 0 < lower < inf else max(w)/c\n    rng = random.Random(71425)\n    best = None\n    upper = inf\n\n    def measure(p):\n        return max(ratio(sum(s[i] for i in q), sum(w[i] for i in q)) for q in p)\n\n    def save(p):\n        nonlocal best, upper\n        if p is not None and all(sum(s[i] for i in q) <= c for q in p):\n            value = measure(p)\n            if best is None or value < upper:\n                best, upper = p, value\n\n    def greedy(order, eff, mode, limit=inf):\n        ss = [0]*g\n        ww = [0.0]*g\n        ee = [0.0]*g\n        p = [[] for _ in range(g)]\n        for i in order:\n            a, v, e = s[i], w[i], eff[i]\n            b0 = -1\n            k0 = (inf, inf)\n            for b in range(g):\n                aa, ee2 = ss[b]+a, ee[b]+e\n                if aa > c or ee2 > limit:\n                    continue\n                if mode == 0:\n                    k = (ratio(aa, ww[b]+v), ee2)\n                elif mode == 1:\n                    k = (ee2, aa)\n                elif mode == 2:\n                    k = (-ee2, -aa)\n                else:\n                    k = (ratio(ss[b], ww[b]), aa)\n                if b0 < 0 or k < k0:\n                    b0, k0 = b, k\n                if mode == 1 and not p[b]:\n                    break\n            if b0 < 0:\n                return None\n            p[b0].append(i)\n            ss[b0] += a\n            ww[b0] += v\n            ee[b0] += e\n        return p\n\n    # Fixed-threshold feasibility is ordinary packing of s[i]+w[i]/T.\n    exact_budget = 0\n    def pack(t, budget):\n        nonlocal exact_budget\n        e = s if t == inf else [s[i]+w[i]/t for i in ids]\n        order = sorted(ids, key=lambda i: (e[i], s[i]), reverse=True)\n        tol = 1e-10\n        cap = c + tol\n        if e[order[0]] > cap or math.fsum(e) > g*cap:\n            return None, True\n        # At most k large items of size strictly above capacity/(k+1) per bin.\n        for k in range(1, min(16, (n-1)//g)+1):\n            if e[order[k*g]] > cap/(k+1):\n                return None, True\n        for mode in (2, 1):\n            p = greedy(order, e, mode, cap)\n            if p is not None:\n                return p, False\n        budget = min(budget, exact_budget)\n        if budget <= 0 or n > 220:\n            return None, False\n        remaining = budget\n        loads = [0.0]*g\n        sizes = [0]*g\n        p = [[] for _ in range(g)]\n        dead = set()\n\n        def dfs(j, used):\n            nonlocal remaining\n            if j == n:\n                return True\n            if remaining <= 0:\n                return False\n            remaining -= 1\n            key = (j, tuple(sorted((loads[b], sizes[b]) for b in range(used))))\n            if key in dead:\n                return False\n            i = order[j]\n            seen = set()\n            for b in sorted(range(min(used+1, g)), key=loads.__getitem__, reverse=True):\n                old = loads[b], sizes[b]\n                if old in seen:\n                    continue\n                seen.add(old)\n                v, a = old[0]+e[i], old[1]+s[i]\n                if v > cap or a > c:\n                    continue\n                loads[b], sizes[b] = v, a\n                p[b].append(i)\n                if dfs(j+1, max(used,b+1)):\n                    return True\n                p[b].pop()\n                loads[b], sizes[b] = old\n                if remaining <= 0:\n                    return False\n            dead.add(key)\n            return False\n\n        ok = dfs(0, 0)\n        exact_budget -= budget - remaining\n        return (p if ok else None), not ok and remaining > 0\n\n    def polish(p, steps, exchanges=False):\n        p = [q[:] for q in p]\n        ss = [sum(s[i] for i in q) for q in p]\n        ww = [sum(w[i] for i in q) for q in p]\n        rr = [ratio(a,v) for a,v in zip(ss,ww)]\n        for _ in range(steps):\n            top = max(rr)\n            if top == 0:\n                break\n            change = None\n            merit = (0.0, 0.0)\n            for a in sorted(range(g), key=rr.__getitem__, reverse=True)[:3]:\n                if rr[a] < top:\n                    break\n                for b in range(g):\n                    if b == a:\n                        continue\n                    old_low = min(rr[a], rr[b])\n                    candidates = [((), (j,), -s[j], -w[j]) for j in p[b]]\n                    candidates.append(((), (), 0, 0.0))\n                    # Also try exchanging two destination models for one bottleneck model.\n                    if exchanges and len(p[b]) <= 11:\n                        for u, j in enumerate(p[b]):\n                            for k in p[b][u+1:]:\n                                candidates.append(((), (j,k), -s[j]-s[k], -w[j]-w[k]))\n                    for i in p[a]:\n                        for _, js, ds, dw in candidates:\n                            d, v = s[i]+ds, w[i]+dw\n                            sa, sb = ss[a]-d, ss[b]+d\n                            if sa > c or sb > c:\n                                continue\n                            x = ratio(sa, ww[a]-v)\n                            y = ratio(sb, ww[b]+v)\n                            hi, lo = max(x,y), min(x,y)\n                            if hi < top:\n                                gain = ((top-hi) if top < inf else inf, -lo)\n                            elif hi == top and lo < old_low:\n                                gain = (0.0, (old_low-lo) if old_low < inf else inf)\n                            else:\n                                continue\n                            if change is None or gain > merit:\n                                merit = gain\n                                change = a,b,i,js\n            if change is None:\n                break\n            a,b,i,js = change\n            p[a].remove(i)\n            for j in js:\n                p[b].remove(j)\n            p[a].extend(js)\n            p[b].append(i)\n            for k in (a,b):\n                ss[k] = sum(s[i] for i in p[k])\n                ww[k] = sum(w[i] for i in p[k])\n                rr[k] = ratio(ss[k],ww[k])\n        return p\n\n    local_steps = min(70, max(6, 48000//max(1,n*g)))\n    trials = []\n    def try_order(order, e, mode):\n        p = greedy(order, e, mode)\n        if p is not None:\n            trials.append((measure(p),p))\n            save(p)\n\n    try_order(by_size, s, 2)\n    by_w = sorted(ids, key=lambda i: w[i], reverse=True)\n    try_order(by_w, s, 3)\n    try_order(by_w, s, 0)\n    try_order(sorted(ids,key=lambda i:ratio(s[i],w[i]),reverse=True), s, 0)\n    if scale > 0:\n        for f in (0.35, 0.75, 1.0, 2.0, 6.0):\n            e = [s[i]+w[i]/(scale*f) for i in ids]\n            order = sorted(ids, key=e.__getitem__, reverse=True)\n            for mode in (0, 1, 2):\n                try_order(order, e, mode)\n        e = [s[i]+w[i]/scale for i in ids]\n        for j in range(10 if n*g <= 30000 else 4):\n            order = sorted(ids, key=lambda i: e[i]*(1+rng.uniform(-0.24,0.24)), reverse=True)\n            try_order(order, e, j%3)\n    for _, p in sorted(trials, key=lambda z:z[0])[:5]:\n        save(polish(p, local_steps))\n    if best is None:\n        exact_budget = 65000 if n <= 100 else 22000\n        p, _ = pack(inf, exact_budget)\n        save(p)\n        if best is None:\n            raise ValueError('Unable to place all models within GPU memory')\n\n    if upper > 0 and upper < inf and lower < upper:\n        # Keep proven lower bounds separate from heuristic search failures.\n        lo = max(0.0, lower)\n        proven = lo\n        exact_budget = 33000 if n <= 55 else (9000 if n <= 105 else 0)\n        for j in range(15):\n            if upper-lo <= 2e-7*upper:\n                break\n            t = (lo+upper)*0.5\n            p, impossible = pack(t, 6000 if n <= 55 else 1800)\n            if p is not None:\n                prev = upper\n                save(p)\n                if j < 7:\n                    save(polish(p, local_steps//2+1))\n                if prev == upper:\n                    lo = t\n                elif upper < lo:\n                    lo = proven\n            else:\n                lo = t\n                if impossible:\n                    proven = t\n    if upper > 0:\n        save(polish(best, local_steps, n <= 240 and n*g <= 13000))\n    return {b: [models[i] for i in best[b]] if b < g else [] for b in range(gpu_num)}",
+        "function_sha256": "f897ca86ac6ceeaf5e6411ee586c7e6136413e1860c545b4799fb0c407e77561",
+        "assembled_sha256": "321ec55f2eb0f3582075b7a08b1abf28d081b6f25f1932dc3e3a5827686bc52d"
+      }
+    },
+    "txn_scheduling": {
+      "kind": "systems",
+      "run": "run-mwslnlmi-30-3a20",
+      "raw_receipt": ".one_piece/external-coral/systems-01/txn_scheduling/result.json",
+      "usage": {
+        "calls": 24,
+        "tokens": 111491,
+        "elapsed_ms": 126680,
+        "peak_input_plus_cache": 7056,
+        "provider_errors": 2,
+        "provider_aborts": 0,
+        "model_usd": 0.1656028
+      },
+      "timed_out": false,
+      "hashes": {
+        "starter": "f38cea06e252799611995267f10f019fa4937d9ba51c185f2e08f50986e5894a",
+        "task": "3d10a5ee7eb55f74dcbe199b25d7b44a61ffa16c252ce0e5e524f848c84a9a9a",
+        "evaluator": "3e4e0e2456a904373b59843f58ca1bd32ede0faf42b19880ed3516714ec6995c",
+        "runner": "e2c5c0963862480fffa30761d7ea77a9a4e4707e1fdd42e5857b09dd02244fcb",
+        "adapter": "2014bcd9192e7f18b4be47890ebf272868bb52a1b71943d78e17ae601753a18a"
+      },
+      "prompt_sha256": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+      "starter": {
+        "makespan": 364.0,
+        "schedule": 3.0,
+        "validity": 1.0,
+        "combined_score": 2739.72602739726
+      },
+      "grader": {
+        "makespan": 457,
+        "schedule": 3,
+        "validity": 1,
+        "combined_score": 2183.406113537118
+      },
+      "nominated": {
+        "function_source": "def get_best_schedule(workload, num_seqs):\n    import itertools\n    import math\n    import random\n    import time\n\n    n = workload.num_txns\n    score = workload.get_opt_seq_cost\n    if not n:\n        return 0, []\n    rng = random.Random(1879 + n)\n    clock = time.perf_counter\n    start = clock()\n    deadline = start + 2.25\n    ids = list(range(n))\n    best = ids[:]\n    best_cost = score(best)\n    calls = 0\n\n    def evaluate(s):\n        nonlocal calls\n        calls += 1\n        return score(s)\n\n    def save(s, c):\n        nonlocal best, best_cost\n        if c < best_cost:\n            best, best_cost = s[:], c\n\n    if n <= 7:\n        for p in itertools.permutations(ids):\n            s = list(p)\n            save(s, evaluate(s))\n            if calls % 64 == 0 and clock() >= deadline:\n                break\n        return best_cost, best\n\n    single = [evaluate([i]) for i in ids]\n    lower = max(single)\n    if best_cost == lower:\n        return best_cost, best\n    elites = []\n\n    def remember(s, c):\n        save(s, c)\n        if any(s == x[1] for x in elites):\n            return\n        elites.append((c, s[:]))\n        elites.sort(key=lambda x: x[0])\n        if len(elites) > 6:\n            del elites[-1]\n\n    remember(best, best_cost)\n    for s in (ids[::-1], sorted(ids, key=single.__getitem__, reverse=True), sorted(ids, key=single.__getitem__)):\n        remember(s, evaluate(s))\n\n    width = max(8, min(18, int(num_seqs or 10)))\n    seed_stop = start + 0.57\n    for trial in range(12):\n        if best_cost == lower:\n            return best_cost, best\n        if trial and clock() >= seed_stop:\n            break\n        rem = ids[:]\n        s = [rem.pop(rng.randrange(n))]\n        prepend = trial % 3 == 2\n        while rem:\n            if clock() >= (deadline if trial == 0 else seed_stop):\n                rng.shuffle(rem)\n                s = rem + s if prepend else s + rem\n                break\n            k = min(len(rem), 10 if trial == 0 else width)\n            sample = rng.sample(rem, k)\n            values = []\n            for t in sample:\n                q = [t] + s if prepend else s + [t]\n                c = evaluate(q)\n                tie = -single[t] if trial % 4 in (1, 2) else 0\n                values.append((c, tie, t))\n            values.sort(key=lambda v: (v[0], v[1]))\n            j = 0\n            if trial >= 3 and len(values) > 1 and rng.random() < 0.17:\n                j = rng.randrange(min(4, len(values)))\n            t = values[j][2]\n            rem.remove(t)\n            if prepend:\n                s.insert(0, t)\n            else:\n                s.append(t)\n        remember(s, evaluate(s))\n        r = s[::-1]\n        remember(r, evaluate(r))\n\n    epoch = 0\n    limit = 36000\n    while calls < limit and clock() < deadline and best_cost > lower:\n        epoch += 1\n        if epoch % 4 == 0 and len(elites) > 1:\n            cur_cost, cur = rng.choice(elites)\n        else:\n            cur_cost, cur = best_cost, best\n        cur = cur[:]\n        if epoch % 3 == 0:\n            # Test which removals shorten the schedule, then repair at the best insertion points.\n            for _ in range(2 if epoch % 2 == 0 else 1):\n                removed = []\n                for i in rng.sample(range(n), min(n, 10)):\n                    p = cur[:i] + cur[i + 1:]\n                    removed.append((evaluate(p), i, p))\n                _, i, p = min(removed, key=lambda x: x[0])\n                t = cur[i]\n                positions = list(range(n)) if n <= 35 else rng.sample(range(n), 29) + [0, n - 1, i]\n                rng.shuffle(positions)\n                move, move_cost = cur, cur_cost\n                for j in positions:\n                    q = p[:j] + [t] + p[j:]\n                    c = evaluate(q)\n                    if c < move_cost or (c == move_cost and rng.random() < 0.25):\n                        move, move_cost = q, c\n                    if clock() >= deadline:\n                        break\n                cur, cur_cost = move, move_cost\n                remember(cur, cur_cost)\n                if clock() >= deadline:\n                    break\n        steps = min(550, max(100, n * 4))\n        heat = min(4.0, max(0.55, 0.026 * float(best_cost)))\n        if epoch % 4 == 1:\n            heat *= 0.38\n        elif epoch % 4 == 3:\n            heat *= 1.65\n        for step in range(steps):\n            if step % 16 == 0 and (calls >= limit or clock() >= deadline or best_cost == lower):\n                break\n            i = rng.randrange(n)\n            j = rng.randrange(n - 1)\n            j += j >= i\n            q = cur[:]\n            op = rng.randrange(12)\n            if op < 5:\n                q.insert(j, q.pop(i))\n            elif op < 9:\n                q[i], q[j] = q[j], q[i]\n            elif op < 11:\n                a, b = sorted((i, j))\n                q[a:b + 1] = reversed(q[a:b + 1])\n            else:\n                k = rng.randrange(2, min(n, 8))\n                i = min(i, n - k)\n                segment = q[i:i + k]\n                del q[i:i + k]\n                j = min(j, len(q))\n                q[j:j] = segment\n            c = evaluate(q)\n            if c < best_cost:\n                remember(q, c)\n            delta = c - cur_cost\n            temperature = heat * (1.0 - 0.96 * step / steps)\n            if delta <= 0 or (c <= best_cost + 3 * heat and rng.random() < math.exp(-float(delta) / temperature)):\n                cur, cur_cost = q, c\n        remember(cur, cur_cost)\n    return best_cost, best",
+        "function_sha256": "a7a8f8d1bc5c9d731bb05c786637f19562ed20a526bd415b74ffa635c85637c1",
+        "assembled_sha256": "13436039389185380431225506964a85f4bb599db066224486bf45ed7bc9aa15"
+      }
+    }
+  },
+  "publication": [
+    {
+      "run": "run-mwslvudo-01-8c1a",
+      "raw_receipt": "/Users/ishaankundesu/Documents/one_piece/.one_piece/external-coral/publication-CZHnCk/result.json",
+      "usage": {
+        "calls": 2,
+        "tokens": 12512,
+        "elapsed_ms": 4127,
+        "peak_input_plus_cache": 6180,
+        "provider_errors": 0,
+        "provider_aborts": 1,
+        "model_usd": 0.02624
+      },
+      "picks": {
+        "node": "leaf-mwslvue9-05-71b5",
+        "picks": {
+          "signal_processing": "trial-3",
+          "erdos_min_overlap": "trial-2",
+          "minimizing_max_min_dist_2d": "trial-2",
+          "minimizing_max_min_dist_3d": "trial-2",
+          "third_autocorr_ineq": "trial-3"
+        },
+        "ms": 4001,
+        "tokens": 6256
+      },
+      "scores": {
+        "signal_processing": {
+          "id": "trial-3",
+          "score": 0.5266151841772255,
+          "sha256": "267d13446d271e507ddbe0f3ca4d23551e31464c37f602054b89be724363e649"
+        },
+        "erdos_min_overlap": {
+          "id": "trial-2",
+          "score": 0.9996381572961633,
+          "sha256": "6acb131cda8e2d78766c4bfd01afbe020738a556fcbc6bb9472f0ce3def3f32c"
+        },
+        "minimizing_max_min_dist_2d": {
+          "id": "trial-2",
+          "score": 1.0000028088804542,
+          "sha256": "b74813c908db12015ca7432ea856ff189517138d272da9c55dc76877ab5f56af"
+        },
+        "minimizing_max_min_dist_3d": {
+          "id": "trial-2",
+          "score": 1.0000159135539162,
+          "sha256": "0d4a6bb19a6045f2b2d2403114d99e972c2b81edc60d84979468913be500e5b5"
+        },
+        "third_autocorr_ineq": {
+          "id": "trial-3",
+          "score": 0.9307083168237413,
+          "sha256": "01c4cd7cd324d67d718a3da0a8a03aaa519fa6d50db1df44eb0c9f9e57494b72"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,199 @@
+{
+  "comparison": "final-arms",
+  "pairs": 8,
+  "hiddenSha256": "c1e9671518dbb1d173dbdebf6b89426306b510972001add8ef61625d2744dc73",
+  "rounds": [
+    {
+      "pair": 0,
+      "arm": "baseline",
+      "revision": "final",
+      "nomination": "644c134711a754bf3132aecf41e5c5a66b09692ce1590700e336c9bc995e1bb5",
+      "grade": {
+        "score": 0.9758,
+        "passed": true,
+        "raw": 175.95866636010643,
+        "details": "speedups lis_length 686.9x, count_inversions 43.6x, top_k_frequent 181.9x; geometric mean 176.0x (200x scores 1.0)"
+      }
+    },
+    {
+      "pair": 0,
+      "arm": "hillclimb",
+      "revision": "final",
+      "nomination": "c796cd01365afb0b63ca02f858b29effaf7ed21b793680df665100e8c5c1aa6b",
+      "grade": {
+        "score": 0.9012,
+        "passed": true,
+        "raw": 118.47985484921175,
+        "details": "speedups lis_length 474.5x, count_inversions 84.3x, top_k_frequent 41.6x; geometric mean 118.5x (200x scores 1.0)"
+      }
+    },
+    {
+      "pair": 1,
+      "arm": "hillclimb",
+      "revision": "final",
+      "nomination": "c796cd01365afb0b63ca02f858b29effaf7ed21b793680df665100e8c5c1aa6b",
+      "grade": {
+        "score": 0.7185,
+        "passed": true,
+        "raw": 45.00213323345407,
+        "details": "speedups lis_length 194.5x, count_inversions 43.8x, top_k_frequent 10.7x; geometric mean 45.0x (200x scores 1.0)"
+      }
+    },
+    {
+      "pair": 1,
+      "arm": "baseline",
+      "revision": "final",
+      "nomination": "644c134711a754bf3132aecf41e5c5a66b09692ce1590700e336c9bc995e1bb5",
+      "grade": {
+        "score": 0.8843,
+        "passed": true,
+        "raw": 108.36598712367137,
+        "details": "speedups lis_length 705.4x, count_inversions 22.9x, top_k_frequent 78.7x; geometric mean 108.4x (200x scores 1.0)"
+      }
+    },
+    {
+      "pair": 2,
+      "arm": "baseline",
+      "revision": "final",
+      "nomination": "644c134711a754bf3132aecf41e5c5a66b09692ce1590700e336c9bc995e1bb5",
+      "grade": {
+        "score": 0.9416,
+        "passed": true,
+        "raw": 146.74680794705813,
+        "details": "speedups lis_length 313.3x, count_inversions 32.1x, top_k_frequent 313.9x; geometric mean 146.7x (200x scores 1.0)"
+      }
+    },
+    {
+      "pair": 2,
+      "arm": "hillclimb",
+      "revision": "final",
+      "nomination": "c796cd01365afb0b63ca02f858b29effaf7ed21b793680df665100e8c5c1aa6b",
+      "grade": {
+        "score": 0.8829,
+        "passed": true,
+        "raw": 107.54765417222603,
+        "details": "speedups lis_length 287.5x, count_inversions 54.0x, top_k_frequent 80.2x; geometric mean 107.5x (200x scores 1.0)"
+      }
+    },
+    {
+      "pair": 3,
+      "arm": "hillclimb",
+      "revision": "final",
+      "nomination": "c796cd01365afb0b63ca02f858b29effaf7ed21b793680df665100e8c5c1aa6b",
+      "grade": {
+        "score": 0.8296,
+        "passed": true,
+        "raw": 81.080137162579,
+        "details": "speedups lis_length 102.9x, count_inversions 68.3x, top_k_frequent 75.8x; geometric mean 81.1x (200x scores 1.0)"
+      }
+    },
+    {
+      "pair": 3,
+      "arm": "baseline",
+      "revision": "final",
+      "nomination": "644c134711a754bf3132aecf41e5c5a66b09692ce1590700e336c9bc995e1bb5",
+      "grade": {
+        "score": 1,
+        "passed": true,
+        "raw": 256.60581956028597,
+        "details": "speedups lis_length 1236.6x, count_inversions 71.0x, top_k_frequent 192.5x; geometric mean 256.6x (200x scores 1.0)"
+      }
+    },
+    {
+      "pair": 4,
+      "arm": "baseline",
+      "revision": "final",
+      "nomination": "644c134711a754bf3132aecf41e5c5a66b09692ce1590700e336c9bc995e1bb5",
+      "grade": {
+        "score": 0.986,
+        "passed": true,
+        "raw": 185.74444098227914,
+        "details": "speedups lis_length 598.1x, count_inversions 48.5x, top_k_frequent 220.7x; geometric mean 185.7x (200x scores 1.0)"
+      }
+    },
+    {
+      "pair": 4,
+      "arm": "hillclimb",
+      "revision": "final",
+      "nomination": "c796cd01365afb0b63ca02f858b29effaf7ed21b793680df665100e8c5c1aa6b",
+      "grade": {
+        "score": 0.9916,
+        "passed": true,
+        "raw": 191.3028144326552,
+        "details": "speedups lis_length 283.8x, count_inversions 87.9x, top_k_frequent 280.8x; geometric mean 191.3x (200x scores 1.0)"
+      }
+    },
+    {
+      "pair": 5,
+      "arm": "hillclimb",
+      "revision": "final",
+      "nomination": "c796cd01365afb0b63ca02f858b29effaf7ed21b793680df665100e8c5c1aa6b",
+      "grade": {
+        "score": 0.9061,
+        "passed": true,
+        "raw": 121.5810537542344,
+        "details": "speedups lis_length 350.0x, count_inversions 69.6x, top_k_frequent 73.7x; geometric mean 121.6x (200x scores 1.0)"
+      }
+    },
+    {
+      "pair": 5,
+      "arm": "baseline",
+      "revision": "final",
+      "nomination": "644c134711a754bf3132aecf41e5c5a66b09692ce1590700e336c9bc995e1bb5",
+      "grade": {
+        "score": 1,
+        "passed": true,
+        "raw": 246.39762283658524,
+        "details": "speedups lis_length 672.7x, count_inversions 84.7x, top_k_frequent 262.5x; geometric mean 246.4x (200x scores 1.0)"
+      }
+    },
+    {
+      "pair": 6,
+      "arm": "baseline",
+      "revision": "final",
+      "nomination": "644c134711a754bf3132aecf41e5c5a66b09692ce1590700e336c9bc995e1bb5",
+      "grade": {
+        "score": 0.9738,
+        "passed": true,
+        "raw": 174.121278269938,
+        "details": "speedups lis_length 481.3x, count_inversions 58.9x, top_k_frequent 186.4x; geometric mean 174.1x (200x scores 1.0)"
+      }
+    },
+    {
+      "pair": 6,
+      "arm": "hillclimb",
+      "revision": "final",
+      "nomination": "c796cd01365afb0b63ca02f858b29effaf7ed21b793680df665100e8c5c1aa6b",
+      "grade": {
+        "score": 0.8858,
+        "passed": true,
+        "raw": 109.21926297401873,
+        "details": "speedups lis_length 253.5x, count_inversions 68.0x, top_k_frequent 75.6x; geometric mean 109.2x (200x scores 1.0)"
+      }
+    },
+    {
+      "pair": 7,
+      "arm": "hillclimb",
+      "revision": "final",
+      "nomination": "c796cd01365afb0b63ca02f858b29effaf7ed21b793680df665100e8c5c1aa6b",
+      "grade": {
+        "score": 0.9053,
+        "passed": true,
+        "raw": 121.10875588466436,
+        "details": "speedups lis_length 464.4x, count_inversions 47.4x, top_k_frequent 80.8x; geometric mean 121.1x (200x scores 1.0)"
+      }
+    },
+    {
+      "pair": 7,
+      "arm": "baseline",
+      "revision": "final",
+      "nomination": "644c134711a754bf3132aecf41e5c5a66b09692ce1590700e336c9bc995e1bb5",
+      "grade": {
+        "score": 0.904,
+        "passed": true,
+        "raw": 120.25175699636384,
+        "details": "speedups lis_length 228.0x, count_inversions 61.7x, top_k_frequent 123.6x; geometric mean 120.3x (200x scores 1.0)"
+      }
+    }
+  ]
+}

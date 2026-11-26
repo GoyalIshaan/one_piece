@@ -1,0 +1,986 @@
+import { appendFileSync, mkdirSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import {
+	type AgentRecord,
+	type BoardService,
+	type BudgetVector,
+	EventBus,
+	FileArtifactStore,
+	type FindingVerifier,
+	GitWorktreeManager,
+	type Goal,
+	type JsonSchema,
+	newId,
+	type QuotaPoolRouter,
+	Redactor,
+	type Role,
+	type Run,
+	shortHandle,
+	type SpawnWorkerRequest,
+	type Store,
+	type SwarmOsApi,
+	type TaskRecord,
+	type ToolDefinition,
+	type TopologyOutcome,
+	type TopologyPlugin,
+	type UsageRecord,
+	type WorkerActivityEvent,
+	type WorkerHandle,
+	type WorkerSession,
+	type WorkerTurnResult,
+} from "@one-piece/core";
+import { synthesizeHandoffFile } from "@one-piece/drivers";
+import { McpBusServer } from "@one-piece/mcp-bus";
+import { boardTools, SwarmBoardService } from "@one-piece/module-board";
+import { LocalSecretBroker, type SecretSpec } from "@one-piece/module-secrets";
+import { workspaceTools } from "@one-piece/module-workspace";
+import { type PoolConfig, Scheduler, schedulerTools } from "@one-piece/scheduler";
+import { CloseoutController } from "./closeout.ts";
+import { TriggerEngine } from "./triggers.ts";
+import { TrustLayer } from "./trust.ts";
+
+export interface SwarmOsConfig {
+	runId?: string;
+	runDir: string;
+	workspace: string;
+	topology: string;
+	goal: Goal;
+	budget?: BudgetVector;
+	reservePct?: number;
+	wallSeconds?: number;
+	pools?: PoolConfig[];
+	secrets?: SecretSpec[];
+	verifier?: FindingVerifier;
+	enableBlindReview?: boolean;
+	maxRepeatedTurns?: number;
+	networkOffWorkers?: boolean;
+	rawConfig?: Record<string, unknown>;
+	store: Store;
+	router: QuotaPoolRouter;
+}
+
+const DEFAULT_LEASE_MS = 180_000;
+
+/**
+ * Layer B — Thin Shared Swarm OS.
+ * Owns event logging, reactive triggers, worktrees, content-addressed artifacts,
+ * resource scheduler, trust/verification, local MCP bus, and multi-CLI quota failover.
+ * Topology plugins sit cleanly on top and never touch Pi or CLI-specific internals.
+ */
+export class SwarmOS implements SwarmOsApi {
+	readonly runId: string;
+	readonly runDir: string;
+	readonly bus: EventBus;
+	readonly store: Store;
+	readonly worktrees: GitWorktreeManager;
+	readonly artifacts: FileArtifactStore;
+	readonly board: BoardService;
+	readonly scheduler: Scheduler;
+	readonly secrets: LocalSecretBroker;
+	readonly trust: TrustLayer;
+	readonly router: QuotaPoolRouter;
+	readonly mcp: McpBusServer;
+
+	private currentRun: Run;
+	private readonly reservePct: number;
+	private readonly wallSeconds?: number;
+	private readonly startedAt: number;
+	private readonly networkOffWorkers: boolean;
+	private readonly triggers: TriggerEngine;
+	private readonly closeout: CloseoutController;
+	private readonly activeHandles = new Map<string, { handle: WorkerHandle; abort: AbortController; workspace: string }>();
+	private readonly runAbort = new AbortController();
+	private wallReserveTimer?: ReturnType<typeof setTimeout>;
+
+	private constructor(
+		cfg: SwarmOsConfig,
+		runId: string,
+		bus: EventBus,
+		mcp: McpBusServer,
+	) {
+		this.runId = runId;
+		this.runDir = resolve(cfg.runDir);
+		mkdirSync(this.runDir, { recursive: true });
+		this.store = cfg.store;
+		this.bus = bus;
+		this.mcp = mcp;
+		this.router = cfg.router;
+		this.router.attachBus?.(this.bus, this.runId);
+		this.reservePct = cfg.reservePct ?? 0.12;
+		this.wallSeconds = cfg.wallSeconds;
+		this.startedAt = Date.now();
+		this.networkOffWorkers = cfg.networkOffWorkers ?? false;
+
+		this.worktrees = new GitWorktreeManager(cfg.workspace, this.runDir, this.runId);
+		this.artifacts = new FileArtifactStore(this.runId, this.runDir, this.bus);
+		this.board = new SwarmBoardService(this.bus);
+		this.secrets = new LocalSecretBroker(this.runId, this.bus, { secrets: cfg.secrets ?? [] });
+
+		const now = Date.now();
+		this.currentRun = {
+			id: this.runId,
+			topology: cfg.topology,
+			goal: cfg.goal,
+			budget: { ...(cfg.budget ?? { tokens: 2_000_000, usd: 5 }) },
+			spent: {},
+			workspace: resolve(cfg.workspace),
+			baseCommitSha: this.worktrees.baseSha,
+			status: "running",
+			config: cfg.rawConfig ?? {},
+			createdAt: now,
+			updatedAt: now,
+		};
+		this.bus.save("runs", this.currentRun);
+		this.router.attachBus?.(this.bus, this.runId);
+
+		this.scheduler = new Scheduler(
+			{
+				runId: this.runId,
+				bus: this.bus,
+				store: this.store,
+				secrets: this.secrets,
+				isRunActive: () => this.currentRun.status === "running",
+				workspaceOf: (agentId) => this.activeHandles.get(agentId)?.workspace ?? this.store.get("agents", agentId)?.workspace,
+				taskIdOf: (agentId) => this.store.get("agents", agentId)?.taskId,
+				signalOf: (agentId) => this.activeHandles.get(agentId)?.abort.signal ?? this.runAbort.signal,
+				availableBudget: (unit) => {
+					const cap = this.currentRun.budget[unit];
+					return cap === undefined ? Infinity : cap - (this.currentRun.spent[unit] ?? 0);
+				},
+				chargeUnits: (agentId, units) => this.chargeBudget(agentId, undefined, undefined, undefined, units),
+			},
+			cfg.pools ?? [{ name: "cpu", unit: "cpu_seconds", capacity: 2, kind: "local", description: "local sandboxed CPU, network off" }],
+		);
+
+		this.trust = new TrustLayer({
+			runId: this.runId,
+			runDir: this.runDir,
+			bus: this.bus,
+			verifier: cfg.verifier,
+			enableBlindReview: cfg.enableBlindReview ?? false,
+			spawnReviewer: (req) => this.spawnWorker(req),
+		});
+
+		this.closeout = new CloseoutController(this.runId, this.runDir, this.bus, this.trust);
+
+		this.triggers = new TriggerEngine({
+			runId: this.runId,
+			bus: this.bus,
+			maxRepeatedTurns: cfg.maxRepeatedTurns ?? 3,
+			isInCloseoutReserve: () => this.isInCloseoutReserve(),
+			onStall: (agentId, reason) => {
+				const active = this.activeHandles.get(agentId);
+				if (active) {
+					this.updateAgentStatus(agentId, "stalled", reason);
+					active.abort.abort(new Error(reason));
+					void active.handle.interrupt?.().catch(() => {});
+				}
+			},
+			onReserveEntered: () => {
+				if (this.currentRun.status === "running") {
+					this.currentRun = { ...this.currentRun, status: "closing", updatedAt: Date.now() };
+					this.bus.save("runs", this.currentRun);
+				}
+			},
+		});
+		this.triggers.start();
+		if (this.wallSeconds && this.wallSeconds > 0) {
+			const ms = Math.max(1_000, Math.floor(this.wallSeconds * (1 - this.reservePct) * 1000));
+			this.wallReserveTimer = setTimeout(() => {
+				if (this.currentRun.status === "running") {
+					this.currentRun = { ...this.currentRun, status: "closing", updatedAt: Date.now() };
+					this.bus.save("runs", this.currentRun);
+					this.bus.emit(this.runId, "run.closing", { reason: "Wall-clock reserve reached", reservePct: this.reservePct });
+				}
+			}, ms);
+			this.wallReserveTimer.unref?.();
+		}
+	}
+
+	static async create(cfg: SwarmOsConfig): Promise<SwarmOS> {
+		const runId = cfg.runId ?? newId("run");
+		const redactor = new Redactor();
+		const bus = new EventBus(cfg.store, redactor);
+		const mcp = await McpBusServer.start(bus);
+		return new SwarmOS(cfg, runId, bus, mcp);
+	}
+
+	run(): Run {
+		return structuredClone(this.currentRun);
+	}
+
+	isInCloseoutReserve(): boolean {
+		if (this.currentRun.status === "closing") return true;
+		const { budget, spent } = this.currentRun;
+		if (budget.tokens && budget.tokens > 0) {
+			const remaining = 1 - (spent.tokens ?? 0) / budget.tokens;
+			if (remaining <= this.reservePct) return true;
+		}
+		if (budget.usd && budget.usd > 0) {
+			const remaining = 1 - (spent.usd ?? 0) / budget.usd;
+			if (remaining <= this.reservePct) return true;
+		}
+		if (this.wallSeconds && this.wallSeconds > 0) {
+			const elapsedSec = (Date.now() - this.startedAt) / 1000;
+			const remaining = 1 - elapsedSec / this.wallSeconds;
+			if (remaining <= this.reservePct) return true;
+		}
+		return false;
+	}
+
+	createTask(input: {
+		title: string;
+		description: string;
+		role?: Role;
+		dependsOn?: string[];
+		priority?: number;
+		createdBy: string;
+	}): TaskRecord {
+		const now = Date.now();
+		const task: TaskRecord = {
+			id: newId("tsk"),
+			runId: this.runId,
+			title: input.title,
+			description: input.description,
+			role: input.role ?? "worker",
+			status: "open",
+			dependsOn: input.dependsOn ?? [],
+			fencingToken: 0,
+			priority: input.priority ?? 0,
+			createdBy: input.createdBy,
+			createdAt: now,
+			updatedAt: now,
+		};
+		this.bus.save("tasks", task, input.createdBy);
+		this.bus.emit(this.runId, "task.created", { taskId: task.id, title: task.title, dependsOn: task.dependsOn }, input.createdBy);
+		if (!task.dependsOn.length) {
+			this.bus.emit(this.runId, "task.ready", { taskId: task.id, title: task.title }, input.createdBy);
+		}
+		return task;
+	}
+
+	readyTasks(): TaskRecord[] {
+		const tasks = this.store.list("tasks", { runId: this.runId });
+		const doneIds = new Set(tasks.filter((t) => t.status === "done").map((t) => t.id));
+		const now = Date.now();
+		return tasks
+			.filter((t) => {
+				const openOrExpired = t.status === "open" || (t.status === "claimed" && (t.leaseExpiresAt ?? 0) <= now);
+				return openOrExpired && t.dependsOn.every((dep) => doneIds.has(dep));
+			})
+			.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.createdAt - b.createdAt);
+	}
+
+	nominate(findingId: string, revision?: number, auto = false): void {
+		const finding = this.store.get("findings", findingId);
+		if (!finding || finding.runId !== this.runId) throw new Error(`Finding ${findingId} not found in run ${this.runId}`);
+		const rev = revision ?? finding.submissions.at(-1)?.revision ?? 1;
+		const sub = finding.submissions.find((s) => s.revision === rev);
+		this.currentRun = {
+			...this.currentRun,
+			nominatedFindingId: findingId,
+			nominatedRevision: rev,
+			updatedAt: Date.now(),
+		};
+		this.bus.save("runs", this.currentRun);
+		this.bus.emit(this.runId, "run.nominated", {
+			findingId,
+			revision: rev,
+			auto,
+			artifactSha256: sub?.artifactSha256,
+		});
+	}
+
+	defaultToolsFor(role: Role, opts: { canSpawn?: boolean; readOnly?: boolean; includeWorkspaceTools?: boolean } = {}): ToolDefinition[] {
+		const tools: ToolDefinition[] = [
+			...boardTools(this.board),
+			{
+				name: "read_artifact",
+				description: "Read a byte range from a stored artifact by ID or SHA-256.",
+				inputSchema: {
+					type: "object",
+					properties: {
+						artifact_id: { type: "string" },
+						offset: { type: "number" },
+						limit: { type: "number" },
+					},
+					required: ["artifact_id"],
+				},
+				execute: (args) => {
+					const page = this.artifacts.read(
+						String(args.artifact_id ?? ""),
+						typeof args.offset === "number" ? args.offset : 0,
+						typeof args.limit === "number" ? args.limit : 4096,
+					);
+					return {
+						text: `[${page.artifactId} bytes ${page.offset}-${page.nextOffset}/${page.totalBytes}${page.eof ? " EOF" : ""}]\n${page.content}`,
+					};
+				},
+			},
+			...schedulerTools(this.scheduler),
+		];
+
+		if (!opts.readOnly) {
+			tools.push(
+				{
+					name: "claim_task",
+					description: "Atomically lease the next ready task from the shared task queue.",
+					inputSchema: {
+						type: "object",
+						properties: { task_id: { type: "string", description: "Optional specific task ID" } },
+					},
+					execute: (args, ctx) => {
+						const ready = this.readyTasks();
+						const target = typeof args.task_id === "string"
+							? ready.find((t) => t.id === args.task_id)
+							: ready[0];
+						if (!target) return { text: "(no ready tasks available)" };
+						const claim = this.store.claimTaskLease(this.runId, target.id, ctx.agentId, DEFAULT_LEASE_MS);
+						if (!claim.claimed || !claim.task) return { text: claim.reason ?? "Could not claim task", isError: true };
+						this.bus.emit(
+							this.runId,
+							"task.claimed",
+							{ taskId: claim.task.id, agentId: ctx.agentId, fencingToken: claim.task.fencingToken, leaseExpiresAt: claim.task.leaseExpiresAt! },
+							ctx.agentId,
+						);
+						return {
+							text: `Claimed ${claim.task.id} (token=${claim.task.fencingToken}): ${claim.task.title}\n${claim.task.description}`,
+							data: { taskId: claim.task.id, fencingToken: claim.task.fencingToken },
+						};
+					},
+				},
+				{
+					name: "complete_task",
+					description: "Release a leased task as done or blocked with a concise summary.",
+					inputSchema: {
+						type: "object",
+						properties: {
+							task_id: { type: "string" },
+							fencing_token: { type: "number" },
+							status: { type: "string", enum: ["done", "blocked"] },
+							result: { type: "string" },
+							finding_id: { type: "string" },
+						},
+						required: ["task_id", "fencing_token", "status", "result"],
+					},
+					execute: (args, ctx) => {
+						const taskId = String(args.task_id ?? "");
+						const token = Number(args.fencing_token);
+						const status = args.status === "blocked" ? "blocked" : "done";
+						const result = String(args.result ?? "");
+						const ok = this.store.releaseTaskLease(taskId, ctx.agentId, token, status, {
+							result,
+							findingId: typeof args.finding_id === "string" ? args.finding_id : undefined,
+						});
+						if (!ok) return { text: `Stale or invalid lease for task ${taskId} (token=${token})`, isError: true };
+						this.bus.emit(this.runId, "task.status", { taskId, status, result }, ctx.agentId);
+						return { text: `Marked ${taskId} ${status}.` };
+					},
+				},
+				{
+					name: "report_finding",
+					description: "Freeze a SHA-256 snapshot of your workspace and submit a verified finding.",
+					inputSchema: {
+						type: "object",
+						properties: {
+							finding_id: { type: "string", description: "Existing finding ID to revise" },
+							claim: { type: "string" },
+							summary: { type: "string" },
+							evidence: { type: "array", items: { type: "string" } },
+							level: { type: "string", enum: ["formal_proof", "exact_check", "empirical", "conditional", "hypothesis", "external_acceptance"] },
+							scope: { type: "string" },
+							score: { type: "number" },
+						},
+						required: ["claim", "summary"],
+					},
+					execute: async (args, ctx) => {
+						if (!ctx.workspace) return { text: "No workspace to snapshot", isError: true };
+						const agent = this.store.get("agents", ctx.agentId);
+						const finding = await this.trust.submitFinding(
+							{
+								agentId: ctx.agentId,
+								driverId: agent?.driverId,
+								taskId: agent?.taskId,
+								workspace: ctx.workspace,
+								findingId: typeof args.finding_id === "string" ? args.finding_id : undefined,
+								claim: String(args.claim ?? ""),
+								summary: String(args.summary ?? ""),
+								evidence: Array.isArray(args.evidence) ? args.evidence.filter((e): e is string => typeof e === "string") : [],
+								level: (typeof args.level === "string" ? args.level : "empirical") as any,
+								scope: typeof args.scope === "string" ? args.scope : undefined,
+								score: typeof args.score === "number" ? args.score : undefined,
+							},
+							ctx.signal,
+						);
+						const lastRound = finding.rounds.at(-1);
+						const sub = finding.submissions.at(-1);
+						return {
+							text: `Finding ${finding.id} rev ${sub?.revision ?? 1}: status=${finding.status} (sha=${sub?.artifactSha256?.slice(0, 12) ?? "none"})\n${lastRound?.message ?? ""}`,
+							isError: finding.status === "rejected" || finding.status === "needs_work",
+							data: { findingId: finding.id, status: finding.status, revision: sub?.revision },
+						};
+					},
+				},
+				{
+					name: "nominate",
+					description: "Nominate an accepted finding ID as the final run deliverable.",
+					inputSchema: {
+						type: "object",
+						properties: {
+							finding_id: { type: "string" },
+							revision: { type: "number" },
+						},
+						required: ["finding_id"],
+					},
+					execute: (args) => {
+						this.nominate(String(args.finding_id ?? ""), typeof args.revision === "number" ? args.revision : undefined, false);
+						return { text: `Nominated ${String(args.finding_id)} as final deliverable.` };
+					},
+				},
+			);
+		}
+
+		// Async non-blocking spawn is ONLY exposed when explicitly opted in by the topology plugin.
+		if (opts.canSpawn) {
+			tools.push({
+				name: "spawn_task",
+				description: "Queue an asynchronous sub-task for a leaf worker (returns task ID immediately).",
+				inputSchema: {
+					type: "object",
+					properties: {
+						title: { type: "string" },
+						description: { type: "string" },
+						depends_on: { type: "array", items: { type: "string" } },
+					},
+					required: ["title", "description"],
+				},
+				execute: (args, ctx) => {
+					const task = this.createTask({
+						title: String(args.title ?? "subtask"),
+						description: String(args.description ?? ""),
+						dependsOn: Array.isArray(args.depends_on) ? args.depends_on.filter((d): d is string => typeof d === "string") : [],
+						createdBy: ctx.agentId,
+					});
+					return { text: `Queued task ${task.id}: ${task.title}`, data: { taskId: task.id } };
+				},
+			});
+		}
+
+		if (opts.includeWorkspaceTools) {
+			tools.push(
+				...workspaceTools({
+					bus: this.bus,
+					secrets: this.secrets,
+					readOnly: opts.readOnly,
+					networkOff: this.networkOffWorkers,
+				}),
+			);
+		}
+
+		void role;
+		return tools;
+	}
+
+	async spawnWorker(req: SpawnWorkerRequest): Promise<WorkerHandle> {
+		const agentId = newId("agt");
+		let selection = await this.router.acquireForRole(req.role, {
+			preferredDriverId: req.preferredDriverId,
+			avoidDrivers: req.avoidDrivers,
+			signal: this.runAbort.signal,
+		});
+
+		const worktreeHandle = req.workspace
+			? undefined
+			: this.worktrees.create(agentId, req.baseRef);
+		const workspace = req.workspace ?? worktreeHandle!.path;
+		const branch = worktreeHandle?.branch;
+
+		const buildTools = (driverKind: string) =>
+			req.tools ??
+			this.defaultToolsFor(req.role, {
+				canSpawn: req.canSpawn === true,
+				readOnly: req.readOnly === true,
+				includeWorkspaceTools: driverKind === "pi-in-process",
+			});
+
+		let tools = buildTools(selection.driver.kind);
+		let mcpReg = this.mcp.registerWorker({
+			runId: this.runId,
+			agentId,
+			role: req.role,
+			workspace,
+			tools,
+		});
+
+		const now = Date.now();
+		let agent: AgentRecord = {
+			id: agentId,
+			runId: this.runId,
+			handle: shortHandle(agentId),
+			role: req.role,
+			driverId: selection.driver.id,
+			model: req.model,
+			parentAgentId: req.parentAgentId,
+			taskId: req.taskId,
+			workspace,
+			branch,
+			status: "running",
+			turns: 0,
+			spent: {},
+			createdAt: now,
+			updatedAt: now,
+		};
+		this.bus.save("agents", agent, agentId);
+		this.bus.emit(
+			this.runId,
+			"agent.spawned",
+			{
+				agentId,
+				role: req.role,
+				driverId: selection.driver.id,
+				model: req.model,
+				taskId: req.taskId,
+				workspace,
+				waitedMs: selection.waitedMs || undefined,
+			},
+			agentId,
+		);
+		this.bus.emit(this.runId, "agent.status", { status: "running" }, agentId);
+
+		const transcriptDir = join(this.runDir, "transcripts");
+		mkdirSync(transcriptDir, { recursive: true });
+		const transcriptRel = `transcripts/${agentId}.jsonl`;
+		const transcriptAbs = join(this.runDir, transcriptRel);
+
+		let lastToolSig = "";
+		let turnToolLog: Array<{
+			ts: number;
+			kind: "call" | "result" | "error";
+			tool?: string;
+			isMcp?: boolean;
+			isError?: boolean;
+			argsPreview?: string;
+			outputPreview?: string;
+			durationMs?: number;
+			message?: string;
+		}> = [];
+
+		const handleActivity = (ev: WorkerActivityEvent): void => {
+			if (ev.type === "session") {
+				const latest = this.store.get("agents", agentId) ?? agent;
+				agent = {
+					...latest,
+					sessionId: ev.sessionId,
+					model: ev.model ?? latest.model,
+					updatedAt: Date.now(),
+				};
+				this.bus.save("agents", agent, agentId);
+			} else if (ev.type === "tool_call") {
+				const cleanArgs = ev.argsPreview ? this.bus.redactor.redactText(ev.argsPreview).slice(0, 240) : undefined;
+				lastToolSig = `${ev.name}:${cleanArgs ?? ""}`.slice(0, 120);
+				turnToolLog.push({ ts: Date.now(), kind: "call", tool: ev.name, isMcp: ev.isMcp, argsPreview: cleanArgs });
+				this.bus.emit(
+					this.runId,
+					"driver.tool_call",
+					{ tool: ev.name, argsPreview: cleanArgs, isMcp: Boolean(ev.isMcp), driverId: selection.driver.id },
+					agentId,
+				);
+			} else if (ev.type === "tool_result") {
+				const cleanOut = ev.outputPreview ? this.bus.redactor.redactText(ev.outputPreview).slice(0, 500) : undefined;
+				turnToolLog.push({
+					ts: Date.now(),
+					kind: "result",
+					tool: ev.name,
+					isMcp: ev.isMcp,
+					isError: Boolean(ev.isError),
+					outputPreview: cleanOut,
+					durationMs: ev.durationMs,
+				});
+				this.bus.emit(
+					this.runId,
+					"driver.tool_result",
+					{
+						tool: ev.name,
+						isError: Boolean(ev.isError),
+						outputPreview: cleanOut,
+						durationMs: ev.durationMs,
+						isMcp: Boolean(ev.isMcp),
+						driverId: selection.driver.id,
+					},
+					agentId,
+				);
+			} else if (ev.type === "error") {
+				const cleanErr = this.bus.redactor.redactText(ev.message).slice(0, 500);
+				turnToolLog.push({ ts: Date.now(), kind: "error", message: cleanErr });
+				this.bus.emit(this.runId, "driver.error", { message: cleanErr, driverId: selection.driver.id }, agentId);
+			}
+		};
+
+		let session: WorkerSession;
+		try {
+			session = await selection.driver.spawn({
+				runId: this.runId,
+				agentId,
+				role: req.role,
+				workspace,
+				systemPrompt: req.systemPrompt,
+				model: req.model,
+				maxTurns: req.maxTurns,
+				readOnly: req.readOnly,
+				mcp: mcpReg.connection,
+				tools,
+				onActivity: handleActivity,
+			});
+		} catch (error) {
+			mcpReg.unregister();
+			selection.release();
+			this.updateAgentStatus(agentId, "failed", error instanceof Error ? error.message : String(error));
+			throw error;
+		}
+
+		const abort = new AbortController();
+		let closed = false;
+		let lastTurnStatus: WorkerTurnResult["status"] | undefined;
+		let lastTurnError: string | undefined;
+		const attemptedDrivers = new Set<string>([selection.driver.id]);
+		let pendingPermitWaitMs = selection.waitedMs ?? 0;
+
+		const store = this.store;
+		const handle: WorkerHandle = {
+			get agent() {
+				return store.get("agents", agentId) ?? agent;
+			},
+			workspace,
+			branch,
+			get session() {
+				return session;
+			},
+			get selection() {
+				return selection;
+			},
+			runTurn: async (prompt: string, opts: { signal?: AbortSignal; outputSchema?: JsonSchema; timeoutMs?: number } = {}): Promise<WorkerTurnResult> => {
+				let currentPrompt = prompt;
+				let rpmRetries = 0;
+
+				for (;;) {
+					const combinedSignal = opts.signal
+						? AbortSignal.any([this.runAbort.signal, abort.signal, opts.signal])
+						: AbortSignal.any([this.runAbort.signal, abort.signal]);
+
+					lastToolSig = "";
+					turnToolLog = [];
+					const turnWaitedMs = pendingPermitWaitMs;
+					pendingPermitWaitMs = 0;
+
+					const res = await session.runTurn(currentPrompt, { ...opts, signal: combinedSignal });
+					const latest = this.store.get("agents", agentId) ?? agent;
+					agent = {
+						...latest,
+						turns: latest.turns + 1,
+						sessionId: res.sessionId ?? latest.sessionId,
+						model: res.model ?? latest.model,
+						updatedAt: Date.now(),
+					};
+					this.bus.save("agents", agent, agentId);
+
+					let turnTokens: number | undefined;
+					if (res.usage) {
+						const computed = res.usage.totalTokens ?? ((res.usage.inputTokens ?? 0) + (res.usage.outputTokens ?? 0));
+						turnTokens = computed || undefined;
+						this.chargeBudget(agentId, selection.driver.id, turnTokens, res.usage.usd, undefined, res.usage, agent.model);
+					}
+					const diffSha = this.worktrees.diffSha(workspace);
+					const cleanError = res.error ? this.bus.redactor.redactText(res.error) : undefined;
+					const transcriptEntry = {
+						ts: Date.now(),
+						turn: agent.turns,
+						driverId: selection.driver.id,
+						model: agent.model,
+						sessionId: agent.sessionId,
+						status: res.status,
+						durationMs: res.usage?.durationMs,
+						waitedMs: turnWaitedMs || undefined,
+						diffSha,
+						usage: res.usage,
+						prompt: this.bus.redactor.redactText(currentPrompt),
+						finalText: this.bus.redactor.redactText(res.finalText ?? ""),
+						error: cleanError,
+						quotaError: res.quotaError ? { ...res.quotaError, raw: this.bus.redactor.redactText(res.quotaError.raw) } : undefined,
+						tools: turnToolLog,
+					};
+					try {
+						appendFileSync(transcriptAbs, `${JSON.stringify(transcriptEntry)}\n`, "utf8");
+					} catch {
+						// Best-effort durable transcript write; never crash worker turn.
+					}
+
+					this.bus.emit(
+						this.runId,
+						"agent.turn",
+						{
+							turn: agent.turns,
+							driverId: selection.driver.id,
+							model: agent.model,
+							status: res.status,
+							toolSig: lastToolSig || undefined,
+							diffSha,
+							durationMs: res.usage?.durationMs,
+							waitedMs: turnWaitedMs || undefined,
+							inputTokens: res.usage?.inputTokens,
+							outputTokens: res.usage?.outputTokens,
+							cachedTokens: res.usage?.cachedTokens,
+							cacheWriteTokens: res.usage?.cacheWriteTokens,
+							reasoningTokens: res.usage?.reasoningTokens,
+							totalTokens: turnTokens,
+							usd: res.usage?.usd,
+							error: cleanError?.slice(0, 600),
+							quotaErrorKind: res.quotaError?.kind,
+							promptBytes: Buffer.byteLength(currentPrompt),
+							finalTextBytes: Buffer.byteLength(res.finalText ?? ""),
+							transcriptFile: transcriptRel,
+						},
+						agentId,
+					);
+
+					if (res.status !== "rate_limited" || !res.quotaError) {
+						lastTurnStatus = res.status;
+						lastTurnError = res.error;
+						if (res.status === "completed") this.router.reportSuccess(selection.driver.id);
+						return res;
+					}
+
+					// Class 1: Transient RPM / 429 / 529 -> jittered backoff on same worker
+					if (res.quotaError.kind === "transient_rpm" && rpmRetries < 3) {
+						rpmRetries += 1;
+						const waitMs = res.quotaError.retryAfterMs ?? Math.min(30_000, 1_500 * 2 ** (rpmRetries - 1) + Math.floor(Math.random() * 500));
+						this.bus.emit(
+							this.runId,
+							"quota.retry",
+							{
+								driverId: selection.driver.id,
+								attempt: rpmRetries,
+								waitMs,
+								reason: this.bus.redactor.redactText(res.error ?? res.quotaError.raw).slice(0, 240),
+							},
+							agentId,
+						);
+						await delay(waitMs, undefined, { signal: combinedSignal });
+						continue;
+					}
+
+					// Class 2 (window exhausted) or Class 3 (hard auth/weekly cap): mark driver + failover worktree!
+					const failedDriver = selection.driver.id;
+					this.router.reportQuotaError(failedDriver, res.quotaError);
+
+					// Attempt seamless cross-provider failover onto another healthy driver in the role's pool.
+					let nextSelection;
+					try {
+						nextSelection = await this.router.acquireForRole(req.role, {
+							avoidDrivers: [...attemptedDrivers, ...(req.avoidDrivers ?? [])],
+							signal: combinedSignal,
+						});
+					} catch {
+						lastTurnStatus = res.status;
+						lastTurnError = res.error;
+						return res; // No alternate healthy driver left.
+					}
+
+					// If router only had the same driver available, stop instead of looping.
+					if (attemptedDrivers.has(nextSelection.driver.id)) {
+						nextSelection.release();
+						lastTurnStatus = res.status;
+						lastTurnError = res.error;
+						return res;
+					}
+
+					const handoff = synthesizeHandoffFile({
+						runId: this.runId,
+						agentId,
+						fromDriver: failedDriver,
+						reason: res.error ?? res.quotaError.raw,
+						originalPrompt: prompt,
+						workspace,
+						worktrees: this.worktrees,
+						store: this.store,
+					});
+
+					await session.close().catch(() => {});
+					selection.release();
+					mcpReg.unregister();
+
+					selection = nextSelection;
+					pendingPermitWaitMs += nextSelection.waitedMs ?? 0;
+					attemptedDrivers.add(selection.driver.id);
+					tools = buildTools(selection.driver.kind);
+					mcpReg = this.mcp.registerWorker({ runId: this.runId, agentId, role: req.role, workspace, tools });
+
+					const latestHandoff = this.store.get("agents", agentId) ?? agent;
+					agent = { ...latestHandoff, driverId: selection.driver.id, sessionId: undefined, model: undefined, updatedAt: Date.now() };
+					this.bus.save("agents", agent, agentId);
+					this.bus.emit(
+						this.runId,
+						"agent.handoff",
+						{
+							agentId,
+							fromDriver: failedDriver,
+							toDriver: selection.driver.id,
+							workspace,
+							handoffPath: handoff.handoffPath,
+							waitedMs: nextSelection.waitedMs || undefined,
+						},
+						agentId,
+					);
+
+					session = await selection.driver.spawn({
+						runId: this.runId,
+						agentId,
+						role: req.role,
+						workspace,
+						systemPrompt: req.systemPrompt,
+						maxTurns: req.maxTurns,
+						readOnly: req.readOnly,
+						mcp: mcpReg.connection,
+						tools,
+						onActivity: handleActivity,
+					});
+					currentPrompt = handoff.prompt;
+					rpmRetries = 0;
+				}
+			},
+			steer: (msg) => session.steer?.(msg) ?? Promise.resolve(),
+			interrupt: () => session.interrupt?.() ?? Promise.resolve(),
+			close: async () => {
+				if (closed) return;
+				closed = true;
+				this.activeHandles.delete(agentId);
+				const latestClose = this.store.get("agents", agentId) ?? agent;
+				if (latestClose.status === "running") {
+					const finalStatus =
+						lastTurnStatus === "failed" || lastTurnStatus === "rate_limited"
+							? "failed"
+							: lastTurnStatus === "interrupted"
+								? "stopped"
+								: "done";
+					this.updateAgentStatus(agentId, finalStatus, lastTurnError);
+				}
+				await session.close().catch(() => {});
+				mcpReg.unregister();
+				selection.release();
+			},
+		};
+
+		this.activeHandles.set(agentId, { handle, abort, workspace });
+		return handle;
+	}
+
+	async execute(plugin: TopologyPlugin, signal?: AbortSignal): Promise<TopologyOutcome & { reportPath: string }> {
+		const onExternalAbort = () => this.runAbort.abort(signal?.reason);
+		signal?.addEventListener("abort", onExternalAbort, { once: true });
+		this.bus.emit(this.runId, "run.started", { topology: plugin.name, goal: this.currentRun.goal.title });
+
+		let outcome: TopologyOutcome;
+		try {
+			outcome = await plugin.run(this, {
+				goal: this.currentRun.goal.text,
+				rubric: this.currentRun.goal.rubric,
+				signal: this.runAbort.signal,
+			});
+		} catch (error) {
+			outcome = {
+				status: this.runAbort.signal.aborted ? "stopped" : "failed",
+				summary: error instanceof Error ? error.message : String(error),
+			};
+		} finally {
+			signal?.removeEventListener("abort", onExternalAbort);
+		}
+
+		// Close any lingering workers cleanly before final verification & closeout.
+		await Promise.allSettled([...this.activeHandles.values()].map(({ handle }) => handle.close()));
+
+		this.currentRun = {
+			...this.currentRun,
+			status: outcome.status,
+			statusReason: outcome.summary,
+			updatedAt: Date.now(),
+		};
+		const closedOut = await this.closeout.finalize(this.currentRun, outcome.summary);
+		this.currentRun = {
+			...this.currentRun,
+			nominatedFindingId: closedOut.nominatedFindingId,
+			nominatedRevision: closedOut.nominatedRevision,
+			updatedAt: Date.now(),
+		};
+		this.bus.save("runs", this.currentRun);
+		this.bus.emit(this.runId, "run.finished", { status: outcome.status, reason: outcome.summary });
+
+		return {
+			...outcome,
+			nominatedFindingId: closedOut.nominatedFindingId,
+			nominatedRevision: closedOut.nominatedRevision,
+			reportPath: closedOut.reportPath,
+		};
+	}
+
+	async dispose(): Promise<void> {
+		if (this.wallReserveTimer) clearTimeout(this.wallReserveTimer);
+		this.triggers.stop();
+		this.runAbort.abort();
+		await Promise.allSettled([...this.activeHandles.values()].map(({ handle }) => handle.close()));
+		await this.scheduler.dispose();
+		await this.mcp.close();
+	}
+
+	private updateAgentStatus(agentId: string, status: AgentRecord["status"], reason?: string): void {
+		const existing = this.store.get("agents", agentId);
+		if (!existing) return;
+		this.bus.save("agents", { ...existing, status, statusReason: reason, updatedAt: Date.now() }, agentId);
+		this.bus.emit(this.runId, "agent.status", { status, reason }, agentId);
+	}
+
+	private chargeBudget(
+		agentId: string | undefined,
+		driverId: string | undefined,
+		tokens?: number,
+		usd?: number,
+		units?: Record<string, number>,
+		usage?: UsageRecord,
+		model?: string,
+	): void {
+		const spent = { ...this.currentRun.spent };
+		if (tokens) spent.tokens = (spent.tokens ?? 0) + tokens;
+		if (usd) spent.usd = (spent.usd ?? 0) + usd;
+		if (units) {
+			for (const [k, v] of Object.entries(units)) spent[k] = (spent[k] ?? 0) + v;
+		}
+		this.currentRun = { ...this.currentRun, spent, updatedAt: Date.now() };
+		this.bus.save("runs", this.currentRun);
+		if (agentId) {
+			const ag = this.store.get("agents", agentId);
+			if (ag) {
+				const aSpent = { ...ag.spent };
+				if (tokens) aSpent.tokens = (aSpent.tokens ?? 0) + tokens;
+				if (usd) aSpent.usd = (aSpent.usd ?? 0) + usd;
+				this.store.put("agents", { ...ag, spent: aSpent, updatedAt: Date.now() });
+			}
+		}
+		this.bus.emit(
+			this.runId,
+			"budget.charged",
+			{
+				agentId,
+				driverId,
+				model,
+				tokens,
+				inputTokens: usage?.inputTokens,
+				outputTokens: usage?.outputTokens,
+				cachedTokens: usage?.cachedTokens,
+				cacheWriteTokens: usage?.cacheWriteTokens,
+				reasoningTokens: usage?.reasoningTokens,
+				usd,
+				units,
+			},
+			agentId,
+		);
+	}
+}

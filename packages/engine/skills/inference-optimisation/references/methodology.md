@@ -1,0 +1,8 @@
+# Measure and compare candidates
+
+- Use server token-usage counters or retokenize with the model's tokenizer. One streamed event can contain multiple tokens. Measure decode after first token, and report prompt tokens over TTFT as an end-to-end prefill proxy. Use fixed, tokenizer-verified lengths. Report cold and cached results separately.
+- For concurrency, divide all completion tokens by the shared wall interval and verify that the intended requests overlapped. Record per-request latency if responsiveness matters.
+- Interleave control, candidate, control on the same hardware. Keep seeded prompts, output budgets, sampling, thinking mode, and warm-up consistent. The upstream recipe starts with at least six decode samples and their median. Use more samples if noise could change a decision. Report dispersion and a confidence interval for the paired effect when the sample supports it.
+- For speculation, report emitted tokens per verify step and milliseconds per step. Test complete requests across easy and hard prompts, including both short and deployment-length contexts. Investigate greedy divergence at the first different token when checking a lossless claim.
+- Run a long-context retrieval test with exact answers at several depths. Investigate degenerate outputs, unexpected cache hits, memory pressure, or a decode window contaminated by prefill before counting a result.
+- On unified memory, allocator statistics or process RSS alone can miss device residency. Use platform-appropriate runtime and host measurements, record the peak and available headroom, and use the authorized scheduler lifecycle for cancellation or recovery.

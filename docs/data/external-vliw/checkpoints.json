@@ -1,0 +1,482 @@
+[
+  {
+    "trial": "round-3-deployed",
+    "team_token_prefixes": {
+      "80000": {
+        "id": "r2-6",
+        "cycles": 1594,
+        "trials": 0,
+        "existing_full_replay": true
+      },
+      "120000": {
+        "id": "r2-6",
+        "cycles": 1594,
+        "trials": 0,
+        "existing_full_replay": true
+      },
+      "160000": {
+        "id": "r3-2",
+        "cycles": 1570,
+        "trials": 2,
+        "existing_full_replay": true
+      },
+      "173653": {
+        "id": "r3-3",
+        "cycles": 1550,
+        "trials": 4,
+        "existing_full_replay": true
+      }
+    },
+    "deadline": {
+      "id": "r3-7",
+      "cycles": 1540,
+      "trials": 8,
+      "existing_full_replay": true
+    },
+    "actual_nominations": [],
+    "seat_tokens": [
+      124041,
+      118107
+    ],
+    "seat_attempts": [
+      4,
+      4
+    ],
+    "each_seat_80000_tokens": {
+      "id": "r3-1",
+      "cycles": 1587,
+      "trials": 1,
+      "existing_full_replay": false
+    },
+    "first_eight_checks": {
+      "id": "r3-7",
+      "cycles": 1540,
+      "trials": 8,
+      "existing_full_replay": true
+    },
+    "first_four_checks_by_173653_tokens": {
+      "id": "r3-3",
+      "cycles": 1550,
+      "trials": 4,
+      "existing_full_replay": true
+    },
+    "delivered_dms": 4,
+    "candidate_id_offers": 1,
+    "recipient_read_after_offer": 0,
+    "partner_generated_body_requests": 0,
+    "trial_receipts": [
+      {
+        "id": "r3-1",
+        "seat": 1,
+        "cycles": 1587,
+        "receipt_seq": 247,
+        "team_tokens": 134045,
+        "seat_tokens": 63413
+      },
+      {
+        "id": "r3-2",
+        "seat": 0,
+        "cycles": 1570,
+        "receipt_seq": 271,
+        "team_tokens": 152623,
+        "seat_tokens": 80235
+      },
+      {
+        "id": "r3-3",
+        "seat": 0,
+        "cycles": 1550,
+        "receipt_seq": 286,
+        "team_tokens": 163060,
+        "seat_tokens": 90672
+      },
+      {
+        "id": "r3-4",
+        "seat": 1,
+        "cycles": null,
+        "receipt_seq": 314,
+        "team_tokens": 173457,
+        "seat_tokens": 82785
+      },
+      {
+        "id": "r3-5",
+        "seat": 0,
+        "cycles": 1634,
+        "receipt_seq": 357,
+        "team_tokens": 195189,
+        "seat_tokens": 112404
+      },
+      {
+        "id": "r3-6",
+        "seat": 1,
+        "cycles": 1572,
+        "receipt_seq": 372,
+        "team_tokens": 206603,
+        "seat_tokens": 94199
+      },
+      {
+        "id": "r3-7",
+        "seat": 0,
+        "cycles": 1540,
+        "receipt_seq": 387,
+        "team_tokens": 218240,
+        "seat_tokens": 124041
+      },
+      {
+        "id": "r3-8",
+        "seat": 1,
+        "cycles": 1567,
+        "receipt_seq": 402,
+        "team_tokens": 230085,
+        "seat_tokens": 106044
+      }
+    ]
+  },
+  {
+    "trial": "round-3-delivery",
+    "team_token_prefixes": {
+      "80000": {
+        "id": "r2-6",
+        "cycles": 1594,
+        "trials": 0,
+        "existing_full_replay": true
+      },
+      "120000": {
+        "id": "r3-1",
+        "cycles": 1555,
+        "trials": 5,
+        "existing_full_replay": true
+      },
+      "160000": {
+        "id": "r3-25",
+        "cycles": 1533,
+        "trials": 30,
+        "existing_full_replay": true
+      },
+      "173653": {
+        "id": "r3-25",
+        "cycles": 1533,
+        "trials": 35,
+        "existing_full_replay": true
+      }
+    },
+    "deadline": {
+      "id": "r3-25",
+      "cycles": 1533,
+      "trials": 35,
+      "existing_full_replay": true
+    },
+    "actual_nominations": [],
+    "seat_tokens": [
+      29733,
+      143920
+    ],
+    "seat_attempts": [
+      0,
+      35
+    ],
+    "each_seat_80000_tokens": {
+      "id": "r3-1",
+      "cycles": 1555,
+      "trials": 4,
+      "existing_full_replay": true
+    },
+    "first_eight_checks": {
+      "id": "r3-1",
+      "cycles": 1555,
+      "trials": 8,
+      "existing_full_replay": true
+    },
+    "first_four_checks_by_173653_tokens": {
+      "id": "r3-1",
+      "cycles": 1555,
+      "trials": 4,
+      "existing_full_replay": true
+    },
+    "delivered_dms": 2,
+    "candidate_id_offers": 1,
+    "recipient_read_after_offer": 0,
+    "partner_generated_body_requests": 0,
+    "trial_receipts": [
+      {
+        "id": "r3-1",
+        "seat": 1,
+        "cycles": 1555,
+        "receipt_seq": 172,
+        "team_tokens": 92230,
+        "seat_tokens": 62497
+      },
+      {
+        "id": "r3-2",
+        "seat": 1,
+        "cycles": 1630,
+        "receipt_seq": 187,
+        "team_tokens": 100989,
+        "seat_tokens": 71256
+      },
+      {
+        "id": "r3-3",
+        "seat": 1,
+        "cycles": 1593,
+        "receipt_seq": 191,
+        "team_tokens": 100989,
+        "seat_tokens": 71256
+      },
+      {
+        "id": "r3-4",
+        "seat": 1,
+        "cycles": 1592,
+        "receipt_seq": 195,
+        "team_tokens": 100989,
+        "seat_tokens": 71256
+      },
+      {
+        "id": "r3-5",
+        "seat": 1,
+        "cycles": 1555,
+        "receipt_seq": 234,
+        "team_tokens": 110592,
+        "seat_tokens": 80859
+      },
+      {
+        "id": "r3-6",
+        "seat": 1,
+        "cycles": 1555,
+        "receipt_seq": 249,
+        "team_tokens": 120516,
+        "seat_tokens": 90783
+      },
+      {
+        "id": "r3-7",
+        "seat": 1,
+        "cycles": 1555,
+        "receipt_seq": 253,
+        "team_tokens": 120516,
+        "seat_tokens": 90783
+      },
+      {
+        "id": "r3-8",
+        "seat": 1,
+        "cycles": 1555,
+        "receipt_seq": 257,
+        "team_tokens": 120516,
+        "seat_tokens": 90783
+      },
+      {
+        "id": "r3-9",
+        "seat": 1,
+        "cycles": 1555,
+        "receipt_seq": 261,
+        "team_tokens": 120516,
+        "seat_tokens": 90783
+      },
+      {
+        "id": "r3-10",
+        "seat": 1,
+        "cycles": 1560,
+        "receipt_seq": 265,
+        "team_tokens": 120516,
+        "seat_tokens": 90783
+      },
+      {
+        "id": "r3-11",
+        "seat": 1,
+        "cycles": 1560,
+        "receipt_seq": 269,
+        "team_tokens": 120516,
+        "seat_tokens": 90783
+      },
+      {
+        "id": "r3-12",
+        "seat": 1,
+        "cycles": 1562,
+        "receipt_seq": 273,
+        "team_tokens": 120516,
+        "seat_tokens": 90783
+      },
+      {
+        "id": "r3-13",
+        "seat": 1,
+        "cycles": 1549,
+        "receipt_seq": 277,
+        "team_tokens": 120516,
+        "seat_tokens": 90783
+      },
+      {
+        "id": "r3-14",
+        "seat": 1,
+        "cycles": 1550,
+        "receipt_seq": 281,
+        "team_tokens": 120516,
+        "seat_tokens": 90783
+      },
+      {
+        "id": "r3-15",
+        "seat": 1,
+        "cycles": 1560,
+        "receipt_seq": 285,
+        "team_tokens": 120516,
+        "seat_tokens": 90783
+      },
+      {
+        "id": "r3-16",
+        "seat": 1,
+        "cycles": null,
+        "receipt_seq": 300,
+        "team_tokens": 131301,
+        "seat_tokens": 101568
+      },
+      {
+        "id": "r3-17",
+        "seat": 1,
+        "cycles": null,
+        "receipt_seq": 304,
+        "team_tokens": 131301,
+        "seat_tokens": 101568
+      },
+      {
+        "id": "r3-18",
+        "seat": 1,
+        "cycles": null,
+        "receipt_seq": 308,
+        "team_tokens": 131301,
+        "seat_tokens": 101568
+      },
+      {
+        "id": "r3-19",
+        "seat": 1,
+        "cycles": null,
+        "receipt_seq": 312,
+        "team_tokens": 131301,
+        "seat_tokens": 101568
+      },
+      {
+        "id": "r3-20",
+        "seat": 1,
+        "cycles": null,
+        "receipt_seq": 316,
+        "team_tokens": 131301,
+        "seat_tokens": 101568
+      },
+      {
+        "id": "r3-21",
+        "seat": 1,
+        "cycles": null,
+        "receipt_seq": 320,
+        "team_tokens": 131301,
+        "seat_tokens": 101568
+      },
+      {
+        "id": "r3-22",
+        "seat": 1,
+        "cycles": null,
+        "receipt_seq": 324,
+        "team_tokens": 131301,
+        "seat_tokens": 101568
+      },
+      {
+        "id": "r3-23",
+        "seat": 1,
+        "cycles": null,
+        "receipt_seq": 328,
+        "team_tokens": 131301,
+        "seat_tokens": 101568
+      },
+      {
+        "id": "r3-24",
+        "seat": 1,
+        "cycles": 1549,
+        "receipt_seq": 357,
+        "team_tokens": 144944,
+        "seat_tokens": 115211
+      },
+      {
+        "id": "r3-25",
+        "seat": 1,
+        "cycles": 1533,
+        "receipt_seq": 361,
+        "team_tokens": 144944,
+        "seat_tokens": 115211
+      },
+      {
+        "id": "r3-26",
+        "seat": 1,
+        "cycles": 1560,
+        "receipt_seq": 365,
+        "team_tokens": 144944,
+        "seat_tokens": 115211
+      },
+      {
+        "id": "r3-27",
+        "seat": 1,
+        "cycles": 1546,
+        "receipt_seq": 369,
+        "team_tokens": 144944,
+        "seat_tokens": 115211
+      },
+      {
+        "id": "r3-28",
+        "seat": 1,
+        "cycles": 1552,
+        "receipt_seq": 373,
+        "team_tokens": 144944,
+        "seat_tokens": 115211
+      },
+      {
+        "id": "r3-29",
+        "seat": 1,
+        "cycles": null,
+        "receipt_seq": 377,
+        "team_tokens": 144944,
+        "seat_tokens": 115211
+      },
+      {
+        "id": "r3-30",
+        "seat": 1,
+        "cycles": null,
+        "receipt_seq": 381,
+        "team_tokens": 144944,
+        "seat_tokens": 115211
+      },
+      {
+        "id": "r3-31",
+        "seat": 1,
+        "cycles": 1558,
+        "receipt_seq": 409,
+        "team_tokens": 173653,
+        "seat_tokens": 143920
+      },
+      {
+        "id": "r3-32",
+        "seat": 1,
+        "cycles": 1552,
+        "receipt_seq": 413,
+        "team_tokens": 173653,
+        "seat_tokens": 143920
+      },
+      {
+        "id": "r3-33",
+        "seat": 1,
+        "cycles": 1543,
+        "receipt_seq": 417,
+        "team_tokens": 173653,
+        "seat_tokens": 143920
+      },
+      {
+        "id": "r3-34",
+        "seat": 1,
+        "cycles": 1541,
+        "receipt_seq": 421,
+        "team_tokens": 173653,
+        "seat_tokens": 143920
+      },
+      {
+        "id": "r3-35",
+        "seat": 1,
+        "cycles": 1537,
+        "receipt_seq": 425,
+        "team_tokens": 173653,
+        "seat_tokens": 143920
+      }
+    ]
+  }
+]

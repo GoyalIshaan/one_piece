@@ -1,7 +1,16 @@
-"""Generate a fresh wide-audit instance. Usage: prepare.py <seed_dir> <hidden_dir> <rng_seed>"""
-import json, os, random, statistics, sys
+"""Generate a wide-audit instance from a seed and optional shard count."""
+import argparse, json, os, random, statistics
 
-seed_dir, hidden, rng_seed = sys.argv[1], sys.argv[2], int(sys.argv[3])
+parser = argparse.ArgumentParser()
+parser.add_argument("seed_dir")
+parser.add_argument("hidden")
+parser.add_argument("rng_seed", type=int)
+parser.add_argument("--shards", type=int, choices=range(1, 257), default=16, metavar="N")
+parser.add_argument("--fleet", choices=("off", "on"), default="off")
+args = parser.parse_args()
+if args.fleet == "on" and args.shards < 4:
+    parser.error("fleet comparisons need at least four sensors")
+seed_dir, hidden, rng_seed, shards = args.seed_dir, args.hidden, args.rng_seed, args.shards
 rng = random.Random(rng_seed)
 os.makedirs(os.path.join(seed_dir, "data"), exist_ok=True)
 os.makedirs(hidden, exist_ok=True)
@@ -15,7 +24,8 @@ KINDS = [
     ("none", ["No corrections are needed for this sensor.", "This file is clean; use the values as they are."]),
 ]
 truth = {}
-for i in range(16):
+fleet_series = {}
+for i in range(shards):
     name = f"sensor_{i:02d}.csv"
     kind, phrasings = KINDS[i % len(KINDS)] if i < 12 else rng.choice(KINDS)
     n = rng.randrange(420, 620)
@@ -42,14 +52,14 @@ for i in range(16):
     if kind == "dropout": vals = [(t, v) for t, v in vals if v != params["s"]]
     if kind == "warmup": vals = vals[params["w"]:]
     if kind == "fahrenheit": vals = [(t, (v - 32) * 5 / 9) for t, v in vals]
+    if args.fleet == "on":
+        fleet_series[name] = vals
     xs = [v for _, v in vals]
     mean, std = statistics.fmean(xs), statistics.pstdev(xs)
     truth[name] = {"mean": round(mean, 2), "max": round(max(xs), 2), "anomalies": sum(1 for v in xs if abs(v - mean) > 3 * std), "drift": (statistics.fmean(xs[-100:]) - statistics.fmean(xs[:100])) > 2.0}
 with open(os.path.join(hidden, "truth.json"), "w") as f: json.dump(truth, f, indent=1)
 with open(os.path.join(seed_dir, "TASK.md"), "w") as f:
-    f.write("""# Sensor audit
-
-`data/` holds 16 sensor logs. Each file starts with a `# note:` line describing a correction that must be
+    f.write(f"# Sensor audit\n\n`data/` holds {shards} sensor logs." + """ Each file starts with a `# note:` line describing a correction that must be
 applied to that file before any analysis. Apply each file's own correction, then report for every file:
 
 - `mean`: mean of the corrected values, rounded to 2 decimals
@@ -60,3 +70,7 @@ applied to that file before any analysis. Apply each file's own correction, then
 Write `answers.json` mapping each file name to an object with exactly these four keys, e.g.
 `{"sensor_00.csv": {"mean": 12.34, "max": 20.1, "anomalies": 3, "drift": false}, ...}`.
 """)
+
+if args.fleet == "on":
+    from fleet import write_fleet
+    write_fleet(seed_dir, hidden, rng_seed, fleet_series)

@@ -1,0 +1,55 @@
+{
+  "checker": "perf-algos",
+  "version": "2ab241580cce",
+  "scope": "integrated",
+  "cases": [
+    {
+      "arm": "baseline",
+      "revision": 1,
+      "artifact": "70adc0e6a3adb7a820053df5819e2865dac33c58a26d9d5bb343d20a7a6eab7f",
+      "grade": {
+        "status": "passed",
+        "message": "Matched the original on 1265 differential cases. Median of three runs per function: lis_length 474.46×, count_inversions 49.01×, top_k_frequent 164.27×. Geometric mean 156.32×."
+      }
+    },
+    {
+      "arm": "baseline",
+      "revision": 2,
+      "artifact": "644c134711a754bf3132aecf41e5c5a66b09692ce1590700e336c9bc995e1bb5",
+      "grade": {
+        "status": "passed",
+        "message": "Matched the original on 1265 differential cases. Median of three runs per function: lis_length 499.77×, count_inversions 45.63×, top_k_frequent 130.20×. Geometric mean 143.73×."
+      }
+    },
+    {
+      "arm": "hillclimb",
+      "revision": 1,
+      "artifact": "2822eb3a1c2015e22931828ddca1488332788603c0035d421b53f89a700025d9",
+      "grade": {
+        "status": "failed",
+        "counterexample": "{\"function\":\"lis_length\",\"fixture\":\"mapping\"}",
+        "message": "4/1265 differential cases failed. {\"function\":\"lis_length\",\"fixture\":\"mapping\"}: reference 1, candidate 2."
+      }
+    },
+    {
+      "arm": "hillclimb",
+      "revision": 2,
+      "artifact": "03a01859935fbefe8ac2c89a624dbd3727a863c11ed0b781fe8d60966e3d7930",
+      "grade": {
+        "status": "failed",
+        "counterexample": "{\"function\":\"lis_length\",\"fixture\":\"mapping\"}",
+        "message": "4/1265 differential cases failed. {\"function\":\"lis_length\",\"fixture\":\"mapping\"}: reference 1, candidate 2."
+      }
+    },
+    {
+      "arm": "hillclimb",
+      "revision": 3,
+      "artifact": "c796cd01365afb0b63ca02f858b29effaf7ed21b793680df665100e8c5c1aa6b",
+      "grade": {
+        "status": "failed",
+        "counterexample": "{\"function\":\"lis_length\",\"fixture\":\"metaclass\"}",
+        "message": "2/1265 differential cases failed. {\"function\":\"lis_length\",\"fixture\":\"metaclass\"}: reference 1, candidate {\"raises\":\"RuntimeError\"}."
+      }
+    }
+  ]
+}

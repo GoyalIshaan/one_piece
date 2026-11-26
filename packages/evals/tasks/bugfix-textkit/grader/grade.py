@@ -18,10 +18,13 @@ check("f2p_tokenize_punct", lambda: eq(tokenize("Hello, world! Don't stop.", low
 check("f2p_tokenize_whitespace", lambda: eq(tokenize("a\tb\nc  d"), ["a", "b", "c", "d"]))
 check("f2p_tokenize_keepcase", lambda: eq(tokenize("Hi THERE"), ["Hi", "THERE"]))
 check("f2p_tokenize_quotes", lambda: eq(tokenize("'quoted' (x2) rock'n'roll"), ["quoted", "x2", "rock'n'roll"]))
+check("f2p_tokenize_underscores", lambda: eq(tokenize("_Hello_ world_again __", lowercase=True), ["hello", "world", "again"]))
+check("f2p_tokenize_unicode", lambda: eq(tokenize("CAFÉ 東京 ９", lowercase=True), ["café", "東京", "９"]))
 # fail-to-pass: issue 2
 check("f2p_freq_ignorecase", lambda: eq(word_frequencies("The cat. the CAT!"), {"the": 2, "cat": 2}))
 check("f2p_freq_keepcase", lambda: eq(word_frequencies("The the", ignore_case=False), {"The": 1, "the": 1}))
 check("f2p_top_words", lambda: eq(top_words("b B a A a c", 2), [("a", 3), ("b", 2)]))
+check("f2p_freq_boundaries", lambda: eq(word_frequencies("_CAFÉ_ café 東京_東京"), {"café": 2, "東京": 2}))
 # fail-to-pass: issue 3
 def w1():
     for width in range(3, 20):

@@ -1,6 +1,6 @@
 {
 	"name": "@one-piece/cli",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"private": true,
 	"type": "module",
 	"license": "MIT",
@@ -8,17 +8,15 @@
 		".": "./src/index.ts"
 	},
 	"dependencies": {
-		"@one-piece/core": "0.1.0",
-		"@one-piece/store": "0.1.0",
+		"@one-piece/core": "0.2.0",
+		"@one-piece/store": "0.2.0",
 		"@one-piece/router": "0.1.0",
-		"@one-piece/engine": "0.1.0",
-		"@one-piece/dashboard": "0.1.0",
-		"@one-piece/scheduler": "0.1.0",
-		"@one-piece/module-board": "0.1.0",
-		"@one-piece/module-questions": "0.1.0",
-		"@one-piece/module-secrets": "0.1.0",
-		"@one-piece/module-workspace": "0.1.0",
-		"@one-piece/evals": "0.1.0"
+		"@one-piece/drivers": "0.2.0",
+		"@one-piece/mcp-bus": "0.2.0",
+		"@one-piece/engine": "0.2.0",
+		"@one-piece/dashboard": "0.2.0",
+		"@one-piece/scheduler": "0.2.0",
+		"@one-piece/module-secrets": "0.2.0"
 	},
 	"bin": {
 		"one-piece": "./bin/one-piece.mjs"

@@ -1,0 +1,25 @@
+{
+  "commit": "5452f74bd977807ac2e74f3d29432b9df6f25197",
+  "model": {
+    "provider": "openai",
+    "id": "gpt-6.2-sol"
+  },
+  "reasoning": "medium",
+  "deadline": 110000,
+  "capPerSeat": 80000,
+  "checksPerSeat": 2,
+  "cases": [
+    "1-communicating",
+    "1-isolated",
+    "2-isolated",
+    "2-communicating"
+  ],
+  "seed": 317,
+  "startingKernel": "2d42a22cfe22ce82f3762fb2d5341af5ce5ad90d8160b448e606d8093cc7dd6e",
+  "adapter": "c5fb254bdcd3eaf114af616bd93581c92779f7423717b2017ba2b814c2e0af17",
+  "policy": "c88e733d28633fb5581ffaae09d38df37d8d23504209a09e492dad84bbd02112",
+  "driver": "2bd14b984478fa604b76a37a68b4f623844ec4060a686d6de081f81c31bcfb78",
+  "selector": "Minimum development cycles among eligible valid candidate receipts and the 1594-cycle incumbent, incumbent first on ties, then attempt id. Independently replay selected and voluntary nominations against unchanged official suite and 32 seeds; report failed confirmation as failed.",
+  "limits": "Scratch and simulator unchanged. Both seats use own native one-peer environment and store. Only communicating seats can see partner's new bodies/receipts and deliver a DM. Two checks per seat including invalids. Only accepts development or nomination receipts inside 80k reported tokens per seat, up to 160k team, and 110 seconds. In-flight model accounting is separately reported.",
+  "order": "Sequential ABBA, with both seats concurrent inside each arm and the shared provider pacing directory. Two stochastic repeats of the same public workload."
+}

@@ -1,0 +1,72 @@
+{
+  "case": "3-communicating",
+  "shared": true,
+  "elapsed_ms": 235319,
+  "spend": [
+    {
+      "tokens": 81788,
+      "calls": 13,
+      "errors": 0,
+      "http429": 0,
+      "aborted": 0,
+      "peak": 11939,
+      "usd": 0.1249712,
+      "checks": 1,
+      "valid": 0,
+      "tokens_over_cap": 1788
+    },
+    {
+      "tokens": 77880,
+      "calls": 13,
+      "errors": 0,
+      "http429": 0,
+      "aborted": 0,
+      "peak": 8839,
+      "usd": 0.09619680000000001,
+      "checks": 0,
+      "valid": 0,
+      "tokens_over_cap": 0
+    }
+  ],
+  "messages": 6,
+  "cross_seat_reads": 0,
+  "nominations": [],
+  "selected": {
+    "id": "start",
+    "cycles": 1594,
+    "passed": true,
+    "official_correct": 8,
+    "speed_thresholds_passed": 4,
+    "extra_correct": 32,
+    "extra_indices_correct": 32,
+    "program_sha256": "d3746c2df8ced35a68b14079c61e30673e136e8d8460f00fd6181411a7925fe1",
+    "kernel_sha256": "2d42a22cfe22ce82f3762fb2d5341af5ce5ad90d8160b448e606d8093cc7dd6e",
+    "local_candidate": "round-2/r2-6"
+  },
+  "verified": {
+    "start": {
+      "id": "start",
+      "cycles": 1594,
+      "passed": true,
+      "official_correct": 8,
+      "speed_thresholds_passed": 4,
+      "extra_correct": 32,
+      "extra_indices_correct": 32,
+      "program_sha256": "d3746c2df8ced35a68b14079c61e30673e136e8d8460f00fd6181411a7925fe1",
+      "kernel_sha256": "2d42a22cfe22ce82f3762fb2d5341af5ce5ad90d8160b448e606d8093cc7dd6e",
+      "local_candidate": "round-2/r2-6"
+    }
+  },
+  "first_simulator_ms": null,
+  "attempts": [
+    {
+      "id": "s0-1",
+      "seat": 0,
+      "cycles": null,
+      "ms": 176870,
+      "receiptMs": 176987,
+      "tokens": 57595,
+      "sha256": "0af23e61a5eaa208f02daebb54105ad830d6bc155acb3c1f6509ab4aa22c8dc3"
+    }
+  ]
+}

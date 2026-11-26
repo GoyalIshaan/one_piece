@@ -5,8 +5,8 @@
 	"inspiredBy": "ALE-Bench (heuristic optimization with a continuous score)",
 	"suites": ["full"],
 	"prepare": true,
-	"goal": "Follow TASK.md: find the shortest closed tour you can through the cities in cities.txt and write it to tour.txt. The score is continuous: shorter is better, with no ceiling until well below a plain 2-opt tour. Try different heuristics in parallel (construction, 2-opt, Or-opt, simulated annealing, Lin-Kernighan style moves) and keep the best. Each worker leaves its best tour.txt in its own workspace; the best one counts.",
-	"rubric": "Only valid tours count (every city exactly once). Report measured tour lengths. Diverse methods beat everyone polishing the same one; share what works on the board.",
+	"goal": "Find the shortest closed tour you can through the cities in cities.txt. Deliver tour.txt in the format specified by TASK.md and report its measured length.",
+	"rubric": "Visit every city exactly once. For a valid tour, a shorter Euclidean length earns a higher score.",
 	"budget": { "tokens": 500000, "usd": 2, "cpu_seconds": 2400 },
 	"caps": { "maxChildren": 4, "maxDepth": 2 },
 	"timeLimitMinutes": 25

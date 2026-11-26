@@ -1,100 +1,134 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { commandPolicy, EventBus, MemoryStore, Redactor, runCommand, SwarmTree } from "../src/index.ts";
+import {
+	commandPolicy,
+	EventBus,
+	FileArtifactStore,
+	GitWorktreeManager,
+	MemoryStore,
+	Redactor,
+	runCommand,
+} from "../src/index.ts";
 
-function tree() {
-	const bus = new EventBus(new MemoryStore(), new Redactor());
-	return new SwarmTree(bus);
+const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+
+function walkTsFiles(dir: string): string[] {
+	if (!existsSync(dir)) return [];
+	const out: string[] = [];
+	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		const full = join(dir, entry.name);
+		if (entry.isDirectory()) out.push(...walkTsFiles(full));
+		else if (entry.name.endsWith(".ts")) out.push(full);
+	}
+	return out;
 }
 
-describe("budgets", () => {
-	it("inherits, rolls up, refunds and reclaims", () => {
-		const t = tree();
-		const root = t.create({ runId: "r", epoch: 1, role: "root", goal: { title: "g", text: "g" }, budget: { tokens: 1000 } });
-		const share = t.carve(root.id, 0.4, 1);
-		expect(share.tokens).toBe(400);
-		const child = t.create({ runId: "r", epoch: 1, role: "leaf", parentId: root.id, goal: { title: "c", text: "c" }, budget: share });
-		expect(t.available(root.id, "tokens")).toBe(600);
-		t.charge(child.id, { tokens: 100 });
-		expect(t.subtreeSpent(root.id).tokens).toBe(100);
-		expect(t.fractionSpent(child.id)).toBeCloseTo(0.25);
-		const taken = t.reclaim(child.id, 0.5);
-		expect(taken.tokens).toBe(150);
-		expect(t.available(root.id, "tokens")).toBe(750);
-		t.setStatus(child.id, "done");
-		// The leftover (250 - 100 = 150) flows back to the parent.
-		expect(t.available(root.id, "tokens")).toBe(900);
+describe("core v2 invariants", () => {
+	it("enforces ZERO @earendil-works/pi-* imports in Layer B packages", () => {
+		const layerBDirs = [
+			"packages/core/src",
+			"packages/store/src",
+			"packages/mcp-bus/src",
+			"packages/scheduler/src",
+			"packages/module-board/src",
+			"packages/module-secrets/src",
+			"packages/module-workspace/src",
+			"packages/engine/src",
+		];
+		const violations: string[] = [];
+		for (const rel of layerBDirs) {
+			for (const file of walkTsFiles(join(REPO_ROOT, rel))) {
+				const src = readFileSync(file, "utf8");
+				if (src.includes("@earendil-works/pi-")) violations.push(file);
+			}
+		}
+		expect(violations).toEqual([]);
 	});
 
-	it("deducts child overages and late review usage from the parent allocation", () => {
-		const t = tree();
-		const root = t.create({ runId: "r", epoch: 1, role: "root", goal: { title: "g", text: "g" }, budget: { tokens: 1000 } });
-		const child = t.create({ runId: "r", epoch: 1, role: "leaf", parentId: root.id, goal: { title: "c", text: "c" }, budget: { tokens: 400 } });
-		t.charge(child.id, { tokens: 390 });
-		t.chargeOversight(child.id, { tokens: 110 });
-		t.setStatus(child.id, "done");
-		expect(t.available(root.id, "tokens")).toBe(500);
-		t.chargeOversight(child.id, { tokens: 20 });
-		expect(t.available(root.id, "tokens")).toBe(480);
-		expect(t.carve(root.id, 0.5, 1, { tokens: 300 }).tokens).toBe(150);
+	it("redacts secrets and deduplicates idempotency keys on EventBus", () => {
+		const store = new MemoryStore();
+		const redactor = new Redactor();
+		redactor.addSecret("super-secret-token-xyz");
+		const bus = new EventBus(store, redactor);
+
+		const e1 = bus.emit("run-1", "test.event", { msg: "key=super-secret-token-xyz" }, "agt-1", { idempotencyKey: "k1" });
+		const e2 = bus.emit("run-1", "test.event", { msg: "duplicate" }, "agt-1", { idempotencyKey: "k1" });
+		expect(e1.seq).toBe(e2.seq);
+		expect(e1.data.msg).toBe("key=[redacted]");
+		expect(store.events("run-1")).toHaveLength(1);
 	});
 
-	it("enforces soft caps on children and depth", () => {
-		const t = tree();
-		const root = t.create({ runId: "r", epoch: 1, role: "root", goal: { title: "g", text: "g" }, budget: {}, caps: { maxChildren: 2, maxDepth: 1 } });
-		expect(t.canSpawn(root.id, 3).ok).toBe(false);
-		expect(t.canSpawn(root.id, 2).ok).toBe(true);
-		const child = t.create({ runId: "r", epoch: 1, role: "internal", parentId: root.id, goal: { title: "c", text: "c" }, budget: {} });
-		expect(t.canSpawn(child.id, 1).ok).toBe(false); // depth cap
-	});
-});
+	it("stores content-addressed artifacts with UTF-8 boundary-safe paging", () => {
+		const dir = mkdtempSync(join(tmpdir(), "op-art-"));
+		try {
+			const bus = new EventBus(new MemoryStore(), new Redactor());
+			const store = new FileArtifactStore("run-1", dir, bus);
+			const content = "hello 🚀 world ".repeat(100);
+			const rec = store.put("test-log", content, { createdBy: "agt-1" });
+			const same = store.put("test-log-dup", content);
+			expect(same.id).toBe(rec.id);
 
-describe("redaction", () => {
-	it("removes registered secrets and common key shapes", () => {
-		const r = new Redactor();
-		r.addSecret("my-very-private-value");
-		const out = r.redact({ text: "key my-very-private-value and sk-abcdefghijklmnopqrstu", apiKey: "x", nested: ["Bearer abcdefghijklmnopqrstuvwxyz"] });
-		expect(JSON.stringify(out)).not.toContain("my-very-private-value");
-		expect(JSON.stringify(out)).not.toContain("sk-abcdefghijklmnopqrstu");
-		expect(out.apiKey).toBe("[redacted]");
-		expect(out.nested[0]).toBe("Bearer [redacted]");
-	});
-});
-
-describe("sandbox", () => {
-	it("refuses privileged and destructive commands", () => {
-		expect(commandPolicy("sudo rm -rf /")).toBeDefined();
-		expect(commandPolicy("rm -rf ~")).toBeDefined();
-		expect(commandPolicy("git push --force origin main")).toBeDefined();
-		expect(commandPolicy("rm -rf build && python run.py")).toBeUndefined();
+			let offset = 0;
+			let rebuilt = "";
+			for (;;) {
+				const page = store.read(rec.id, offset, 37);
+				rebuilt += page.content;
+				offset = page.nextOffset;
+				if (page.eof) break;
+			}
+			expect(rebuilt).toBe(content);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
-	it.runIf(process.platform === "darwin")("confines writes to the workspace", async () => {
-		const ws = mkdtempSync(join(tmpdir(), "op-sbx-"));
-		writeFileSync(join(ws, "in.txt"), "inside");
-		const outside = join(homedir(), `.op-sandbox-probe-${Date.now()}`);
-		const ok = await runCommand({ command: "cat in.txt && echo hi > out.txt && cat out.txt", cwd: ws, profile: "worker" });
-		expect(ok.exitCode).toBe(0);
-		expect(ok.stdout).toContain("hi");
-		const denied = await runCommand({ command: `echo bad > ${outside}`, cwd: ws, profile: "worker" });
-		expect(denied.exitCode).not.toBe(0);
+	it("manages isolated git worktrees, WIP commits, and clean trunk merges", () => {
+		const dir = mkdtempSync(join(tmpdir(), "op-wt-"));
+		try {
+			const seed = join(dir, "seed");
+			const runDir = join(dir, "run");
+			mkdirSync(seed, { recursive: true });
+			writeFileSync(join(seed, "a.txt"), "base\n", "utf8");
+
+			const mgr = new GitWorktreeManager(seed, runDir, "run-wt");
+			const wt = mgr.create("agt-1");
+			writeFileSync(join(wt.path, "b.txt"), "hello\n", "utf8");
+			const sha = mgr.commitWip(wt.path, "add b.txt");
+			expect(sha).toBeTruthy();
+
+			const merged = mgr.mergeIntoTrunk(wt.branch);
+			expect(merged.ok).toBe(true);
+			expect(readFileSync(join(mgr.trunkPath, "b.txt"), "utf8")).toBe("hello\n");
+			mgr.remove(wt.path);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
-	it.runIf(process.platform === "darwin")("blocks the network for jobs", async () => {
-		const ws = mkdtempSync(join(tmpdir(), "op-sbx-"));
-		const res = await runCommand({ command: "curl -s -m 5 https://example.com > /dev/null && echo reached || echo blocked", cwd: ws, profile: "job" });
-		expect(res.stdout).toContain("blocked");
-	});
-});
+	it("enforces sandbox command policy and offline network blocking", async () => {
+		expect(commandPolicy("sudo rm -rf /")).toBeTruthy();
+		expect(commandPolicy("git push --force origin main")).toBeTruthy();
 
-describe("budget splits", () => {
-	it("keeps cents when splitting dollars", () => {
-		const t = tree();
-		const root = t.create({ runId: "r", epoch: 1, role: "root", goal: { title: "g", text: "g" }, budget: { tokens: 1000, usd: 1 } });
-		const share = t.carve(root.id, 0.3, 1);
-		expect(share.usd).toBe(0.3);
-		expect(share.tokens).toBe(300);
+		const dir = mkdtempSync(join(tmpdir(), "op-sb-"));
+		try {
+			const ok = await runCommand({ command: "echo hi", cwd: dir, profile: "job", networkOff: true, timeoutMs: 5_000 });
+			expect(ok.exitCode).toBe(0);
+			expect(ok.stdout.trim()).toBe("hi");
+			if (process.platform === "darwin") {
+				const net = await runCommand({
+					command: "node -e \"fetch('https://example.com').then(()=>process.exit(0)).catch(()=>process.exit(42))\"",
+					cwd: dir,
+					profile: "job",
+					networkOff: true,
+					timeoutMs: 5_000,
+				});
+				expect(net.exitCode).not.toBe(0);
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

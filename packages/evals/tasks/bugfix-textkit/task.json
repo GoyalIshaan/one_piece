@@ -4,8 +4,8 @@
 	"category": "engineering",
 	"inspiredBy": "SWE-bench (fail-to-pass and pass-to-pass tests)",
 	"suites": ["smoke", "full"],
-	"goal": "The textkit package has three open issues described in ISSUES.md. Fix all three so the documented behavior holds, without breaking anything that already works. You are scored by hidden fail-to-pass tests for each issue and hidden pass-to-pass regression tests. Each worker should leave its fixed package in its own workspace.",
-	"rubric": "Read the docstrings and ISSUES.md carefully; they are the specification. Write your own tests for each issue, including edge cases, before claiming a fix. Do not change behavior the issues do not mention.",
+	"goal": "Fix the three issues in ISSUES.md and deliver a working textkit package. Hidden tests check each reported bug and regressions in existing behavior.",
+	"rubric": "The docstrings and ISSUES.md define the expected behavior, including edge cases. Preserve behavior outside the three fixes.",
 	"budget": { "tokens": 300000, "usd": 1.2, "cpu_seconds": 300 },
 	"caps": { "maxChildren": 3, "maxDepth": 2 },
 	"timeLimitMinutes": 20

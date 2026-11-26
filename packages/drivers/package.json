@@ -1,0 +1,16 @@
+{
+	"name": "@one-piece/drivers",
+	"version": "0.2.0",
+	"private": true,
+	"type": "module",
+	"license": "MIT",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"dependencies": {
+		"@one-piece/core": "0.2.0",
+		"@one-piece/router": "0.1.0",
+		"@earendil-works/pi-agent-core": "1.6.0",
+		"@earendil-works/pi-ai": "1.6.0"
+	}
+}

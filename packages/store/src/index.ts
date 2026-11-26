@@ -1,15 +1,29 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { Collection, EventQuery, HarnessEvent, Store } from "@one-piece/core";
+import type {
+	BoardPost,
+	Collection,
+	Documents,
+	EventQuery,
+	HarnessEvent,
+	LeaseClaimResult,
+	Store,
+	TaskRecord,
+	TaskStatus,
+} from "@one-piece/core";
+
+const DEFAULT_BOARD = "swarm";
 
 /**
- * SQLite store (Node's built-in driver). One append-only event log plus one table of current
- * documents. WAL mode lets the dashboard read while the harness writes.
+ * Normalized v2 SQLite WAL store using Node's built-in `node:sqlite`.
+ * Holds the append-only event log (with idempotency keys and causal parents)
+ * plus normalized document projections and atomic lease transactions.
  */
 export class SqliteStore implements Store {
 	private readonly db: DatabaseSync;
 	private readonly insertEvent;
+	private readonly selectEventByIdempotency;
 	private readonly upsertDoc;
 	private readonly selectDoc;
 
@@ -26,9 +40,15 @@ export class SqliteStore implements Store {
 				run_id TEXT NOT NULL,
 				type TEXT NOT NULL,
 				node_id TEXT,
+				causal_parents TEXT,
+				idempotency_key TEXT,
 				data TEXT NOT NULL
 			);
 			CREATE INDEX IF NOT EXISTS events_run ON events (run_id, seq);
+			CREATE UNIQUE INDEX IF NOT EXISTS events_idempotency
+				ON events (run_id, idempotency_key)
+				WHERE idempotency_key IS NOT NULL;
+
 			CREATE TABLE IF NOT EXISTS docs (
 				collection TEXT NOT NULL,
 				id TEXT NOT NULL,
@@ -38,8 +58,16 @@ export class SqliteStore implements Store {
 				PRIMARY KEY (collection, id)
 			);
 			CREATE INDEX IF NOT EXISTS docs_run ON docs (collection, run_id);
+			CREATE INDEX IF NOT EXISTS docs_posts_board
+				ON docs (run_id, coalesce(json_extract(data, '$.board'), '${DEFAULT_BOARD}'))
+				WHERE collection = 'posts';
 		`);
-		this.insertEvent = this.db.prepare("INSERT INTO events (ts, run_id, type, node_id, data) VALUES (?, ?, ?, ?, ?)");
+		this.insertEvent = this.db.prepare(
+			"INSERT INTO events (ts, run_id, type, node_id, causal_parents, idempotency_key, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		);
+		this.selectEventByIdempotency = this.db.prepare(
+			"SELECT seq FROM events WHERE run_id = ? AND idempotency_key = ?",
+		);
 		this.upsertDoc = this.db.prepare(
 			"INSERT INTO docs (collection, id, run_id, data, updated_at) VALUES (?, ?, ?, ?, ?) " +
 				"ON CONFLICT (collection, id) DO UPDATE SET run_id = excluded.run_id, data = excluded.data, updated_at = excluded.updated_at",
@@ -48,7 +76,19 @@ export class SqliteStore implements Store {
 	}
 
 	appendEvent(event: Omit<HarnessEvent, "seq">): number {
-		const result = this.insertEvent.run(event.ts, event.runId, event.type, event.nodeId ?? null, JSON.stringify(event.data));
+		if (event.idempotencyKey) {
+			const existing = this.selectEventByIdempotency.get(event.runId, event.idempotencyKey) as { seq: number } | undefined;
+			if (existing) return Number(existing.seq);
+		}
+		const result = this.insertEvent.run(
+			event.ts,
+			event.runId,
+			event.type,
+			event.nodeId ?? null,
+			event.causalParents?.length ? JSON.stringify(event.causalParents) : null,
+			event.idempotencyKey ?? null,
+			JSON.stringify(event.data),
+		);
 		return Number(result.lastInsertRowid);
 	}
 
@@ -64,35 +104,129 @@ export class SqliteStore implements Store {
 			params.push(...query.types);
 		}
 		const limit = query.limit ? ` LIMIT ${Math.floor(query.limit)}` : "";
-		const rows = this.db.prepare(`SELECT * FROM events WHERE ${where.join(" AND ")} ORDER BY seq${limit}`).all(...params) as any[];
+		const rows = this.db.prepare(`SELECT * FROM events WHERE ${where.join(" AND ")} ORDER BY seq${limit}`).all(...params) as Array<Record<string, unknown>>;
 		return rows.map((r) => ({
 			seq: Number(r.seq),
 			ts: Number(r.ts),
-			runId: r.run_id,
-			type: r.type,
-			nodeId: r.node_id ?? undefined,
-			data: JSON.parse(r.data),
+			runId: String(r.run_id),
+			type: String(r.type),
+			nodeId: typeof r.node_id === "string" ? r.node_id : undefined,
+			causalParents: typeof r.causal_parents === "string" ? (JSON.parse(r.causal_parents) as string[]) : undefined,
+			idempotencyKey: typeof r.idempotency_key === "string" ? r.idempotency_key : undefined,
+			data: JSON.parse(String(r.data)) as Record<string, unknown>,
 		}));
 	}
 
-	put<T extends { id: string }>(collection: Collection, doc: T): void {
-		const runId = (doc as { runId?: string }).runId ?? null;
+	put<K extends Collection>(collection: K, doc: Documents[NoInfer<K>]): void {
+		const runId = "runId" in doc && typeof doc.runId === "string" ? doc.runId : null;
 		this.upsertDoc.run(collection, doc.id, runId, JSON.stringify(doc), Date.now());
 	}
 
-	get<T>(collection: Collection, id: string): T | undefined {
+	get<K extends Collection>(collection: K, id: string): Documents[K] | undefined {
 		const row = this.selectDoc.get(collection, id) as { data: string } | undefined;
-		return row ? (JSON.parse(row.data) as T) : undefined;
+		return row ? (JSON.parse(row.data) as Documents[K]) : undefined;
 	}
 
-	list<T>(collection: Collection, filter: { runId?: string } = {}): T[] {
+	list<K extends Collection>(collection: K, filter: { runId?: string } = {}): Documents[K][] {
 		const rows = filter.runId
 			? this.db.prepare("SELECT data FROM docs WHERE collection = ? AND run_id = ? ORDER BY updated_at").all(collection, filter.runId)
 			: this.db.prepare("SELECT data FROM docs WHERE collection = ? ORDER BY updated_at").all(collection);
-		return (rows as Array<{ data: string }>).map((r) => JSON.parse(r.data) as T);
+		return (rows as Array<{ data: string }>).map((r) => JSON.parse(r.data) as Documents[K]);
 	}
 
-	/** Highest event sequence number for a run (for live tails). */
+	listBoardPosts(runId: string, board?: string, cites?: string): BoardPost[] {
+		const where = ["collection = 'posts'", "run_id = ?"];
+		const params: string[] = [runId];
+		if (board) {
+			where.push(`coalesce(json_extract(data, '$.board'), '${DEFAULT_BOARD}') = ?`);
+			params.push(board);
+		}
+		if (cites !== undefined) {
+			where.push("EXISTS (SELECT 1 FROM json_each(docs.data, '$.references') AS ref WHERE json_extract(ref.value, '$.postId') = ?)");
+			params.push(cites);
+		}
+		const rows = this.db.prepare(`SELECT data FROM docs WHERE ${where.join(" AND ")} ORDER BY updated_at`).all(...params) as Array<{ data: string }>;
+		return rows.map((r) => JSON.parse(r.data) as BoardPost);
+	}
+
+	private withWriteTransaction<T>(fn: () => T): T {
+		this.db.exec("BEGIN IMMEDIATE");
+		try {
+			const result = fn();
+			this.db.exec("COMMIT");
+			return result;
+		} catch (error) {
+			try {
+				this.db.exec("ROLLBACK");
+			} catch {
+				// Ignore rollback error if transaction already closed.
+			}
+			throw error;
+		}
+	}
+
+	claimTaskLease(runId: string, taskId: string, agentId: string, ttlMs: number, now = Date.now()): LeaseClaimResult {
+		return this.withWriteTransaction(() => {
+			const task = this.get("tasks", taskId);
+			if (!task || task.runId !== runId) return { claimed: false, reason: `Task ${taskId} not found` };
+			const expired = task.status === "claimed" && (task.leaseExpiresAt ?? 0) <= now;
+			if (task.status !== "open" && !expired) {
+				return {
+					claimed: false,
+					reason: `Task ${taskId} is ${task.status}${task.leaseOwner ? ` (owned by ${task.leaseOwner})` : ""}`,
+				};
+			}
+			const updated: TaskRecord = {
+				...task,
+				status: "claimed",
+				leaseOwner: agentId,
+				leaseExpiresAt: now + ttlMs,
+				fencingToken: task.fencingToken + 1,
+				updatedAt: now,
+			};
+			this.put("tasks", updated);
+			return { claimed: true, task: updated };
+		});
+	}
+
+	renewTaskLease(taskId: string, agentId: string, fencingToken: number, ttlMs: number, now = Date.now()): boolean {
+		return this.withWriteTransaction(() => {
+			const task = this.get("tasks", taskId);
+			if (!task || task.status !== "claimed" || task.leaseOwner !== agentId || task.fencingToken !== fencingToken) {
+				return false;
+			}
+			this.put("tasks", { ...task, leaseExpiresAt: now + ttlMs, updatedAt: now });
+			return true;
+		});
+	}
+
+	releaseTaskLease(
+		taskId: string,
+		agentId: string,
+		fencingToken: number,
+		nextStatus: Exclude<TaskStatus, "claimed">,
+		update: { result?: string; artifactIds?: string[]; findingId?: string } = {},
+		now = Date.now(),
+	): boolean {
+		return this.withWriteTransaction(() => {
+			const task = this.get("tasks", taskId);
+			if (!task || task.status !== "claimed" || task.leaseOwner !== agentId || task.fencingToken !== fencingToken) {
+				return false;
+			}
+			this.put("tasks", {
+				...task,
+				status: nextStatus,
+				leaseOwner: nextStatus === "open" ? undefined : agentId,
+				leaseExpiresAt: undefined,
+				result: update.result ?? task.result,
+				artifactIds: update.artifactIds ?? task.artifactIds,
+				findingId: update.findingId ?? task.findingId,
+				updatedAt: now,
+			});
+			return true;
+		});
+	}
+
 	lastSeq(runId: string): number {
 		const row = this.db.prepare("SELECT MAX(seq) AS seq FROM events WHERE run_id = ?").get(runId) as { seq: number | null };
 		return Number(row.seq ?? 0);

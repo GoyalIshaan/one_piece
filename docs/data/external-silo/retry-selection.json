@@ -1,0 +1,27 @@
+{
+  "rule": "one hash-ranked pair per two-seat level and five-seat stratum, with >=1 incomplete arm with a zero-token model error",
+  "selected": [
+    {
+      "id": "I-01",
+      "n": 2
+    },
+    {
+      "id": "I-05",
+      "n": 5
+    },
+    {
+      "id": "II-18",
+      "n": 2
+    },
+    {
+      "id": "III-22",
+      "n": 2
+    }
+  ],
+  "workers": 1,
+  "exposedToSelector": [
+    "id",
+    "n",
+    "whether technical error and missing submission coincide in either arm"
+  ]
+}

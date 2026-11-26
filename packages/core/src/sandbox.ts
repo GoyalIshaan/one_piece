@@ -1,11 +1,13 @@
 import { spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, realpathSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Duplex } from "node:stream";
 
-// The two sandbox profiles. Worker: everything a task needs inside its own folder, network on,
-// no privileged or destructive commands. Job: same folder rules, network off.
+// Worker and job commands have workspace write restrictions. Jobs run offline.
+// Isolated handoff commands also restrict reads to their own workspace and system tools.
 
-export type SandboxProfile = "worker" | "job";
+export type SandboxProfile = "worker" | "job" | "isolated";
 
 const DENY: Array<[RegExp, string]> = [
 	[/(^|[\s;&|(])sudo(\s|$)/, "root commands are not allowed"],
@@ -31,17 +33,30 @@ export function commandPolicy(command: string): string | undefined {
 	return undefined;
 }
 
-export interface RunOptions {
+interface CommandOptions {
 	command: string;
 	cwd: string;
 	profile: SandboxProfile;
 	env?: Record<string, string>;
 	/** Folders writable besides cwd and temp. */
 	writeRoots?: string[];
+	/** Keep temporary writes inside the scratch workspace. */
+	isolatedWrites?: boolean;
+	/** Explicitly block all outbound network even on the worker profile. */
+	networkOff?: boolean;
 	timeoutMs?: number;
 	signal?: AbortSignal;
 	maxOutput?: number;
+	onOutput?: (stdout: string, stderr: string) => void;
 }
+
+type Admission =
+	| { readyTimeoutMs?: never; commandPrefix?: readonly string[]; admissionCheck?: never; onReady?: never; leasedMacGpu?: false }
+	| ({ readyTimeoutMs: number; commandPrefix: readonly [string, ...string[]]; onReady?: () => void } & (
+		| { admissionCheck: () => string | undefined; leasedMacGpu?: boolean }
+		| { admissionCheck?: never; leasedMacGpu?: false }
+	));
+export type RunOptions = CommandOptions & Admission;
 
 export interface RunResult {
 	exitCode: number;
@@ -51,6 +66,28 @@ export interface RunResult {
 	timedOut: boolean;
 	sandboxed: boolean;
 }
+
+function outputCapture(limit: number) {
+	const headSize = Math.floor(limit / 4);
+	const tailSize = limit - headSize;
+	let head = "", tail = "", truncated = false;
+	return {
+		append(chunk: string) {
+			const take = headSize - head.length;
+			head += chunk.slice(0, take);
+			tail += chunk.slice(take);
+			if (tail.length > tailSize) {
+				truncated = true;
+				tail = tailSize ? tail.slice(-tailSize) : "";
+			}
+		},
+		text: () => head + (truncated ? "\n[output truncated]\n" : "") + tail,
+	};
+}
+
+type WaitingCommand = { phase: "admitting" | "executing"; since: number; deadline: ReturnType<typeof setTimeout> };
+type StopReason = "deadline" | "aborted" | "admission_failed";
+type CommandState = WaitingCommand | { phase: "stopping"; since: number; reason: StopReason } | { phase: "closed" };
 
 function real(path: string): string {
 	try {
@@ -71,42 +108,117 @@ export function allowSandboxReads(paths: string[]): void {
 	for (const p of paths) deniedReads.delete(real(p));
 }
 
-function seatbeltProfile(profile: SandboxProfile, roots: string[]): string {
+const operatorArchive = join(homedir(), ".one_piece", "archives.noindex");
+
+/** Native workspace tools run in the harness process, outside the shell profile. */
+export function isOperatorArchivePath(path: string): boolean {
+	const canonical = real(path);
+	const archive = real(operatorArchive);
+	return canonical === archive || canonical.startsWith(archive + "/");
+}
+
+/** Match restrictions for reads performed by the host process instead of Seatbelt. */
+export function isSandboxReadBlocked(path: string): boolean {
+	const canonical = real(path);
+	return isOperatorArchivePath(canonical) || [...deniedReads].some(root => canonical === root || canonical.startsWith(root + "/"));
+}
+
+function seatbeltProfile(profile: SandboxProfile, roots: string[], archive: string | undefined, unrestricted: boolean, leasedMacGpu: boolean, networkOff = false): string {
 	const quote = (r: string) => `(subpath "${r.replace(/"/g, '\\"')}")`;
+	const privateArchive = archive ? `(deny file-read* file-write* ${quote(archive)})` : "";
+	const gpuPolicy = leasedMacGpu ? "" : [
+		"(deny iokit-open)",
+		'(deny process-exec (regex #"/(llama-bench|llama-cli|llama-server)$"))',
+		'(deny network-outbound (remote ip "localhost:*") (remote unix-socket))',
+		profile === "worker" && !networkOff ? '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))' : "",
+	].join("\n");
+	const privateReads = deniedReads.size ? `(deny file-read* ${[...deniedReads].map(quote).join(" ")})` : "";
+	if (unrestricted && profile !== "isolated") return ["(version 1)", "(allow default)", privateReads, privateArchive, gpuPolicy].join("\n");
 	const writes = roots.map(quote).join(" ");
+	const isolatedReads = profile === "isolated" ? [
+		"(deny process-info*)",
+		"(allow process-info* (target self))",
+		"(deny appleevent-send)",
+		"(deny file-read-data)",
+		`(allow file-read-data (literal "/") (require-all ${quote("/System")} (require-not ${quote("/System/Volumes")})) ${[roots[0]!, "/usr", "/bin", "/sbin", "/dev", "/Library/Frameworks", "/Library/Developer"].map(quote).join(" ")})`,
+	].join("\n") : "";
+	const netPolicy = profile === "isolated" || networkOff
+		? "(deny network*)"
+		: profile === "job"
+			? '(deny network*) (allow network* (local unix))'
+			: "";
 	return [
 		"(version 1)",
 		"(allow default)",
 		"(deny file-write*)",
 		`(allow file-write* ${writes} (literal "/dev/null") (literal "/dev/tty") (literal "/dev/stdout") (literal "/dev/stderr") (regex #"^/dev/fd/"))`,
-		deniedReads.size ? `(deny file-read* ${[...deniedReads].map(quote).join(" ")})` : "",
-		profile === "job" ? '(deny network*) (allow network* (local unix))' : "",
+		isolatedReads,
+		privateReads,
+		privateArchive,
+		netPolicy,
+		gpuPolicy,
 	].join("");
+}
+
+/** Apply the same OS restrictions to shell tools and native subprocesses such as workspace Git. */
+export function sandboxCommand(command: string[], options: Pick<CommandOptions, "cwd" | "profile" | "isolatedWrites" | "writeRoots" | "networkOff"> & Admission): string[] {
+	if (options.leasedMacGpu && (!options.commandPrefix?.length || !Number.isFinite(options.readyTimeoutMs) ||
+		options.readyTimeoutMs <= 0 || typeof options.admissionCheck !== "function")) {
+		throw new Error("A leased Mac GPU command requires a launcher, readiness deadline and admission check");
+	}
+	if (process.platform !== "darwin") {
+		if (options.profile === "isolated") throw new Error("Isolated workspaces require macOS Seatbelt");
+		return command;
+	}
+	const roots = [real(options.cwd), ...(options.profile === "isolated" || options.isolatedWrites ? [] : [real(tmpdir()), "/private/tmp", "/private/var/folders"]), ...(options.writeRoots ?? []).map(real)];
+	const archive = existsSync(operatorArchive) ? real(operatorArchive) : undefined;
+	const rules = seatbeltProfile(options.profile, roots, archive, Boolean(process.env.ONE_PIECE_NO_SANDBOX), options.leasedMacGpu === true, options.networkOff === true);
+	return ["/usr/bin/sandbox-exec", "-p", rules, ...command];
 }
 
 /** Run a shell command confined to its folder (macOS Seatbelt when available). */
 export function runCommand(options: RunOptions): Promise<RunResult> {
+	if (options.signal?.aborted) {
+		return Promise.resolve({ exitCode: 137, stdout: "", stderr: "Command cancelled", durationMs: 0, timedOut: false, sandboxed: false });
+	}
 	const policy = commandPolicy(options.command);
 	if (policy) {
 		return Promise.resolve({ exitCode: 126, stdout: "", stderr: `Refused by sandbox policy: ${policy}`, durationMs: 0, timedOut: false, sandboxed: true });
 	}
-	const roots = [real(options.cwd), real(tmpdir()), "/private/tmp", "/private/var/folders", ...(options.writeRoots ?? []).map(real)];
-	const useSeatbelt = process.platform === "darwin" && !process.env.ONE_PIECE_NO_SANDBOX;
-	const argv = useSeatbelt
-		? ["/usr/bin/sandbox-exec", ["-p", seatbeltProfile(options.profile, roots), "/bin/bash", "-c", options.command]]
-		: ["/bin/bash", ["-c", options.command]];
+	const command = [...(options.commandPrefix ?? []), "/bin/bash", "-c", options.command];
+	const [executable, ...args] = sandboxCommand(command, options);
+	const isolated = options.profile === "isolated";
+	const useSeatbelt = process.platform === "darwin";
 	const max = options.maxOutput ?? 20_000;
-	const began = Date.now();
+	const waitForReady = options.readyTimeoutMs !== undefined;
+	const admissionEnv = waitForReady
+		? { ONE_PIECE_JOB_READY_FD: "3", ...(options.admissionCheck ? { ONE_PIECE_JOB_ADMISSION_ACK: "1" } : {}) }
+		: {};
+	const executeTimeout = options.timeoutMs ?? 300_000;
+	const spawnedAt = Date.now();
 	return new Promise((resolve) => {
-		const child = spawn(argv[0] as string, argv[1] as string[], {
+		const child = spawn(executable!, args, {
 			cwd: options.cwd,
-			env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? options.cwd, LANG: "en_US.UTF-8", TMPDIR: tmpdir(), ...passthroughEnv(), ...options.env },
-			stdio: ["ignore", "pipe", "pipe"],
+			env: isolated
+				? { PATH: "/Library/Frameworks/Python.framework/Versions/Current/bin:/usr/bin:/bin", HOME: options.cwd, LANG: "en_US.UTF-8", TMPDIR: options.cwd }
+				: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? options.cwd, LANG: "en_US.UTF-8", TMPDIR: options.isolatedWrites ? options.cwd : tmpdir(), ...passthroughEnv(), ...options.env, ...admissionEnv },
+			stdio: waitForReady ? ["ignore", "pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
 			detached: true,
 		});
-		let stdout = "";
-		let stderr = "";
-		let timedOut = false;
+		const stdout = outputCapture(max), stderr = outputCapture(max);
+		let lastOutput = 0, outputTimer: ReturnType<typeof setTimeout> | undefined;
+		const publish = () => {
+			lastOutput = Date.now();
+			outputTimer = undefined;
+			options.onOutput?.(stdout.text(), stderr.text());
+		};
+		const output = (capture: ReturnType<typeof outputCapture>, chunk: string) => {
+			capture.append(chunk);
+			if (!options.onOutput || outputTimer) return;
+			const remaining = 1000 + lastOutput - Date.now();
+			if (remaining <= 0) publish();
+			else outputTimer = setTimeout(publish, remaining);
+		};
 		const kill = () => {
 			try {
 				if (child.pid) process.kill(-child.pid, "SIGKILL");
@@ -114,26 +226,65 @@ export function runCommand(options: RunOptions): Promise<RunResult> {
 				child.kill("SIGKILL");
 			}
 		};
-		const timer = setTimeout(() => {
-			timedOut = true;
+		const stop = (reason: StopReason) => {
+			if (state.phase !== "admitting" && state.phase !== "executing") return;
+			clearTimeout(state.deadline);
+			state = { phase: "stopping", since: state.since, reason };
 			kill();
-		}, options.timeoutMs ?? 300_000);
-		options.signal?.addEventListener("abort", kill, { once: true });
-		child.stdout.on("data", (d: Buffer) => {
-			if (stdout.length < max) stdout += d.toString();
+		};
+		const wait = (phase: WaitingCommand["phase"], since: number, timeout: number): WaitingCommand => ({
+			phase, since, deadline: setTimeout(() => stop("deadline"), timeout),
 		});
-		child.stderr.on("data", (d: Buffer) => {
-			if (stderr.length < max) stderr += d.toString();
+		let state: CommandState = wait(waitForReady ? "admitting" : "executing", spawnedAt, options.readyTimeoutMs ?? executeTimeout);
+		const abort = () => stop("aborted");
+		const ready = child.stdio[3] as Duplex | undefined;
+		ready?.on("error", (error) => {
+			output(stderr, `\nLease channel failed: ${error.message}\n`);
+			stop("admission_failed");
 		});
+		if (waitForReady) ready?.once("data", () => {
+			if (state.phase !== "admitting" || options.signal?.aborted) return;
+			let reason: string | undefined;
+			try {
+				reason = options.admissionCheck?.();
+			} catch (error) {
+				reason = String(error);
+			}
+			if (reason) {
+				output(stderr, `\nLease admission declined: ${reason}\n`);
+				stop("admission_failed");
+				return;
+			}
+			try {
+				options.onReady?.();
+			} catch (error) {
+				output(stderr, `\nLease callback failed: ${error}\n`);
+				stop("admission_failed");
+				return;
+			}
+			if (options.signal?.aborted) return;
+			clearTimeout(state.deadline);
+			state = wait("executing", Date.now(), executeTimeout);
+			if (options.admissionCheck) ready.write("1");
+		});
+		options.signal?.addEventListener("abort", abort, { once: true });
+		child.on("error", (error) => output(stderr, error.message));
+		child.stdout?.setEncoding("utf8").on("data", (chunk: string) => output(stdout, chunk));
+		child.stderr?.setEncoding("utf8").on("data", (chunk: string) => output(stderr, chunk));
+		if (options.leasedMacGpu) child.once("exit", kill);
 		child.on("close", (code) => {
-			clearTimeout(timer);
-			options.signal?.removeEventListener("abort", kill);
+			const exit = state;
+			if (exit.phase === "closed") return;
+			state = { phase: "closed" };
+			if (exit.phase !== "stopping") clearTimeout(exit.deadline);
+			clearTimeout(outputTimer);
+			options.signal?.removeEventListener("abort", abort);
 			resolve({
 				exitCode: code ?? 137,
-				stdout: stdout.length >= max ? `${stdout.slice(0, max)}\n[output truncated]` : stdout,
-				stderr: stderr.length >= max ? `${stderr.slice(0, max)}\n[output truncated]` : stderr,
-				durationMs: Date.now() - began,
-				timedOut,
+				stdout: stdout.text(),
+				stderr: stderr.text(),
+				durationMs: Date.now() - exit.since,
+				timedOut: exit.phase === "stopping" && exit.reason === "deadline",
 				sandboxed: useSeatbelt,
 			});
 		});

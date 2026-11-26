@@ -1,119 +1,161 @@
-import { lit, obj, str, union } from "@earendil-works/pi-schema";
 import {
 	type BoardPost,
-	type BoardPostKind,
-	defineTool,
-	type Finding,
-	type HarnessApi,
-	type HarnessEvent,
-	type HarnessModule,
+	type BoardService,
+	type EventBus,
 	newId,
-	type NodeContext,
-	type SwarmNode,
+	type ToolDefinition,
 } from "@one-piece/core";
+import { rankedBoardPosts, searchExcerpt } from "./search.ts";
 
-// Family boards. Siblings at one level share a board; a parent may read its children's board
-// but does not post there. Nobody sees another family's board. Checkpoints are posted
-// automatically (only the latest per author is shown). Before a leaf reports, it must have
-// answered every sibling's latest checkpoint with a peer review.
+export { rankedBoardPosts, searchExcerpt } from "./search.ts";
 
-export function boardModule(): HarnessModule {
-	let harness: HarnessApi;
+/**
+ * Bounded linked-message substrate (ScaleMAS pattern).
+ * Exposes O(1) top-k search ranked by BM25 x distinct-peer citations, publish, and visit.
+ */
+export class SwarmBoardService implements BoardService {
+	private readonly bus: EventBus;
 
-	const posts = (familyId: string) => harness.store.list<BoardPost>("posts", { runId: harness.run().id }).filter((p) => p.familyId === familyId);
+	constructor(bus: EventBus) {
+		this.bus = bus;
+	}
 
-	const render = (familyId: string, viewer: string) => {
-		const all = posts(familyId);
-		const latestCheckpoint = new Map<string, BoardPost>();
-		for (const p of all) if (p.kind === "checkpoint") latestCheckpoint.set(p.authorNode, p);
-		const others = all.filter((p) => p.kind !== "checkpoint").slice(-30);
-		const lines = [`Family board ${familyId} (viewer ${viewer})`, "", "## Latest checkpoints"];
-		for (const p of latestCheckpoint.values()) lines.push(`- ${p.authorNode} (${new Date(p.createdAt).toISOString()}):\n  ${p.body.replace(/\n/g, "\n  ")}`);
-		if (!latestCheckpoint.size) lines.push("(none yet)");
-		lines.push("", "## Posts");
-		for (const p of others) lines.push(`- [${p.kind}] ${p.title} by ${p.authorNode}: ${p.body.slice(0, 600)}`);
-		if (!others.length) lines.push("(none yet)");
-		return lines.join("\n");
-	};
+	publish(input: {
+		runId: string;
+		authorAgentId: string;
+		topic: string;
+		summary: string;
+		body?: string;
+		board?: string;
+		references?: Array<{ postId: string; reason: string }>;
+		artifactIds?: string[];
+		parentPostId?: string;
+	}): BoardPost {
+		const post: BoardPost = {
+			id: newId("post"),
+			runId: input.runId,
+			board: input.board ?? "swarm",
+			topic: input.topic.trim() || "general",
+			authorAgentId: input.authorAgentId,
+			summary: input.summary.trim().slice(0, 400),
+			body: (input.body ?? input.summary).trim(),
+			references: input.references?.length ? input.references : undefined,
+			artifactIds: input.artifactIds?.length ? input.artifactIds : undefined,
+			parentPostId: input.parentPostId,
+			createdAt: Date.now(),
+		};
+		this.bus.save("posts", post, input.authorAgentId);
+		this.bus.emit(
+			input.runId,
+			"board.posted",
+			{ postId: post.id, topic: post.topic, authorAgentId: post.authorAgentId },
+			input.authorAgentId,
+			{ causalParents: post.references?.map((r) => r.postId) },
+		);
+		return post;
+	}
 
-	const post = (node: SwarmNode, kind: BoardPostKind, title: string, body: string) => {
-		if (!node.parentId) throw new Error("The root has no family board");
-		const p: BoardPost = { id: newId("post"), runId: node.runId, familyId: node.parentId, authorNode: node.id, kind, title, body, createdAt: Date.now() };
-		harness.bus.save("posts", p, node.id);
-		harness.bus.emit(node.runId, "board.post", { familyId: p.familyId, kind, title }, node.id);
-		return p;
-	};
+	search(runId: string, query: string, opts: { k?: number; board?: string } = {}) {
+		const k = Math.max(1, Math.min(10, Math.floor(opts.k ?? 5)));
+		const posts = this.bus.store.listBoardPosts
+			? this.bus.store.listBoardPosts(runId, opts.board)
+			: this.bus.store.list("posts", { runId }).filter((p) => !opts.board || (p.board ?? "swarm") === opts.board);
+		return rankedBoardPosts(posts, query, k);
+	}
 
-	return {
-		manifest: {
-			name: "board",
-			version: "0.1.0",
-			summary: "Family message board shared with your siblings; parents can read their children's board",
-			roles: ["root", "internal", "leaf"],
-			tools: ["read_board", "post_board", "read_children_board"],
-			contextCostTokens: 400,
-		},
-		setup(h) {
-			harness = h;
-			h.bus.on((event: HarnessEvent) => {
-				if (event.type !== "node.checkpoint" || !event.nodeId) return;
-				const node = h.tree.get(event.nodeId);
-				if (node?.parentId) post(node, "checkpoint", "checkpoint", String(event.data.checkpoint ?? ""));
-			});
-		},
-		prompt(ctx: NodeContext) {
-			return ctx.node.role === "leaf"
-				? "Family board: read_board shows your siblings' latest checkpoints and posts. Before report_finding, post a peer_review naming, for each sibling, one finding and one action (integrate, check, avoid overlap, or not applicable)."
-				: "Boards: read_children_board shows what your children discuss among themselves.";
-		},
-		beforeReport(ctx: NodeContext, _finding: Finding) {
-			const { node } = ctx;
-			if (node.role !== "leaf" || !node.parentId) return undefined;
-			// Once told to wrap up, the last turns go to reporting, not board ceremony.
-			if (node.wrapUp) return undefined;
-			const family = posts(node.parentId);
-			const lastReview = family.filter((p) => p.authorNode === node.id && p.kind === "peer_review").at(-1)?.createdAt ?? 0;
-			const newer = family.filter((p) => p.kind === "checkpoint" && p.authorNode !== node.id && p.createdAt > lastReview);
-			if (!newer.length) return undefined;
-			return `post a peer_review on your family board first: siblings ${[...new Set(newer.map((p) => p.authorNode))].join(", ")} have checkpoints you have not answered`;
-		},
-		tools(ctx: NodeContext) {
-			const { node } = ctx;
-			const tools = [];
-			if (node.parentId) {
-				tools.push(
-					defineTool({
-						name: "read_board",
-						description: "Read your family board: siblings' latest checkpoints and posts.",
-						parameters: obj({}),
-						async execute() {
-							return render(node.parentId!, node.id);
-						},
-					}),
-					defineTool({
-						name: "post_board",
-						description: "Post to your family board (visible to your siblings and your parent).",
-						parameters: obj({ kind: union([lit("note"), lit("peer_review"), lit("answer")]), title: str(), body: str() }),
-						async execute(params) {
-							const p = post(node, params.kind as BoardPostKind, params.title, params.body);
-							return `Posted ${p.id}.`;
-						},
-					}),
+	visit(postId: string): { post: BoardPost; citedBy: BoardPost[] } | undefined {
+		const post = this.bus.store.get("posts", postId);
+		if (!post) return undefined;
+		const citedBy = this.bus.store.listBoardPosts
+			? this.bus.store.listBoardPosts(post.runId, undefined, post.id)
+			: this.bus.store.list("posts", { runId: post.runId }).filter((p) => p.references?.some((r) => r.postId === post.id));
+		return { post, citedBy };
+	}
+
+	recent(runId: string, limit = 10): BoardPost[] {
+		return this.bus.store
+			.list("posts", { runId })
+			.sort((a, b) => b.createdAt - a.createdAt)
+			.slice(0, limit);
+	}
+}
+
+/** Ultra-terse (<50 tokens/tool) MCP/in-process board tool definitions. */
+export function boardTools(board: BoardService): ToolDefinition[] {
+	return [
+		{
+			name: "board_search",
+			description: "Search shared swarm board (returns top-k bounded excerpts ranked by relevance and peer citations).",
+			inputSchema: {
+				type: "object",
+				properties: {
+					query: { type: "string", description: "Keywords to search (empty returns latest posts)" },
+					k: { type: "number", minimum: 1, maximum: 10, description: "Max results (default 5)" },
+				},
+				required: ["query"],
+			},
+			execute(args, ctx) {
+				const query = String(args.query ?? "");
+				const k = typeof args.k === "number" ? args.k : 5;
+				const hits = board.search(ctx.runId, query, { k });
+				if (!hits.length) return { text: "(no matching posts)" };
+				const lines = hits.map(
+					({ post, citations }) =>
+						`[${post.id}] (${post.topic}, by ${post.authorAgentId}, citations=${citations})\n${searchExcerpt(post.body, query)}`,
 				);
-			}
-			if (node.role === "root" || node.role === "internal") {
-				tools.push(
-					defineTool({
-						name: "read_children_board",
-						description: "Read the board your children share (you can read it, not post on it).",
-						parameters: obj({}),
-						async execute() {
-							return render(node.id, node.id);
-						},
-					}),
-				);
-			}
-			return tools;
+				return { text: lines.join("\n\n") };
+			},
 		},
-	};
+		{
+			name: "board_publish",
+			description: "Publish a concise discovery, design note, or interface update to the shared swarm board.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					topic: { type: "string", description: "Short topic tag" },
+					summary: { type: "string", description: "1-2 sentence summary" },
+					body: { type: "string", description: "Optional full note body" },
+					parent_ids: { type: "array", items: { type: "string" }, description: "Optional cited post IDs" },
+					artifact_ids: { type: "array", items: { type: "string" }, description: "Optional artifact IDs" },
+				},
+				required: ["topic", "summary"],
+			},
+			execute(args, ctx) {
+				const refs = Array.isArray(args.parent_ids)
+					? args.parent_ids.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((postId) => ({ postId, reason: "builds_on" }))
+					: undefined;
+				const artifactIds = Array.isArray(args.artifact_ids)
+					? args.artifact_ids.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+					: undefined;
+				const post = board.publish({
+					runId: ctx.runId,
+					authorAgentId: ctx.agentId,
+					topic: String(args.topic ?? "general"),
+					summary: String(args.summary ?? ""),
+					body: typeof args.body === "string" ? args.body : undefined,
+					references: refs,
+					artifactIds,
+				});
+				return { text: `Published ${post.id} (${post.topic})`, data: { postId: post.id } };
+			},
+		},
+		{
+			name: "board_visit",
+			description: "Read the full body and citing backlinks of one board post by ID.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					post_id: { type: "string", description: "Post ID from board_search" },
+				},
+				required: ["post_id"],
+			},
+			execute(args) {
+				const res = board.visit(String(args.post_id ?? ""));
+				if (!res) return { text: `Post not found: ${String(args.post_id ?? "")}`, isError: true };
+				const backlinks = res.citedBy.length ? `\nCited by: ${res.citedBy.map((p) => p.id).join(", ")}` : "";
+				const artifacts = res.post.artifactIds?.length ? `\nArtifacts: ${res.post.artifactIds.join(", ")}` : "";
+				return { text: `[${res.post.id}] ${res.post.topic} (by ${res.post.authorAgentId})\n${res.post.body}${artifacts}${backlinks}` };
+			},
+		},
+	];
 }
