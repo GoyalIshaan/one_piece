@@ -118,6 +118,7 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 			avoidDrivers?: readonly string[];
 			minTier?: DriverTier;
 			maxTier?: DriverTier;
+			requireOutputSchema?: boolean;
 			signal?: AbortSignal;
 		} = {},
 	): Promise<DriverPoolSelection> {
@@ -128,6 +129,10 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 		}
 
 		let eligible = healthy;
+		if (opts.requireOutputSchema) {
+			const schemaCapable = eligible.filter((id) => this.driverMap.get(id)?.driver.capabilities.supportsOutputSchema);
+			if (schemaCapable.length) eligible = schemaCapable;
+		}
 		if (opts.minTier !== undefined || opts.maxTier !== undefined) {
 			const minRank = opts.minTier ? TIER_RANK[opts.minTier] : 0;
 			const maxRank = opts.maxTier ? TIER_RANK[opts.maxTier] : 2;

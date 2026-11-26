@@ -129,6 +129,7 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 				role: "planner",
 				readOnly: true,
 				canSpawn: false,
+				requireOutputSchema: true,
 				cacheKeyPrefix: `${os.runId}:refinery-planner`,
 				toolScope: {
 					board: "read",
@@ -463,6 +464,7 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 
 			// 3. Pull-queue worker slots
 			os.bus.emit(os.runId, "phase.changed", { from: "shard", to: "pull-execute", reason: `Starting ${concurrency} pull-queue worker slots` });
+			const avoidDriversByTask = new Map<string, string[]>();
 			const runSlot = async (slotIdx: number): Promise<void> => {
 				while (!signal.aborted && !os.isInCloseoutReserve()) {
 					const ready = os.readyTasks();
@@ -496,6 +498,7 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 
 					const target = claimedTarget;
 					const branchBaseRef = lastTrunkSha;
+					const avoidedDrivers = avoidDriversByTask.get(target.id);
 					let worker;
 					try {
 						worker = await os.spawnWorker({
@@ -503,6 +506,7 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 							taskId: target.id,
 							baseRef: branchBaseRef,
 							canSpawn: false,
+							...(avoidedDrivers?.length ? { avoidDrivers: avoidedDrivers } : {}),
 							cacheKeyPrefix: `${os.runId}:refinery-worker`,
 							toolScope: {
 								board: "read-write",
@@ -543,13 +547,39 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 						const criteriaBlock = target.acceptanceCriteria?.length
 							? `\nAcceptance criteria:\n${target.acceptanceCriteria.map((c) => `- ${c}`).join("\n")}`
 							: "";
+						const remWall = os.remainingWallMs?.();
+						const priorRetries = avoidDriversByTask.get(target.id)?.length ?? 0;
+						const attemptTimeoutMs =
+							priorRetries === 0 && remWall !== undefined && remWall > 40_000
+								? Math.max(45_000, Math.min(125_000, Math.floor(remWall * 0.6)))
+								: undefined;
 						const res = await worker.runTurn(
 							`Worker slot #${slotIdx + 1} — Ticket ${target.id}: ${target.title}\n\n${target.description}${ownershipBlock}${criteriaBlock}\n\nGlobal goal: ${goal}`,
-							{ signal },
+							{ signal, ...(attemptTimeoutMs ? { timeoutMs: attemptTimeoutMs } : {}) },
 						);
 						const wip = os.worktrees.commitWip(worker.workspace, `ticket(${target.id}): ${target.title}`);
 						const headAfter = os.worktrees.headSha(worker.workspace);
 						const hasChanges = Boolean(wip) || (Boolean(headAfter) && headAfter !== branchBaseRef);
+
+						// Cross-provider zero-diff straggler handoff: if a worker timed out on its first attempt
+						// with ZERO edits while wall budget remains, re-open the ticket avoiding that provider so
+						// an idle slot on another provider can finish it cleanly!
+						if (
+							res.status === "interrupted" &&
+							!hasChanges &&
+							priorRetries === 0 &&
+							!signal.aborted &&
+							!os.isInCloseoutReserve()
+						) {
+							const nextAvoid = [...(avoidDriversByTask.get(target.id) ?? []), worker.agent.driverId];
+							avoidDriversByTask.set(target.id, nextAvoid);
+							os.store.releaseTaskLease(target.id, claimedLeaseOwner, claimedFencingToken, "open", {
+								result: `Straggler timeout with 0 edits on ${worker.agent.driverId}; re-queued for cross-provider handoff.`,
+							});
+							os.bus.emit(os.runId, "task.ready", { taskId: target.id, title: target.title, reason: "straggler-handoff", avoidedDriver: worker.agent.driverId }, worker.agent.id);
+							continue;
+						}
+
 						const status = res.status === "completed" ? "done" : "blocked";
 						os.store.releaseTaskLease(target.id, claimedLeaseOwner, claimedFencingToken, status, {
 							result: res.finalText.slice(0, 800),

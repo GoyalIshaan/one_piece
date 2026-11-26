@@ -254,6 +254,8 @@ export interface SpawnWorkerRequest {
 	minTier?: DriverTier;
 	/** Maximum capability tier for driver selection (e.g. "sidekick"). */
 	maxTier?: DriverTier;
+	/** Prefer drivers supporting native structured JSON `outputSchema` (e.g. planner/scout). */
+	requireOutputSchema?: boolean;
 	/** Reuse an existing workspace path instead of creating a new git worktree. */
 	workspace?: string;
 	/** Base git ref to branch the new worktree from (defaults to trunk baseSha). */

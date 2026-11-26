@@ -193,6 +193,8 @@ export interface QuotaPoolRouter {
 			avoidDrivers?: readonly string[];
 			minTier?: DriverTier;
 			maxTier?: DriverTier;
+			/** Prefer drivers whose `capabilities.supportsOutputSchema` is true (graceful fallback if none). */
+			requireOutputSchema?: boolean;
 			signal?: AbortSignal;
 		},
 	): Promise<DriverPoolSelection>;

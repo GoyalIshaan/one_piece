@@ -700,4 +700,99 @@ describe("RSI Harness Upgrades: Field Guide, Semantic Auto-Repair, Fail-Closed T
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	it("hands off a zero-diff straggler ticket in pull-refinery to a different provider and completes it (RSI-8)", async () => {
+		const root = mkdtempSync(join(tmpdir(), "rsi8-straggler-handoff-"));
+		try {
+			const seed = join(root, "seed");
+			mkdirSync(seed, { recursive: true });
+			writeFileSync(join(seed, "out.txt"), "todo\n");
+
+			const stalledDriver: WorkerDriver = {
+				id: "staller",
+				kind: "agy-acp",
+				capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema: false, supportsMcpHttp: false },
+				async healthCheck() {
+					return { ok: true, driverId: "staller", kind: "agy-acp" };
+				},
+				async spawn() {
+					return {
+						driverId: "staller",
+						async runTurn() {
+							// Simulates a worker that timed out with ZERO workspace edits!
+							return { status: "interrupted", finalText: "" };
+						},
+						async close() {},
+					};
+				},
+			};
+			const fastDriver: WorkerDriver = {
+				id: "fast",
+				kind: "codex-app-server",
+				capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema: true, supportsMcpHttp: false },
+				async healthCheck() {
+					return { ok: true, driverId: "fast", kind: "codex-app-server" };
+				},
+				async spawn(spec) {
+					return {
+						driverId: "fast",
+						async runTurn() {
+							if (spec.role === "planner") {
+								return {
+									status: "completed",
+									finalText: JSON.stringify({
+										tasks: [{ key: "t1", title: "Finish out.txt", description: "Write FIXED", owned_paths: ["out.txt"], depends_on: [] }],
+									}),
+								};
+							}
+							writeFileSync(join(spec.workspace, "out.txt"), "FIXED\n");
+							return { status: "completed", finalText: "wrote FIXED" };
+						},
+						async close() {},
+					};
+				},
+			};
+
+			const store = new SqliteStore(join(root, "rsi8.db"));
+			const os = await SwarmOS.create({
+				runDir: join(root, "run"),
+				workspace: seed,
+				topology: "pull-refinery",
+				goal: { title: "Straggler handoff", text: "Write FIXED to out.txt" },
+				verifier: {
+					name: "fixed-check",
+					version: "1.0.0",
+					scopes: ["deliverable"],
+					defaultScope: "deliverable",
+					async check({ workspace }) {
+						const ok = readFileSync(join(workspace, "out.txt"), "utf8").trim() === "FIXED";
+						return { status: ok ? "passed" : "failed", score: ok ? 1 : 0, message: ok ? "ok" : "todo" };
+					},
+				},
+				store,
+				router: new DriverQuotaRouter({
+					drivers: [
+						{ driver: stalledDriver, config: { id: "staller", kind: "agy-acp", maxConcurrent: 2, weight: 100 } },
+						{ driver: fastDriver, config: { id: "fast", kind: "codex-app-server", maxConcurrent: 2, weight: 1 } },
+					],
+					roles: { default: ["staller", "fast"] },
+				}),
+			});
+			try {
+				const out = await os.execute(createTopology("pull-refinery", { concurrency: 1 }));
+				// Planner MUST have been routed to `fast` (supportsOutputSchema=true despite 100x lower weight!),
+				// and worker attempt 1 (routed to heavy-weight `staller`, returning interrupted+0-diff) MUST hand off to `fast`!
+				expect(readFileSync(join(os.worktrees.trunkPath, "out.txt"), "utf8").trim()).toBe("FIXED");
+				expect(out.nominatedFindingId).toBeTruthy();
+				const handoffs = store.events(os.runId, { types: ["task.ready"] }).filter((e) => e.data.reason === "straggler-handoff");
+				expect(handoffs.length).toBe(1);
+				expect(handoffs[0]!.data.avoidedDriver).toBe("staller");
+			} finally {
+				await os.dispose();
+				store.close();
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
 });

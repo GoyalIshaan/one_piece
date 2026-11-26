@@ -781,6 +781,7 @@ export class SwarmOS implements SwarmOsApi {
 			avoidDrivers: req.avoidDrivers,
 			minTier: req.minTier,
 			maxTier: req.maxTier,
+			requireOutputSchema: req.requireOutputSchema,
 			signal: this.runAbort.signal,
 		});
 

@@ -129,6 +129,7 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 					handle: "scout",
 					readOnly: true,
 					canSpawn: false,
+					requireOutputSchema: true,
 					cacheKeyPrefix: `${os.runId}:elastic-scout`,
 					toolScope: {
 						board: "read-write",

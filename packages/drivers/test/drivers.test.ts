@@ -462,6 +462,34 @@ describe("drivers & 3-class quota classification", () => {
 			a.release();
 			b.release();
 		}
+
+		// Verify requireOutputSchema prefers supportsOutputSchema=true drivers and gracefully falls back when none exist (RSI-8)
+		const mkSchemaDrv = (id: string, supportsOutputSchema: boolean) => ({
+			id,
+			kind: "codex-exec" as const,
+			capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema, supportsMcpHttp: false },
+			healthCheck: async () => ({ ok: true, driverId: id, kind: "codex-exec" as const }),
+			spawn: async () => ({ driverId: id, runTurn: async () => ({ status: "completed" as const, finalText: "" }), close: async () => {} }),
+		});
+		const schemaRouter = new DriverQuotaRouter({
+			drivers: [
+				{ driver: mkSchemaDrv("no-schema", false), config: { id: "no-schema", kind: "codex-exec", maxConcurrent: 2 } },
+				{ driver: mkSchemaDrv("yes-schema", true), config: { id: "yes-schema", kind: "codex-exec", maxConcurrent: 2 } },
+			],
+			roles: { default: ["no-schema", "yes-schema"] },
+		});
+		for (let i = 0; i < 10; i++) {
+			const sel = await schemaRouter.acquireForRole("planner", { requireOutputSchema: true });
+			expect(sel.driver.id).toBe("yes-schema");
+			sel.release();
+		}
+		const fallbackRouter = new DriverQuotaRouter({
+			drivers: [{ driver: mkSchemaDrv("only-no-schema", false), config: { id: "only-no-schema", kind: "codex-exec", maxConcurrent: 2 } }],
+			roles: { default: ["only-no-schema"] },
+		});
+		const fb = await fallbackRouter.acquireForRole("planner", { requireOutputSchema: true });
+		expect(fb.driver.id).toBe("only-no-schema");
+		fb.release();
 	});
 
 	it("preserves accumulated token usage when a Codex app-server turn is interrupted (RSI-7)", async () => {

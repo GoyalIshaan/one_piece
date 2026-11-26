@@ -68,6 +68,7 @@ export function hierarchyTopology(opts: HierarchyTopologyOptions = {}): Topology
 				role: "planner",
 				readOnly: true,
 				canSpawn: false,
+				requireOutputSchema: true,
 				cacheKeyPrefix: `${os.runId}:hierarchy-planner`,
 				toolScope: {
 					board: "read",

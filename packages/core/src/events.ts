@@ -52,7 +52,7 @@ export interface LifecycleEvents {
 	"driver.tool_result": { tool: string; isError: boolean; outputPreview?: string; durationMs?: number; isMcp?: boolean; driverId?: string };
 	"driver.error": { message: string; driverId?: string };
 	"task.created": { taskId: string; title: string; dependsOn: string[] };
-	"task.ready": { taskId: string; title: string };
+	"task.ready": { taskId: string; title: string; reason?: string; avoidedDriver?: string };
 	"task.claimed": { taskId: string; agentId: string; fencingToken: number; leaseExpiresAt: number };
 	"task.status": { taskId: string; status: TaskStatus; result?: string };
 	"board.posted": {
