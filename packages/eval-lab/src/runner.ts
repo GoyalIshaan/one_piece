@@ -175,10 +175,19 @@ async function runSilentBestOfN(
 			let mergedSeats = 0;
 			for (let i = 0; i < subReceipts.length; i++) {
 				const sub = subReceipts[i];
-				if (!sub?.nominatedArtifactDir || !existsSync(sub.nominatedArtifactDir)) continue;
+				if (!sub) continue;
 				const seatRel = join("submissions", `seat_${i}.json`);
-				const srcSeatFile = join(sub.nominatedArtifactDir, seatRel);
-				if (existsSync(srcSeatFile)) {
+				// Individual isolated seats can only produce 1/N of the sharded deliverable, so per-seat
+				// N/N publicCheck fails and leaves `nominatedArtifactDir` unset. Scan the seat's nominated
+				// dir first, then its latest captured snapshot containing `submissions/seat_i.json`.
+				const candidateDirs: string[] = [];
+				if (sub.nominatedArtifactDir) candidateDirs.push(sub.nominatedArtifactDir);
+				for (let k = sub.candidateSnapshots.length - 1; k >= 0; k--) {
+					const snapDir = sub.candidateSnapshots[k]?.dir;
+					if (snapDir) candidateDirs.push(snapDir);
+				}
+				const srcSeatFile = candidateDirs.map((d) => join(d, seatRel)).find((p) => existsSync(p));
+				if (srcSeatFile) {
 					mkdirSync(join(assembledDir, "submissions"), { recursive: true });
 					cpSync(srcSeatFile, join(assembledDir, seatRel));
 					mergedSeats += 1;
@@ -203,12 +212,14 @@ async function runSilentBestOfN(
 					atWallMs: Math.max(0, Date.now() - began),
 					acceptedByVerifier: pub.passed,
 				});
-				chosen = {
-					dir: assembledDir,
-					sha256: assembledSha,
-					score: pub.score,
-					passed: pub.passed,
-				};
+				if (pub.passed) {
+					chosen = {
+						dir: assembledDir,
+						sha256: assembledSha,
+						score: pub.score,
+						passed: pub.passed,
+					};
+				}
 			}
 		}
 

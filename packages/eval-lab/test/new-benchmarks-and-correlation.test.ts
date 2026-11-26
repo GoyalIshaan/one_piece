@@ -313,10 +313,20 @@ describe("Cross-Benchmark Rank Correlation Engine (Proxy -> Long-Horizon Transfe
 					return {
 						runId: spec.runId,
 						status: "done",
-						autoNominated: true,
-						nominatedArtifactDir: spec.workspaceDir,
-						nominatedSha256: `sha-seat-${idx}`,
-						candidateSnapshots: [],
+						autoNominated: false,
+						// Mirror real live single-seat behavior: 1/4 seat fails N/N publicCheck so nominatedArtifactDir is unset,
+						// while candidateSnapshots holds the seat's frozen submission containing `submissions/seat_i.json`.
+						candidateSnapshots: [
+							{
+								id: `snap-seat-${idx}`,
+								agentId: `seat-${idx}`,
+								dir: spec.workspaceDir,
+								sha256: `sha-seat-${idx}`,
+								atTokens: 1000,
+								atWallMs: 100,
+								acceptedByVerifier: false,
+							},
+						],
 						harnessFaults: [],
 						driverIds: ["probe"],
 						modelIds: ["probe"],

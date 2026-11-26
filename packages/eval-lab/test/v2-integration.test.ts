@@ -397,8 +397,12 @@ describe("eval-lab <-> one_piece v2 SwarmOS end-to-end integration", () => {
 			expect(silent.hasHarnessFault).toBe(false);
 			expect(swarm.hasHarnessFault).toBe(false);
 			expect(solo.deliveredPass).toBe(false);
+			expect(solo.autoNominated).toBe(false);
 			expect(silent.deliveredPass).toBe(false);
-			expect(silent.autoNominated).toBe(false);
+			// Fair non-strawman silent_bon mechanically assembles all 4 disjoint seat files (passing public schema),
+			// yet without Board communication Seats 1..3 have offset=0 so only Seat 0 (1/4 = 0.25) is correct.
+			expect(silent.autoNominated).toBe(true);
+			expect(silent.deliveredScore).toBe(0.25);
 			expect(swarm.deliveredPass).toBe(true);
 			expect(swarm.deliveredScore).toBe(1);
 			expect(swarm.losses.nominationLoss).toBe(0);
