@@ -130,13 +130,13 @@ With `requireQuietHost`, the launcher waits for an approval byte on the same
 descriptor when `ONE_PIECE_JOB_ADMISSION_ACK` is set. The scheduler checks
 `hostProcessNames` after the launcher acquires the lease and before the command runs.
 
-Use `one-piece peer-eval` for controlled prompt comparisons, `one-piece peer-climb` for iterative proposals with held-out confirmation, and `one-piece peer-transfer` for a three-peer release using the live harness tools. [Swarm-agent evals and calibration](docs/SWARM-AGENT-EVALS.md)
+Use `one-piece peer-eval` for controlled prompt comparisons, `one-piece peer-climb` for iterative proposals with held-out confirmation, and `one-piece peer-transfer` for a three-peer release using the live harness tools.
 
-Run `npm run eval:peer` to compare individual models and prompt variants in a fixed peer seat. [Focal peer benchmark](docs/SWARM-FOCAL-PEER.md)
+Run `npm run eval:peer` to compare individual models and prompt variants in a fixed peer seat.
 
-Use the paired delivery benchmark to measure how one peer changes a live receiver's verified output under the same budget. [Peer contribution benchmark](docs/SWARM-PEER-VALUE.md)
+Use the paired delivery benchmark to measure how one peer changes a live receiver's verified output under the same budget.
 
-Run `npm run eval:swarm` to score a peer and its team on matched evidence-routing tasks. The native suite also verifies delivered artifacts at measured token budgets. [Three-level benchmark, policy adapter and results](docs/SWARM-THREE-LEVELS.md) · [External benchmark results and new coordination tests](docs/SWARM-CROSS-SUITE-CAMPAIGN.md)
+Run `npm run eval:swarm` to score a peer and its team on matched evidence-routing tasks. The native suite also verifies delivered artifacts at measured token budgets.
 
 The Evals dashboard shows the current task, its last activity, and scores as tasks finish.
 Completed rounds save a report and machine-readable results in `./.one_piece/evals/`.

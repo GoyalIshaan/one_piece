@@ -1,9 +1,0 @@
-id,n,arm,firstS,repeatS,submitted,tokens,finish,modelErrors
-I-01,2,deployed,1.0,1.0,2,8846,All seats submitted,0
-I-01,2,finalist,0.0,1.0,2,6816,All seats submitted,0
-I-05,5,deployed,0.2,1.0,5,26782,All seats submitted,0
-I-05,5,finalist,0.0,1.0,5,27573,All seats submitted,0
-II-18,2,deployed,0.0,1.0,2,10778,All seats submitted,0
-II-18,2,finalist,1.0,1.0,2,11449,All seats submitted,0
-III-22,2,deployed,0.0,0.0,2,18975,All seats submitted,0
-III-22,2,finalist,0.0,0.0,2,15484,All seats submitted,0
