@@ -57,12 +57,15 @@ export class GitWorktreeManager implements WorktreeManager {
 	readonly repoRoot: string;
 	readonly baseSha: string;
 	private readonly worktreeRoot: string;
+	private readonly refRoot: string;
 	private readonly runId: string;
+	private readonly detachedWorktrees = new Set<string>();
 	private trunkState: TrunkWorktreeState = { status: "uninitialized" };
 
 	constructor(sourceWorkspace: string, runDir: string, runId: string) {
 		this.runId = runId;
 		this.worktreeRoot = resolve(runDir, "worktrees");
+		this.refRoot = resolve(runDir, "refs");
 		mkdirSync(this.worktreeRoot, { recursive: true });
 
 		const resolvedSource = resolve(sourceWorkspace);
@@ -310,17 +313,95 @@ export class GitWorktreeManager implements WorktreeManager {
 	}
 
 	resetTrunk(ref: string): boolean {
-		const trunk = this.trunkPath;
+		return this.resetWorktree(this.trunkPath, ref);
+	}
+
+	resetWorktree(worktreePath: string, ref: string): boolean {
 		try {
-			git(trunk, ["reset", "--hard", ref]);
-			git(trunk, ["clean", "-fd"]);
+			git(worktreePath, ["reset", "--hard", ref]);
+			git(worktreePath, ["clean", "-fd"]);
 			return true;
 		} catch {
 			return false;
 		}
 	}
 
+	diffRefs(baseRef: string, targetRef: string, opts: { maxChars?: number; paths?: readonly string[] } = {}): string {
+		const maxChars = Math.max(512, opts.maxChars ?? 24_000);
+		const safePaths = (opts.paths ?? []).filter((p) => p && !p.startsWith("/") && !p.includes(".."));
+		try {
+			const args = ["diff", "--no-color", `${baseRef}..${targetRef}`];
+			if (safePaths.length) args.push("--", ...safePaths);
+			const raw = git(this.repoRoot, args);
+			if (!raw) return "(no diff between refs)";
+			return raw.length > maxChars ? `${raw.slice(0, maxChars)}\n... [truncated at ${maxChars} chars]` : raw;
+		} catch (error) {
+			return `(diff unavailable: ${error instanceof Error ? error.message : String(error)})`;
+		}
+	}
+
+	showFileAtRef(ref: string, relPath: string, opts: { maxChars?: number } = {}): string {
+		const maxChars = Math.max(512, opts.maxChars ?? 24_000);
+		const normalized = relPath.replace(/\\/g, "/").replace(/^\.\//, "").trim();
+		if (!normalized || normalized.startsWith("/") || normalized.split("/").includes("..")) {
+			throw new Error(`Invalid relative path for showFileAtRef: "${relPath}"`);
+		}
+		const raw = git(this.repoRoot, ["show", `${ref}:${normalized}`]);
+		return raw.length > maxChars ? `${raw.slice(0, maxChars)}\n... [truncated at ${maxChars} chars]` : raw;
+	}
+
+	createReadOnlyReference(ref: string, label: string): string {
+		return this.createDetachedWorktree(ref, `ref-${label}`);
+	}
+
+	createDetachedWorktree(baseRef: string, label: string): string {
+		mkdirSync(this.refRoot, { recursive: true });
+		const safeLabel = label.replace(/[^a-zA-Z0-9._-]/g, "-").slice(0, 64) || "ref";
+		const targetPath = join(this.refRoot, safeLabel);
+		if (existsSync(targetPath)) {
+			this.remove(targetPath);
+		}
+		git(this.repoRoot, ["worktree", "add", "--detach", targetPath, baseRef]);
+		this.writeGitExclude(targetPath, WORKTREE_EXCLUDE_PATTERNS);
+		this.mirrorUntrackedWorkspaceLinks(targetPath);
+		this.detachedWorktrees.add(targetPath);
+		return targetPath;
+	}
+
+	mergeBranchIntoWorktree(worktreePath: string, branch: string, message?: string): MergeTrunkResult {
+		try {
+			git(worktreePath, [
+				"-c", "user.name=one-piece",
+				"-c", "user.email=one-piece@local",
+				"merge", "--no-ff", "--no-edit", "-m", message ?? `one-piece merge ${branch}`, branch,
+			]);
+			return { ok: true, commitSha: git(worktreePath, ["rev-parse", "HEAD"]) };
+		} catch (error) {
+			let conflictFiles: string[] = [];
+			try {
+				const unmerged = git(worktreePath, ["diff", "--name-only", "--diff-filter=U"]);
+				conflictFiles = unmerged ? unmerged.split(/\r?\n/).filter(Boolean) : [];
+			} catch {
+				// Ignore unmerged file inspection failure.
+			}
+			try {
+				git(worktreePath, ["merge", "--abort"]);
+			} catch {
+				// No merge in progress.
+			}
+			return { ok: false, conflictFiles, error: error instanceof Error ? error.message : String(error) };
+		}
+	}
+
+	cleanupDetachedWorktrees(): void {
+		for (const wt of [...this.detachedWorktrees]) {
+			this.remove(wt);
+			this.detachedWorktrees.delete(wt);
+		}
+	}
+
 	remove(worktreePath: string): void {
+		this.detachedWorktrees.delete(worktreePath);
 		try {
 			git(this.repoRoot, ["worktree", "remove", "--force", worktreePath]);
 		} catch {

@@ -428,6 +428,35 @@ export class TrustLayer implements TrustService {
 		return { finding: best, revision: best.submissions.at(-1)!.revision };
 	}
 
+	/**
+	 * Closeout-only fallback when zero `accepted` findings exist:
+	 * returns the highest-scoring frozen verified snapshot with strictly positive score > 0
+	 * from an executable verifier (keeps finding `status: "rejected"` so false-certification stays strictly honest).
+	 */
+	bestPartialScoredFinding(runId: string): { finding: Finding; revision: number; score: number } | undefined {
+		if (!this.verifier) return undefined;
+		const partials = this.bus.store
+			.list("findings", { runId })
+			.filter((f) => {
+				if (f.submissions.length === 0) return false;
+				const latestSub = f.submissions.at(-1)!;
+				if (!latestSub.artifactSha256 || !latestSub.snapshotDir) return false;
+				const score = f.score ?? latestSub.score;
+				return typeof score === "number" && Number.isFinite(score) && score > 0;
+			});
+		if (!partials.length) return undefined;
+		partials.sort((a, b) => {
+			const scoreA = a.score ?? a.submissions.at(-1)?.score ?? 0;
+			const scoreB = b.score ?? b.submissions.at(-1)?.score ?? 0;
+			if (scoreB !== scoreA) return scoreB - scoreA;
+			return b.updatedAt - a.updatedAt;
+		});
+		const best = partials[0]!;
+		const latestSub = best.submissions.at(-1)!;
+		const score = best.score ?? latestSub.score ?? 0;
+		return { finding: best, revision: latestSub.revision, score };
+	}
+
 	async drainPending(): Promise<void> {
 		await Promise.allSettled([...this.inFlight]);
 	}

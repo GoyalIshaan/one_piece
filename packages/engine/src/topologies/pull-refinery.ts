@@ -123,6 +123,9 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 		description: "DAG backlog -> parallel lease-claiming CLI workers -> serialized CI-gated Refinery merge queue.",
 		async run(os: SwarmOsApi, { goal, rubric, signal, closeoutSignal }): Promise<TopologyOutcome> {
 			// 1. Shard backlog
+			if ((await os.waitIfPaused?.(signal)) === "coalescing") {
+				return { status: "stopped", summary: "Pull-Refinery coalesced before sharding." };
+			}
 			os.bus.emit(os.runId, "phase.changed", { to: "shard", reason: "Building leased task DAG" });
 			const planner = await os.spawnWorker({
 				role: "planner",
@@ -202,6 +205,8 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 			const avoidDriversByTask = new Map<string, string[]>();
 			const runSlot = async (slotIdx: number): Promise<void> => {
 				while (!signal.aborted && !os.isInCloseoutReserve()) {
+					const gate = await os.waitIfPaused?.(signal);
+					if (gate === "coalescing" || gate === "aborted") break;
 					const ready = os.readyTasks();
 					if (!ready.length) {
 						const remaining = os.store.list("tasks", { runId: os.runId }).some((t) => t.status === "open" || t.status === "claimed");

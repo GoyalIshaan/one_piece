@@ -1,9 +1,14 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Store } from "@one-piece/core";
+import {
+	newId,
+	type RunControlCommandRecord,
+	type RunControlPayload,
+	type Store,
+} from "@one-piece/core";
 
 const HTML_PATH = fileURLToPath(new URL("../web/index.html", import.meta.url));
 
@@ -17,6 +22,74 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 	res.end(payload);
 }
 
+function readJsonBody(req: IncomingMessage, maxBytes = 65_536): Promise<unknown> {
+	return new Promise((resolveBody, rejectBody) => {
+		const chunks: Buffer[] = [];
+		let total = 0;
+		req.on("data", (chunk: Buffer) => {
+			total += chunk.length;
+			if (total > maxBytes) {
+				rejectBody(new Error("Request body too large"));
+				req.destroy();
+				return;
+			}
+			chunks.push(chunk);
+		});
+		req.on("end", () => {
+			try {
+				const raw = Buffer.concat(chunks).toString("utf8").trim();
+				resolveBody(raw ? JSON.parse(raw) : {});
+			} catch (err) {
+				rejectBody(err);
+			}
+		});
+		req.on("error", rejectBody);
+	});
+}
+
+function validateControlPayload(raw: unknown): RunControlPayload | undefined {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+	const obj = raw as Record<string, unknown>;
+	switch (obj.type) {
+		case "pause":
+			return { type: "pause", ...(typeof obj.reason === "string" ? { reason: obj.reason } : {}) };
+		case "resume":
+			return { type: "resume", ...(typeof obj.steeringNote === "string" ? { steeringNote: obj.steeringNote } : {}) };
+		case "steer": {
+			if (typeof obj.message !== "string" || !obj.message.trim()) return undefined;
+			const scope = obj.scope === "next_wave" || obj.scope === "live_workers" || obj.scope === "both" ? obj.scope : undefined;
+			return {
+				type: "steer",
+				message: obj.message.trim(),
+				...(typeof obj.targetAgentId === "string" ? { targetAgentId: obj.targetAgentId } : {}),
+				...(scope ? { scope } : {}),
+			};
+		}
+		case "update_bound": {
+			if (!obj.override || typeof obj.override !== "object" || Array.isArray(obj.override)) return undefined;
+			const ov = obj.override as Record<string, unknown>;
+			return {
+				type: "update_bound",
+				override: {
+					...(ov.hardCeiling === null || (typeof ov.hardCeiling === "number" && Number.isFinite(ov.hardCeiling))
+						? { hardCeiling: ov.hardCeiling as number | null }
+						: {}),
+					...(ov.paradigmCeiling === null || (typeof ov.paradigmCeiling === "number" && Number.isFinite(ov.paradigmCeiling))
+						? { paradigmCeiling: ov.paradigmCeiling as number | null }
+						: {}),
+					...(typeof ov.activeBottleneck === "string" ? { activeBottleneck: ov.activeBottleneck } : {}),
+					...(typeof ov.markAssumptionBroken === "string" ? { markAssumptionBroken: ov.markAssumptionBroken } : {}),
+				},
+				...(typeof obj.reason === "string" ? { reason: obj.reason } : {}),
+			};
+		}
+		case "coalesce":
+			return { type: "coalesce", ...(typeof obj.reason === "string" ? { reason: obj.reason } : {}) };
+		default:
+			return undefined;
+	}
+}
+
 export interface DashboardHandle {
 	url: string;
 	port: number;
@@ -24,8 +97,8 @@ export interface DashboardHandle {
 }
 
 /**
- * Lightweight local-only (127.0.0.1) v2 telemetry dashboard.
- * Reads normalized SQLite WAL collections directly with zero dual tree/peer branching.
+ * Lightweight local-only (127.0.0.1) v4 telemetry & control-plane dashboard.
+ * Reads normalized SQLite WAL collections directly and accepts external control commands.
  */
 export async function startDashboard(
 	store: Store,
@@ -71,6 +144,61 @@ export async function startDashboard(
 			return;
 		}
 
+		const controlMatch = /^\/api\/runs\/([^/]+)\/control$/.exec(url.pathname);
+		if (controlMatch && req.method === "POST") {
+			const runId = decodeURIComponent(controlMatch[1]!);
+			const run = store.get("runs", runId);
+			if (!run) {
+				sendJson(res, 404, { error: "Run not found" });
+				return;
+			}
+			void readJsonBody(req)
+				.then((raw) => {
+					const payload = validateControlPayload(raw);
+					if (!payload) {
+						sendJson(res, 400, { error: "Invalid RunControlPayload" });
+						return;
+					}
+					const record: RunControlCommandRecord = {
+						id: newId("ctl"),
+						runId,
+						issuedBy: "dashboard",
+						createdAt: Date.now(),
+						payload,
+					};
+					store.put("control_commands", record);
+					sendJson(res, 202, { commandId: record.id, runId, type: payload.type });
+				})
+				.catch((err) => {
+					sendJson(res, 400, { error: err instanceof Error ? err.message : "Bad JSON body" });
+				});
+			return;
+		}
+
+		const briefsMatch = /^\/api\/runs\/([^/]+)\/briefs$/.exec(url.pathname);
+		if (briefsMatch && req.method === "GET") {
+			const runId = decodeURIComponent(briefsMatch[1]!);
+			const run = store.get("runs", runId);
+			if (!run) {
+				sendJson(res, 404, { error: "Run not found" });
+				return;
+			}
+			const runDir = typeof run.config.runDir === "string" ? run.config.runDir : undefined;
+			const briefsDir = runDir ? join(runDir, "checkpoints") : undefined;
+			if (!briefsDir || !existsSync(briefsDir)) {
+				sendJson(res, 200, { runId, briefs: [] });
+				return;
+			}
+			const files = readdirSync(briefsDir).filter((f) => f.endsWith(".md")).sort();
+			const briefs = files.map((name) => ({
+				name,
+				path: join(briefsDir, name),
+				markdown: readFileSync(join(briefsDir, name), "utf8"),
+			}));
+			sendJson(res, 200, { runId, briefs });
+			return;
+		}
+
 		const runMatch = /^\/api\/runs\/([^/]+)$/.exec(url.pathname);
 		if (runMatch) {
 			const runId = decodeURIComponent(runMatch[1]!);
@@ -79,8 +207,19 @@ export async function startDashboard(
 				sendJson(res, 404, { error: "Run not found" });
 				return;
 			}
+			const controlCommands = store
+				.list("control_commands", { runId })
+				.sort((a, b) => b.createdAt - a.createdAt)
+				.slice(0, 20);
+			const boundEvents = store.events(runId, { types: ["bound.estimated"] });
+			const latestBound = boundEvents.at(-1)?.data ?? null;
+			const controlEvents = store.events(runId, { types: ["run.control_applied"] });
+			const controlState = controlEvents.at(-1)?.data.nextState ?? "running";
 			sendJson(res, 200, {
 				run,
+				controlState,
+				controlCommands,
+				latestBound,
 				agents: store.list("agents", { runId }),
 				tasks: store.list("tasks", { runId }),
 				posts: store.list("posts", { runId }),
@@ -128,17 +267,17 @@ export async function startDashboard(
 	});
 
 	const port = opts.port ?? 4747;
-	await new Promise<void>((resolve, reject) => {
-		server.once("error", reject);
+	await new Promise<void>((resolveListen, rejectListen) => {
+		server.once("error", rejectListen);
 		server.listen(port, "127.0.0.1", () => {
-			server.off("error", reject);
-			resolve();
+			server.off("error", rejectListen);
+			resolveListen();
 		});
 	});
 	const actualPort = (server.address() as AddressInfo).port;
 	return {
 		port: actualPort,
 		url: `http://127.0.0.1:${actualPort}`,
-		close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+		close: () => new Promise<void>((resolveClose) => server.close(() => resolveClose())),
 	};
 }

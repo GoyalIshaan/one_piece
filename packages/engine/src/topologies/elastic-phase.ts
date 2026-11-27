@@ -123,6 +123,9 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 			let lanes: ExploreLane[] = [];
 
 			// --- Phase 1: Scout & Contract Partition (N=1, skipped on pre-sharded tasks) ---
+			if ((await os.waitIfPaused?.(signal)) === "coalescing") {
+				return { status: "stopped", summary: "Elastic-Phase coalesced before scouting." };
+			}
 			if (!hasSeatConfigs && !signal.aborted && !os.isInCloseoutReserve()) {
 				os.bus.emit(os.runId, "phase.changed", { to: "elastic-scout", reason: `Scouting & partitioning into <= ${targetPeers} parallel lanes` });
 				const scout = await os.spawnWorker({
@@ -134,6 +137,7 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 					cacheKeyPrefix: `${os.runId}:elastic-scout`,
 					toolScope: {
 						board: "read-write",
+						defaultChannel: "swarm",
 						artifacts: true,
 						findings: false,
 						tasks: false,
@@ -174,6 +178,9 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 			}
 
 			// --- Phase 2: Wide Parallel Exploration (N = K) ---
+			if ((await os.waitIfPaused?.(signal)) === "coalescing") {
+				return { status: "stopped", summary: "Elastic-Phase coalesced before wide exploration." };
+			}
 			const wideCount = hasSeatConfigs ? opts.seatConfigs!.length : Math.max(1, lanes.length);
 			os.bus.emit(os.runId, "phase.changed", {
 				from: hasSeatConfigs ? undefined : "elastic-scout",
@@ -215,6 +222,7 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 						cacheKeyPrefix: `${os.runId}:elastic-worker`,
 						toolScope: {
 							board: "read-write",
+							defaultChannel: "swarm",
 							artifacts: true,
 							// When running multiple parallel lanes, individual 1/K branches are partial;
 							// hide report_finding so lanes never pollute findings or waste turns on partial rejections —
@@ -226,7 +234,7 @@ export function elasticPhaseTopology(opts: ElasticPhaseOptions = {}): TopologyPl
 						},
 						systemPrompt: [
 							"You are a focused specialist engineer in the Wide Exploration phase of an elastic swarm.",
-							"Work cleanly in your isolated git worktree, publish key contracts/discoveries/subtotals via `board_publish`, wait for sibling data via `board_wait` when needed, preserve all cross-module invariants, verify locally, and exit cleanly.",
+							"Work cleanly in your isolated git worktree, share key contracts/discoveries/subtotals on `#swarm` via `board_post`, wait for sibling data via `board_wait` when needed, preserve all cross-module invariants, verify locally, and exit cleanly.",
 						].join("\n"),
 					});
 				}),

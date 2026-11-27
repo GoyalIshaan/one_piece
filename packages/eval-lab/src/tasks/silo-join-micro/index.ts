@@ -193,7 +193,7 @@ export const siloJoinMicroTask: EvalTask = {
 					"Other seats' private shards are kernel-denied by the sandbox — coordinate with peers strictly via the shared message board!",
 					"Workflow:",
 					`1. Read ONLY your own shard at ${shardFile} and compute the sum of its \`values\` array.`,
-					`2. Immediately call \`board_publish(topic="shard-subtotal", summary="seat ${seatIdx} subtotal=<SUM>", body="...", labels={"seat": "${seatIdx}"})\`.`,
+					`2. Immediately call \`board_post(topic="shard-subtotal", title="seat ${seatIdx} subtotal=<SUM>", text="seat=${seatIdx} subtotal=<SUM>", channel="swarm")\`.`,
 					`3. Call \`board_wait(topic="shard-subtotal", min_posts=${n}, timeout_seconds=25)\` (call it again if it times out before all ${n} seats appear) until all ${n} seats have published their subtotals.`,
 					`4. Compute your offset = sum of subtotals for seats 0..${seatIdx - 1} (0 if seat 0), then compute your global prefix array and write ONLY \`submissions/seat_${seatIdx}.json\` as \`{"seat": ${seatIdx}, "prefix": [...]}\`.`,
 					`5. Verify your JSON file format (12 integers in \`prefix\`) and finish cleanly — the swarm will automatically assemble all ${n} seats onto trunk and run the full ${n}-seat verifier (no need to call \`report_finding\` on a partial 1/${n} workspace).`,

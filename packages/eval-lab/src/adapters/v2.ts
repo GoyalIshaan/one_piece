@@ -118,6 +118,7 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 					enableBlindReview: options.enableBlindReview ?? false,
 					enableFieldGuide: options.enableFieldGuide ?? true,
 					decisionClient: options.decisionClient,
+					controlMode: "eval",
 					networkOffWorkers: true,
 					allowDockerSocket: spec.allowDockerSocket ?? false,
 					rawConfig: {
@@ -178,7 +179,7 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 					return [
 						`Seat assignment: You are Seat ${seatIdx} of ${totalSeats} (seats 0..${totalSeats - 1}).`,
 						`Your private shard directory is: ${shardDir} (primary file: ${shardFile})`,
-						"Other seats' private shards are kernel-denied by the sandbox — coordinate with peers strictly via the shared message board (`board_publish`, `board_wait`, `board_search`, `board_visit`)!",
+						"Other seats' private shards are kernel-denied by the sandbox — coordinate with peers strictly via the shared message board (`board_post`, `board_edit`, `board_wait`, `board_search`, `board_visit`)!",
 						`Read ONLY your own shard, publish concise findings promptly, wait for all ${totalSeats} seats with \`board_wait\`, and write your seat deliverable cleanly in your worktree.`,
 					].join("\n");
 				};
@@ -214,7 +215,7 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 					concurrency: n,
 					peers: Math.max(2, n),
 					populationPerGen: n,
-					generations: 2,
+					controlMode: "eval",
 					rounds: shards.length > 0 ? 1 : 2,
 					...(seatConfigs ? { seatConfigs } : {}),
 					...singleExtra,

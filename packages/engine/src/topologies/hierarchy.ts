@@ -59,34 +59,41 @@ function parsePlan(text: string, fallbackGoal: string, maxWorkers: number): Plan
  */
 export function hierarchyTopology(opts: HierarchyTopologyOptions = {}): TopologyPlugin {
 	const maxWorkers = opts.maxWorkers ?? 3;
+	const recursive = opts.recursive ?? true;
 
 	return {
 		name: "hierarchy",
-		description: "Lean Planner decomposes goal -> parallel bounded CLI leaf workers in isolated worktrees -> single-writer Integrator.",
+		description: "Lean Planner decomposes goal (with optional recursive sub-topologies) -> parallel leaf workers -> single-writer Integrator.",
 		async run(os: SwarmOsApi, { goal, rubric, signal }): Promise<TopologyOutcome> {
+			if ((await os.waitIfPaused?.(signal)) === "coalescing") {
+				return { status: "stopped", summary: "Hierarchy coalesced before planning." };
+			}
 			// Phase 1: Lean Planning
-			os.bus.emit(os.runId, "phase.changed", { to: "plan", reason: "Decomposing goal into bounded subtasks" });
+			os.bus.emit(os.runId, "phase.changed", { to: "plan", reason: "Decomposing goal into subtasks" });
 			const planner = await os.spawnWorker({
 				role: "planner",
-				readOnly: !opts.recursive,
-				canSpawn: Boolean(opts.recursive),
-				requireOutputSchema: !opts.recursive,
+				readOnly: !recursive,
+				canSpawn: recursive,
+				requireOutputSchema: !recursive,
 				cacheKeyPrefix: `${os.runId}:hierarchy-planner`,
 				toolScope: {
 					board: "read-write",
+					defaultChannel: "swarm",
 					artifacts: true,
 					findings: false,
 					tasks: false,
 					nominate: false,
 					scheduler: "auto",
 					skills: false,
-					canSpawn: Boolean(opts.recursive),
-					spawnAgents: Boolean(opts.recursive),
+					canSpawn: recursive,
+					spawnAgents: recursive,
+					spawnTopology: recursive,
 				},
 				systemPrompt: [
-					"You are a concise engineering lead. Decompose the goal into disjoint, testable subtasks and share cross-cutting insights on Board v2 via `board_publish`.",
-					'Respond ONLY with JSON: {"subtasks":[{"title":"...","description":"..."}]}',
-				].join("\n"),
+					"You are a concise engineering lead. Decompose the goal into disjoint, testable subtasks and share cross-cutting insights on `#swarm` via `board_post`.",
+					recursive ? "You may also call `spawn_topology` or `spawn_agents` for complex subproblems, or return a JSON subtask plan directly." : "",
+					'Respond with JSON: {"subtasks":[{"title":"...","description":"..."}]}',
+				].filter(Boolean).join("\n"),
 			});
 
 			let subtasks: PlanSubtask[];
@@ -105,6 +112,9 @@ export function hierarchyTopology(opts: HierarchyTopologyOptions = {}): Topology
 			);
 
 			// Phase 2: Parallel Bounded Leaf Workers (canSpawn: false)
+			if ((await os.waitIfPaused?.(signal)) === "coalescing") {
+				return { status: "stopped", summary: "Hierarchy coalesced before worker execution." };
+			}
 			os.bus.emit(os.runId, "phase.changed", { from: "plan", to: "execute", reason: `Dispatching ${createdTasks.length} bounded leaf workers` });
 			const workerResults = await Promise.all(
 				createdTasks.map(async (task) => {
@@ -169,6 +179,9 @@ export function hierarchyTopology(opts: HierarchyTopologyOptions = {}): Topology
 			);
 
 			// Phase 3: Single-Writer Integration (when multiple subtasks ran)
+			if ((await os.waitIfPaused?.(signal)) === "coalescing") {
+				return { status: "stopped", summary: "Hierarchy coalesced before integration." };
+			}
 			if (workerResults.length > 1 && !signal.aborted) {
 				os.bus.emit(os.runId, "phase.changed", { from: "execute", to: "integrate", reason: "Synthesizing verified leaf branches" });
 				const integrator = await os.spawnWorker({

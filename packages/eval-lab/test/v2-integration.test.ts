@@ -343,7 +343,7 @@ describe("eval-lab <-> one_piece v2 SwarmOS end-to-end integration", () => {
 				const shard = JSON.parse(readFileSync(shardMatch[1]!, "utf8")) as { seat: number; values: number[] };
 				const subtotal = shard.values.reduce((a, b) => a + b, 0);
 
-				const publishTool = spec.tools?.find((t) => t.name === "board_publish");
+				const publishTool = spec.tools?.find((t) => t.name === "board_post");
 				const waitTool = spec.tools?.find((t) => t.name === "board_wait");
 				const ctx = { runId: spec.runId, agentId: spec.agentId, role: spec.role, workspace: spec.workspace, signal: new AbortController().signal };
 
@@ -352,10 +352,10 @@ describe("eval-lab <-> one_piece v2 SwarmOS end-to-end integration", () => {
 					// Swarm peer: publish subtotal and wait reactively for all N seats
 					await publishTool.execute(
 						{
+							channel: "swarm",
 							topic: "shard-subtotal",
-							summary: `seat=${seat} subtotal=${subtotal}`,
-							body: JSON.stringify({ seat, subtotal }),
-							labels: { seat: String(seat) },
+							title: `seat=${seat} subtotal=${subtotal}`,
+							text: JSON.stringify({ seat, subtotal }),
 						},
 						ctx,
 					);

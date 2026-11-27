@@ -227,7 +227,7 @@ export const triageNeedleMeshTask: EvalTask = {
 					`You are seat_${i} (of ${count} privately isolated seats).`,
 					`1. Read ONLY your private shard at \`${join(shardDir, "telemetry.json")}\`.`,
 					`2. Filter out all local_anomaly and checksum-invalid distractors locally (verify sha256("chk:{edge_id}:{seat}:{partial_key}:{weight}")[:6] == checksum_hex). DO NOT spam distractors to the shared board!`,
-					`3. Publish ONLY your 2 verified cross-shard edge witnesses (edge_id, from_seat, to_seat, partial_key, weight) to Board v2 so peers can pair every edge (link_token = sha256("{edge_id}:{keyA}:{keyB}")[:8], combined_weight = weightA + weightB).`,
+					`3. Post ONLY your 2 verified cross-shard edge witnesses (edge_id, from_seat, to_seat, partial_key, weight) to \`#swarm\` via \`board_post\` (and coordinate with \`board_wait\` / \`board_search\`) so peers can pair every edge (link_token = sha256("{edge_id}:{keyA}:{keyB}")[:8], combined_weight = weightA + weightB).`,
 					`4. Once all ${count} ring edges are verified across seats, write \`${outputPath}\` matching the exact schema in SPEC.md and commit.`,
 				].join("\n"),
 				soloPrompt: [
@@ -288,7 +288,7 @@ export const triageNeedleMeshTask: EvalTask = {
 			privateShards: seats.map((s) => s.privateDir),
 			seatPrompts: seats.map((s) => s.prompt),
 			soloSeatPrompts: seats.map((s) => s.soloPrompt),
-			goal: `Filter ${distractorsPerSeat} distractors per shard locally, coordinate the ${count} valid cross-shard ring edges via Board v2, and write consensus submissions/seat_0.json .. submissions/seat_${count - 1}.json per SPEC.md.`,
+			goal: `Filter ${distractorsPerSeat} distractors per shard locally, coordinate the ${count} valid cross-shard ring edges on #swarm via board_post/board_wait/board_search, and write consensus submissions/seat_0.json .. submissions/seat_${count - 1}.json per SPEC.md.`,
 			rubric: "Exact N-edge ring signature + global_total_weight consensus across all N seats with zero distractor leaks.",
 			fixtureSha256: sha256Dir(workDir),
 			graderSha256: sha256Dir(hiddenDir),

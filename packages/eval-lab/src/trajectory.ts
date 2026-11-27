@@ -60,6 +60,9 @@ export interface GenerationSummary {
 		readonly semanticRepairRate?: number;
 		readonly basinDiversityRatio?: number;
 		readonly boundCalibrationError?: number;
+		readonly paradigmBoundCalibrationError?: number;
+		readonly hardBoundValidityRate?: number;
+		readonly paradigmShiftYield?: number;
 		readonly providerDiversityEntropy?: number;
 		readonly stragglerSkewRatio?: number;
 	};
@@ -538,6 +541,20 @@ export function analyzeTrajectory(ledger: EvalLedger): TrajectoryReport {
 					semanticRepairRate: meanOpt(v2Cards.map((c) => c.mechanisms?.integration.semanticRepairRate)),
 					basinDiversityRatio: meanOpt(v2Cards.map((c) => c.mechanisms?.search.basinDiversityRatio)),
 					boundCalibrationError: meanOpt(v2Cards.map((c) => c.mechanisms?.meta.boundCalibrationError)),
+					paradigmBoundCalibrationError: meanOpt(v2Cards.map((c) => c.mechanisms?.meta.paradigmBoundCalibrationError)),
+					hardBoundValidityRate: meanOpt(
+						v2Cards.map((c) =>
+							c.mechanisms?.meta.hardBoundValid === undefined ? undefined : c.mechanisms.meta.hardBoundValid ? 1 : 0,
+						),
+					),
+					paradigmShiftYield: meanOpt(
+						v2Cards.map((c) => {
+							const shifts = c.mechanisms?.meta.paradigmShiftRounds ?? 0;
+							if (shifts <= 0) return undefined;
+							const refinements = c.mechanisms?.meta.boundRefinements ?? 0;
+							return Math.min(1, refinements / shifts);
+						}),
+					),
 					providerDiversityEntropy: meanOpt(v2Cards.map((c) => c.mechanisms?.governor.providerDiversityEntropy)),
 					stragglerSkewRatio: meanOpt(v2Cards.map((c) => c.mechanisms?.forest.stragglerSkewRatio)),
 				}

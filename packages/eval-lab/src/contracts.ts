@@ -372,15 +372,19 @@ export interface BoardMechanismTelemetry {
 	avgPromotedCrossoverProb?: number;
 	citationCount: number;
 	crossSubtreeCitations: number;
-	/** Fraction of global/promoted posts later cited by another subtree or peer. */
+	/** Fraction of global/promoted posts later cited/replied/quoted by another subtree or peer. */
 	citationYield: number;
 	supersededCount: number;
+	outdatedCount?: number;
 }
 
 export interface ForestMechanismTelemetry {
 	maxDepth: number;
 	plannerCount: number;
 	workerCount: number;
+	totalAgentsSpawned?: number;
+	subTopologiesSpawned?: number;
+	avgBranchingFactor?: number;
 	plannerTokenShare: number;
 	spawnBatchCalls: number;
 	awaitCalls: number;
@@ -430,20 +434,36 @@ export interface SearchMechanismTelemetry {
 	handoffs: number;
 }
 
+export interface EvolutionMechanismTelemetry {
+	familiesLaunched: number;
+	familiesPruned: number;
+	subDirectorsSpawned: number;
+	codeCrossoversAttempted: number;
+	codeCrossoversBeatParents: number;
+}
+
 export interface MetaControlTelemetry {
 	decisionCalls: number;
 	decisionQuestions: number;
 	decisionInputTokens: number;
 	meanDecisionLatencyMs: number;
 	adaptiveMorphs: number;
+	liveMorphs?: number;
 	phaseChanges: number;
 	initialTopology: string;
 	finalTopology: string;
 	boundEstimates: number;
 	estimatedCeiling: number | null;
+	hardCeiling?: number | null;
+	paradigmCeiling?: number | null;
+	hardBoundValid?: boolean;
 	groundTruthCeiling?: number;
 	/** Relative ceiling error |estimated - groundTruth| / groundTruth when both exist. */
 	boundCalibrationError?: number;
+	paradigmBoundCalibrationError?: number;
+	boundRefinements?: number;
+	paradigmShiftRounds?: number;
+	advisoryCheckpoints?: number;
 	checkpointsTriggered: number;
 	earlyStopDecisions: number;
 	fieldGuideUpdates: number;
@@ -456,6 +476,7 @@ export interface MechanismTelemetry {
 	governor: GovernorMechanismTelemetry;
 	integration: IntegrationMechanismTelemetry;
 	search: SearchMechanismTelemetry;
+	evolution?: EvolutionMechanismTelemetry;
 	meta: MetaControlTelemetry;
 }
 

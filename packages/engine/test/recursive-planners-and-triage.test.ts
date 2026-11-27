@@ -9,11 +9,11 @@ import {
 	type WorkerSession,
 	type WorkerSpawnSpec,
 } from "@one-piece/core";
-import { DriverQuotaRouter, MockDecisionClient } from "@one-piece/drivers";
+import { DriverQuotaRouter } from "@one-piece/drivers";
 import { recursivePlannersTopology, SwarmOS } from "../src/index.ts";
 
 function initTempGitRepo(): string {
-	const dir = mkdtempSync(join(tmpdir(), "onepiece-v3-rec-"));
+	const dir = mkdtempSync(join(tmpdir(), "onepiece-v4-rec-"));
 	execFileSync("git", ["init", "-q"], { cwd: dir });
 	execFileSync("git", ["config", "user.email", "test@onepiece.dev"], { cwd: dir });
 	execFileSync("git", ["config", "user.name", "OnePieceTest"], { cwd: dir });
@@ -29,15 +29,15 @@ function makeScriptedDriver(
 	onTurn: (spec: WorkerSpawnSpec, prompt: string) => Promise<string>,
 ): WorkerDriver {
 	return {
-		id: "scripted-v3",
+		id: "scripted-v4",
 		kind: "pi-in-process",
 		capabilities: { supportsSteer: true, supportsResume: true, supportsOutputSchema: true, supportsMcpHttp: false },
 		async healthCheck() {
-			return { ok: true, driverId: "scripted-v3", kind: "pi-in-process" };
+			return { ok: true, driverId: "scripted-v4", kind: "pi-in-process" };
 		},
 		async spawn(spec: WorkerSpawnSpec): Promise<WorkerSession> {
 			return {
-				driverId: "scripted-v3",
+				driverId: "scripted-v4",
 				async runTurn(prompt: string) {
 					const text = await onTurn(spec, prompt);
 					return { status: "completed", finalText: text, usage: { inputTokens: 100, outputTokens: 40, totalTokens: 140 } };
@@ -48,32 +48,15 @@ function makeScriptedDriver(
 	};
 }
 
-describe("v3 Two-Role Recursive Planner Forest, Passive Snapshots & Two-Tier Board Triage", () => {
-	it("lets Planners recursively spawn parallel Planners + Workers, denies Worker spawning, captures passive snapshots, and promotes high-novelty subtree posts via Jev triage", async () => {
+describe("v4 Two-Role Recursive Planner Forest, Passive Snapshots & Board v3 Planner Crossposting", () => {
+	it("lets Planners recursively spawn parallel Planners + Workers, denies Worker spawning, surfaces child #team-* posts on await_agents, and promotes breakthroughs via Planner crossposting to #swarm", async () => {
 		const repo = initTempGitRepo();
-		const runDir = mkdtempSync(join(tmpdir(), "onepiece-v3-run-"));
+		const runDir = mkdtempSync(join(tmpdir(), "onepiece-v4-run-"));
 		const workerToolsObserved: string[][] = [];
 		const plannerToolsObserved: string[][] = [];
+		let awaitTextSawChildPost = false;
 
 		try {
-			const decisionClient = new MockDecisionClient((req) => {
-				const out: Record<string, any> = {};
-				const stateLines = String(req.state).split("\n");
-				for (const key of Object.keys(req.questions)) {
-					const m = /^p(\d+)_/.exec(key);
-					const postLine = m ? (stateLines.find((l) => l.startsWith(`POST_${m[1]} `)) ?? "") : "";
-					const isBreakthrough = postLine.includes("BREAKTHROUGH");
-					if (key.endsWith("_broadcast") || key.endsWith("_novel")) {
-						out[key] = { type: "noul", noul: isBreakthrough ? 0.92 : 0.15, confidence: 0.88 };
-					} else if (key.endsWith("_crossover")) {
-						out[key] = { type: "noul", noul: isBreakthrough ? 0.81 : 0.1, confidence: 0.8 };
-					} else {
-						out[key] = { type: "noul", noul: 0.2, confidence: 0.7 };
-					}
-				}
-				return out;
-			});
-
 			const preciseDriver = makeScriptedDriver(async (spec, prompt) => {
 				const toolNames = (spec.tools ?? []).map((t) => t.name);
 				const ctx = {
@@ -88,11 +71,11 @@ describe("v3 Two-Role Recursive Planner Forest, Passive Snapshots & Two-Tier Boa
 					plannerToolsObserved.push(toolNames);
 					const spawnTool = spec.tools?.find((t) => t.name === "spawn_agents")!;
 					const awaitTool = spec.tools?.find((t) => t.name === "await_agents")!;
-					const publishTool = spec.tools?.find((t) => t.name === "board_publish")!;
+					const postTool = spec.tools?.find((t) => t.name === "board_post")!;
 
 					if (prompt.includes("Goal:")) {
-						await publishTool.execute(
-							{ topic: "forest-plan", kind: "hypothesis", summary: "Root split into planner-sub-a + worker-leaf-b" },
+						await postTool.execute(
+							{ channel: "swarm", topic: "forest-plan", title: "Root split", text: "Root split into planner-sub-a + worker-leaf-b" },
 							ctx,
 						);
 						await spawnTool.execute(
@@ -114,21 +97,36 @@ describe("v3 Two-Role Recursive Planner Forest, Passive Snapshots & Two-Tier Boa
 						ctx,
 					);
 					const awaited = await awaitTool.execute({ mode: "all" }, ctx);
+					// Board v3: await_agents surfaces child #team-* posts so Planner can intentionally crosspost verified breakthroughs!
+					const postMatch = /\[(post-[a-zA-Z0-9_-]+)\][^\n]*BREAKTHROUGH/.exec(awaited.text);
+					if (postMatch) {
+						awaitTextSawChildPost = true;
+						await postTool.execute(
+							{
+								channel: "swarm",
+								quote_post_id: postMatch[1],
+								topic: "a-note",
+								title: "Crossposted: BREAKTHROUGH invariant in part_a",
+								text: "Verified worker-leaf-a breakthrough in part_a.txt; broadcasting to #swarm.",
+							},
+							ctx,
+						);
+					}
 					return `Sub-planner done: ${awaited.text}`;
 				}
 
 				workerToolsObserved.push(toolNames);
-				const publishTool = spec.tools?.find((t) => t.name === "board_publish")!;
+				const postTool = spec.tools?.find((t) => t.name === "board_post")!;
 				if (prompt.includes("part_a.txt")) {
 					writeFileSync(join(spec.workspace, "part_a.txt"), "solved-a\n");
-					await publishTool.execute(
-						{ topic: "a-note", kind: "discovery", summary: "BREAKTHROUGH invariant found in part_a" },
+					await postTool.execute(
+						{ topic: "a-note", title: "BREAKTHROUGH invariant found in part_a", text: "BREAKTHROUGH invariant found in part_a" },
 						ctx,
 					);
 				} else {
 					writeFileSync(join(spec.workspace, "part_b.txt"), "solved-b\n");
-					await publishTool.execute(
-						{ topic: "b-note", kind: "update", summary: "Routine local progress on part_b" },
+					await postTool.execute(
+						{ topic: "b-note", title: "Routine local progress on part_b", text: "Routine local progress on part_b" },
 						ctx,
 					);
 				}
@@ -138,8 +136,8 @@ describe("v3 Two-Role Recursive Planner Forest, Passive Snapshots & Two-Tier Boa
 
 			const store = new MemoryStore();
 			const router = new DriverQuotaRouter({
-				drivers: [{ driver: preciseDriver, config: { id: "scripted-v3", kind: "pi-in-process", maxConcurrent: 8 } }],
-				roles: { default: ["scripted-v3"], planner: ["scripted-v3"], worker: ["scripted-v3"], integrator: ["scripted-v3"] },
+				drivers: [{ driver: preciseDriver, config: { id: "scripted-v4", kind: "pi-in-process", maxConcurrent: 8 } }],
+				roles: { default: ["scripted-v4"], planner: ["scripted-v4"], worker: ["scripted-v4"], integrator: ["scripted-v4"] },
 				concurrencyMode: "physics",
 			});
 
@@ -161,7 +159,6 @@ describe("v3 Two-Role Recursive Planner Forest, Passive Snapshots & Two-Tier Boa
 						return { status: a && b ? "passed" : "failed", score, message: `a=${a}, b=${b}` };
 					},
 				},
-				decisionClient,
 				store,
 				router,
 			});
@@ -171,39 +168,51 @@ describe("v3 Two-Role Recursive Planner Forest, Passive Snapshots & Two-Tier Boa
 				expect(out.status).toBe("done");
 				expect(out.nominatedFindingId).toBeTruthy();
 
-				// 1. Both Planners had spawn_agents + board_publish; NO Worker ever had spawn tools!
+				// 1. Both Planners had spawn_agents + spawn_topology + board_post + board_edit; NO Worker ever had spawn tools!
 				expect(plannerToolsObserved.length).toBe(2);
 				for (const pTools of plannerToolsObserved) {
 					expect(pTools).toContain("spawn_agents");
 					expect(pTools).toContain("await_agents");
-					expect(pTools).toContain("board_publish");
+					expect(pTools).toContain("spawn_topology");
+					expect(pTools).toContain("board_post");
+					expect(pTools).toContain("board_edit");
 				}
 				expect(workerToolsObserved.length).toBe(2);
 				for (const wTools of workerToolsObserved) {
 					expect(wTools).not.toContain("spawn_agents");
+					expect(wTools).not.toContain("spawn_topology");
 					expect(wTools).not.toContain("spawn_task");
-					expect(wTools).toContain("board_publish");
+					expect(wTools).toContain("board_post");
+					expect(wTools).toContain("board_edit");
 				}
 
 				// 2. Trunk mechanically assembled BOTH workers' passively snapshotted branches!
 				expect(readFileSync(join(os.worktrees.trunkPath, "part_a.txt"), "utf8").trim()).toBe("solved-a");
 				expect(readFileSync(join(os.worktrees.trunkPath, "part_b.txt"), "utf8").trim()).toBe("solved-b");
 
-				// 3. Two-tier Board triage: BREAKTHROUGH post promoted to global; routine post stays subtree-local!
+				// 3. Board v3: await_agents surfaced child #team-* post; Planner crossposted BREAKTHROUGH to #swarm, while routine post stayed #team-*!
+				expect(awaitTextSawChildPost).toBe(true);
 				const posts = store.list("posts", { runId: "run-rec-1" });
-				const postA = posts.find((p) => p.topic === "a-note")!;
+				const postA = posts.find((p) => p.topic === "a-note" && !p.quotedPostId)!;
+				const crosspostA = posts.find((p) => p.quotedPostId === postA.id)!;
 				const postB = posts.find((p) => p.topic === "b-note")!;
-				expect(postA.visibility).toBe("global");
-				expect(postA.labels?.["os:promoted"]).toBe("true");
-				expect(postA.labels?.["os:crossover_candidate"]).toBe("true");
+				expect(postA.channel).toMatch(/^team-/);
+				expect(crosspostA.channel).toBe("swarm");
+				expect(crosspostA.labels?.["os:promoted"]).toBe("true");
+				expect(postB.channel).toMatch(/^team-/);
 				expect(postB.visibility).toBe("subtree");
 				expect(postB.labels?.["os:promoted"]).toBeUndefined();
 
-				// Digest for another subtree sees global + promoted postA, NOT routine subtree-local postB!
+				const promotedEvs = store.events("run-rec-1", { types: ["board.promoted"] });
+				expect(promotedEvs.length).toBe(1);
+				expect(promotedEvs[0]!.data.postId).toBe(crosspostA.id);
+				expect(promotedEvs[0]!.data.quotedPostId).toBe(postA.id);
+
+				// Digest for an unrelated subtree sees #swarm crosspostA, NOT routine subtree-local postB!
 				const foreignDigest = os.board.digest("run-rec-1", { subtreeId: "unrelated-subtree" });
 				expect(foreignDigest).toContain("a-note");
 				expect(foreignDigest).not.toContain("b-note");
-				expect(foreignDigest).toContain("promoted=1");
+				expect(foreignDigest).toContain("crossposts=1");
 			} finally {
 				await os.dispose();
 			}

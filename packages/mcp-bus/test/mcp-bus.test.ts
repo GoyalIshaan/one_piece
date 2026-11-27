@@ -49,7 +49,8 @@ describe("McpBusServer", () => {
 			const listBody = (await listRes.json()) as any;
 			const names = listBody.result.tools.map((t: any) => t.name);
 			expect(names).toContain("board_search");
-			expect(names).toContain("board_publish");
+			expect(names).toContain("board_post");
+			expect(names).toContain("board_edit");
 			expect(names).not.toContain("spawn_task");
 
 			// Direct call to forbidden tool is mechanically rejected
@@ -67,7 +68,10 @@ describe("McpBusServer", () => {
 				jsonrpc: "2.0",
 				id: 4,
 				method: "tools/call",
-				params: { name: "board_publish", arguments: { topic: "kernel", summary: "Shared memory tiling doubled throughput" } },
+				params: {
+					name: "board_post",
+					arguments: { topic: "kernel", title: "Shared memory tiling doubled throughput", text: "Shared memory tiling doubled throughput" },
+				},
 			});
 			expect(((await pub.json()) as any).result.isError).toBe(false);
 

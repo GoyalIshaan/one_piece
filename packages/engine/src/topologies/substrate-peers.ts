@@ -33,9 +33,9 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 
 	return {
 		name: "substrate-peers",
-		description: "Flat peer swarm coordinating via bounded Board v2 in isolated worktrees with verified trunk assembly.",
+		description: "Flat peer swarm coordinating via Reddit/X Board v3 (#swarm) in isolated worktrees with verified trunk assembly.",
 		async run(os: SwarmOsApi, { goal, rubric, signal, closeoutSignal }): Promise<TopologyOutcome> {
-			os.bus.emit(os.runId, "phase.changed", { to: "peer-explore", reason: `Launching ${peerCount} peers over Board v2 substrate` });
+			os.bus.emit(os.runId, "phase.changed", { to: "peer-explore", reason: `Launching ${peerCount} peers over Board v3 #swarm substrate` });
 
 			const isSharded = Boolean(opts.seatConfigs && opts.seatConfigs.length > 0);
 			const peerSpawning = Boolean(opts.allowPeerSpawning && !isSharded);
@@ -45,24 +45,27 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 					const peerHandle = seatCfg?.handle ?? `peer-${idx + 1}`;
 					const baseReq = {
 						handle: peerHandle,
-						subtreeId: peerHandle,
+						// Strictly flat #swarm board when peerSpawning is false (zero artificial per-peer subtree hierarchy!)
+						...(peerSpawning ? { subtreeId: peerHandle } : {}),
 						depth: 0,
 						deniedReadPaths: seatCfg?.deniedReadPaths,
 						cacheKeyPrefix: `${os.runId}:substrate-peer`,
 						systemPrompt: [
-							"You are a peer engineer in a flat ScaleMAS substrate swarm working in an isolated git worktree.",
-							"Coordinate cleanly with peers using the 4 shared board tools:",
-							"- `board_publish(topic, summary, body?, labels?, parent_ids?, supersedes?)` to publish concise results or updates immediately.",
-							"- `board_search(query?, topic?, labels?, after?, thread_id?)` to read peer notes (omit query to list latest posts + active topics).",
-							"- `board_wait(topic?, after?, min_posts?, timeout_seconds?)` to wait reactively (up to 25s, zero polling) for peers to publish before proceeding.",
-							"- `board_visit(post_id)` to read full untruncated posts.",
+							"You are a peer engineer in a flat substrate swarm working in an isolated git worktree.",
+							"Coordinate cleanly with peers on `#swarm` using the 5 simple board tools:",
+							"- `board_post(text, title?, channel?, topic?, reply_to?, quote_post_id?)` to publish results, reply in a thread, or quote/build on a peer's post.",
+							"- `board_edit(post_id, text?, outdated?, reason?)` to update a post or mark an obsolete claim outdated.",
+							"- `board_search(query?, channel?, topic?, after?)` to read peer notes (omit query to list latest posts + topics).",
+							"- `board_wait(channel?, topic?, after?, min_posts?, timeout_seconds?)` to wait reactively (up to 25s, zero polling) for peers to publish.",
+							"- `board_visit(post_id)` to read full untruncated posts and replies.",
 							isSharded
-								? "Cite useful peer post IDs via `parent_ids`, write ONLY your seat deliverable cleanly, and exit once verified — trunk assembly verifies the combined N-seat output."
-								: "Cite useful peer post IDs via `parent_ids`, avoid overwriting peers' files unnecessarily, and call `report_finding` when your worktree has a verified deliverable.",
+								? "Quote or reply to useful peer post IDs via `quote_post_id` / `reply_to`, write ONLY your seat deliverable cleanly, and exit once verified — trunk assembly verifies the combined N-seat output."
+								: "Quote or reply to useful peer post IDs via `quote_post_id` / `reply_to`, avoid overwriting peers' files unnecessarily, and call `report_finding` when your worktree has a verified deliverable.",
 						].join("\n"),
 					};
 					const sharedScope = {
 						board: "read-write" as const,
+						defaultChannel: "swarm",
 						artifacts: true,
 						// On privately sharded tasks, a single 1/N seat cannot satisfy the full N-seat verifier;
 						// hide report_finding so peers don't waste turns retrying partial rejections before trunk assembly.
@@ -70,7 +73,7 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 						tasks: false,
 						nominate: false,
 						scheduler: "auto" as const,
-						subtreeId: peerHandle,
+						...(peerSpawning ? { subtreeId: peerHandle } : {}),
 						defaultPostVisibility: "global" as const,
 					};
 					return peerSpawning
@@ -78,25 +81,26 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 							...baseReq,
 							role: "planner",
 							canSpawn: true,
-							toolScope: { ...sharedScope, canSpawn: true, spawnAgents: true },
+							toolScope: { ...sharedScope, canSpawn: true, spawnAgents: true, spawnTopology: true },
 						})
 						: os.spawnWorker({
 							...baseReq,
 							role: "worker",
 							canSpawn: false,
-							toolScope: { ...sharedScope, canSpawn: false, spawnAgents: false },
+							toolScope: { ...sharedScope, canSpawn: false, spawnAgents: false, spawnTopology: false },
 						});
 				}),
 			);
 
 			try {
 				for (let round = 1; round <= rounds; round++) {
-					if (signal.aborted || os.isInCloseoutReserve()) break;
+					const gate = await os.waitIfPaused?.(signal);
+					if (gate === "coalescing" || signal.aborted || os.isInCloseoutReserve()) break;
 					await Promise.all(
 						handles.map(async (worker, idx) => {
 							const seatCfg = opts.seatConfigs?.[idx];
 							const handle = worker.agent.handle;
-							const pulse = os.board.digest(os.runId);
+							const pulse = os.board.digest(os.runId, { channel: "swarm" });
 							const rubricLine = rubric ? `Rubric: ${rubric}` : "";
 							const seatLine = seatCfg?.seatPrompt ? seatCfg.seatPrompt : "";
 							const prompt = seatLine
@@ -113,12 +117,12 @@ export function substratePeersTopology(opts: SubstratePeersOptions = {}): Topolo
 										rubricLine,
 										`You are ${handle} (Peer #${idx + 1} of ${peerCount}).`,
 										pulse,
-										"Coordinate via `board_publish` + `board_wait` / `board_search`. Publish your local findings/subtotals promptly so peers can build on them, wait for needed peer inputs with `board_wait(min_posts=...)` if peers are still computing, write your deliverable cleanly in your worktree, and call `report_finding` when ready.",
+										"Coordinate on `#swarm` via `board_post` + `board_wait` / `board_search`. Post your local findings/subtotals promptly so peers can build on them, wait for needed peer inputs with `board_wait(min_posts=...)` if peers are still computing, write your deliverable cleanly in your worktree, and call `report_finding` when ready.",
 									].filter(Boolean).join("\n\n")
 									: [
 										`Round ${round}/${rounds} (${handle}, Peer #${idx + 1} of ${peerCount}):`,
 										pulse,
-										"Check the latest board updates with `board_search` (or `board_wait` if any peer is still publishing), finalize your deliverable in your worktree using all verified peer inputs, and submit via `report_finding`.",
+										"Check the latest `#swarm` updates with `board_search` (or `board_wait` if any peer is still posting), finalize your deliverable in your worktree using all verified peer inputs, and submit via `report_finding`.",
 									].filter(Boolean).join("\n\n");
 							const res = await worker.runTurn(prompt, { signal });
 							os.worktrees.commitWip(worker.workspace, `${handle} round ${round}`);

@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
-import type { DriverHealth, QuotaDriverStatus } from "@one-piece/core";
-import type { SpawnedChildOutcome, TriageEvaluation } from "@one-piece/engine";
+import type {
+	CrosspostOutcome,
+	DriverHealth,
+	MarkOutdatedPostOutcome,
+	QuotaDriverStatus,
+	RunControlPayload,
+	RunControlState,
+	SpawnWorkerRequest,
+	WorkerToolScope,
+} from "@one-piece/core";
+import type { CheckpointOutcome, SpawnedChildOutcome } from "@one-piece/engine";
 import {
 	toScorecardFaultState,
 	type DockerRunResult,
@@ -11,8 +20,8 @@ import {
 	type SweBenchScoreOutcome,
 } from "../src/index.ts";
 
-describe("Compile-time negative proofs (@ts-expect-error) for 12 newly encoded state machines", () => {
-	it("rejects illegal DriverHealth, QuotaDriverStatus, SpawnedChildOutcome, and TriageEvaluation states at compile time", () => {
+describe("Compile-time negative proofs (@ts-expect-error) for encoded v3 & v4 state machines", () => {
+	it("rejects illegal DriverHealth, QuotaDriverStatus, SpawnedChildOutcome, WorkerToolScope, Board v3, Control Plane & Checkpoint states at compile time", () => {
 		// 1. DriverHealth: unhealthy driver MUST carry diagnostic `detail`
 		const okHealth: DriverHealth = { ok: true, driverId: "codex", kind: "codex-app-server" };
 		const badHealth: DriverHealth = { ok: false, driverId: "codex", kind: "codex-app-server", detail: "not logged in" };
@@ -34,34 +43,73 @@ describe("Compile-time negative proofs (@ts-expect-error) for 12 newly encoded s
 		// @ts-expect-error — arbitrary typo status string is rejected
 		const illegalChildStatus: SpawnedChildOutcome = { agentId: "a1", handle: "w1", role: "worker", status: "done", summary: "typo" };
 
-		// 4. TriageEvaluation: promoted posts MUST be global with promotionReason; non-promoted MUST be subtree without promotionReason
-		const promotedTriage: TriageEvaluation = {
-			postId: "p1",
-			isNovel: 0.9,
-			contradictsIncumbent: 0.2,
-			broadcastProb: 0.85,
-			crossoverProb: 0.7,
-			confidence: 0.8,
-			promoted: true,
-			visibility: "global",
-			promotionReason: "novel",
-		};
-		const localTriage: TriageEvaluation = {
-			postId: "p2",
-			isNovel: 0.2,
-			contradictsIncumbent: 0.1,
-			broadcastProb: 0.2,
-			crossoverProb: 0.1,
-			confidence: 0.8,
-			promoted: false,
-			visibility: "subtree",
-		};
-		// @ts-expect-error — promoted triage cannot omit promotionReason or stay subtree
-		const illegalPromoted: TriageEvaluation = { postId: "p3", isNovel: 0.9, contradictsIncumbent: 0.1, broadcastProb: 0.9, crossoverProb: 0.1, confidence: 0.8, promoted: true, visibility: "subtree" };
-		// @ts-expect-error — non-promoted triage cannot leak promotionReason
-		const illegalNonPromoted: TriageEvaluation = { postId: "p4", isNovel: 0.1, contradictsIncumbent: 0.1, broadcastProb: 0.1, crossoverProb: 0.1, confidence: 0.8, promoted: false, visibility: "subtree", promotionReason: "leaked" };
+		// 4. v4 Compile-Time Worker Non-Spawning Invariant: leaf workers CANNOT receive spawnAgents / spawnTopology / evolutionDirector
+		const validWorkerScope: WorkerToolScope = { board: "read-write", artifacts: true, findings: true };
+		// @ts-expect-error — leaf WorkerToolScope forbids spawnTopology: true
+		const illegalWorkerTopology: WorkerToolScope = { board: "read-write", spawnTopology: true };
+		// @ts-expect-error — leaf WorkerToolScope forbids evolutionDirector: true
+		const illegalWorkerEvo: WorkerToolScope = { board: "read-write", evolutionDirector: true };
+		// @ts-expect-error — SpawnWorkerRequest with role: "worker" forbids spawnAgents: true
+		const illegalWorkerSpawnReq: SpawnWorkerRequest = { role: "worker", handle: "w-rogue", toolScope: { spawnAgents: true } };
 
-		expect([okHealth, badHealth, illegalUnhealthy, healthyQ, cooldownQ, illegalHealthyCooldown, illegalCooldownMissing, okChild, illegalFailedCommit, illegalChildStatus, promotedTriage, localTriage, illegalPromoted, illegalNonPromoted].length).toBe(14);
+		// 5. v4 Board v3 MarkOutdatedPostOutcome & CrosspostOutcome
+		const okOutdatedErr: MarkOutdatedPostOutcome = { ok: false, reason: "already_outdated" };
+		// @ts-expect-error — failed outdated transition cannot attach updated post
+		const illegalOutdatedErr: MarkOutdatedPostOutcome = { ok: false, reason: "already_outdated", updated: { id: "p1" } };
+		const okCrosspostErr: CrosspostOutcome = { ok: false, reason: "source_outdated" };
+		// @ts-expect-error — failed crosspost cannot leak sourceChannel
+		const illegalCrosspostErr: CrosspostOutcome = { ok: false, reason: "source_outdated", sourceChannel: "team-1" };
+
+		// 6. v4 Control Plane RunControlPayload, RunControlState & 4-way CheckpointOutcome
+		const validSteer: RunControlPayload = { type: "steer", message: "try vectorizing" };
+		// @ts-expect-error — steer payload requires non-empty message
+		const illegalSteer: RunControlPayload = { type: "steer" };
+		const validPausedState: RunControlState = { status: "paused", pausedAt: 1000, reason: "human review", totalPausedMs: 0 };
+		// @ts-expect-error — running control state cannot leak pausedAt
+		const illegalRunningPausedAt: RunControlState = { status: "running", pausedAt: 1000, totalPausedMs: 0 };
+		const validParadigmShift: CheckpointOutcome = {
+			action: "paradigm_shift",
+			shouldStop: false,
+			reason: "tier2_saturated_with_tier1_headroom",
+			targetAssumption: {
+				id: "A1",
+				assumption: "O(N^2) loop",
+				unlockHint: "Replace nested loop with FFT",
+				tier: "paradigm",
+				status: "active",
+			},
+			directive: "Break O(N^2) assumption using FFT",
+			remainingGapToHard: 0.28,
+		};
+		// @ts-expect-error — continue outcome cannot carry targetAssumption
+		const illegalContinueAssumptions: CheckpointOutcome = { action: "continue", shouldStop: false, reason: "still improving", targetAssumption: validParadigmShift.targetAssumption };
+
+		expect([
+			okHealth,
+			badHealth,
+			illegalUnhealthy,
+			healthyQ,
+			cooldownQ,
+			illegalHealthyCooldown,
+			illegalCooldownMissing,
+			okChild,
+			illegalFailedCommit,
+			illegalChildStatus,
+			validWorkerScope,
+			illegalWorkerTopology,
+			illegalWorkerEvo,
+			illegalWorkerSpawnReq,
+			okOutdatedErr,
+			illegalOutdatedErr,
+			okCrosspostErr,
+			illegalCrosspostErr,
+			validSteer,
+			illegalSteer,
+			validPausedState,
+			illegalRunningPausedAt,
+			validParadigmShift,
+			illegalContinueAssumptions,
+		].length).toBe(24);
 	});
 
 	it("rejects illegal DockerRunResult, ScorecardFaultState, Scorecard v2, GenerationTransition, MleMedalAssessment & SweBenchScoreOutcome states at compile time", () => {

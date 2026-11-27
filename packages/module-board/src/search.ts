@@ -55,17 +55,23 @@ export function searchExcerpt(body: string, query: string, limit = 360): string 
 export function computeCitationCounts(allPosts: readonly BoardPost[]): Map<string, number> {
 	const byId = new Map(allPosts.map((p) => [p.id, p]));
 	const peers = new Map<string, Set<string>>();
+	const recordEdge = (post: BoardPost, targetId: string | undefined) => {
+		if (!targetId) return;
+		const target = byId.get(targetId);
+		if (!target || target.authorAgentId === post.authorAgentId) return;
+		let set = peers.get(target.id);
+		if (!set) {
+			set = new Set<string>();
+			peers.set(target.id, set);
+		}
+		set.add(post.authorAgentId);
+	};
 	for (const post of allPosts) {
 		for (const ref of post.references ?? []) {
-			const target = byId.get(ref.postId);
-			if (!target || target.authorAgentId === post.authorAgentId) continue;
-			let set = peers.get(target.id);
-			if (!set) {
-				set = new Set<string>();
-				peers.set(target.id, set);
-			}
-			set.add(post.authorAgentId);
+			recordEdge(post, ref.postId);
 		}
+		recordEdge(post, post.replyToId);
+		recordEdge(post, post.quotedPostId);
 	}
 	const out = new Map<string, number>();
 	for (const [id, set] of peers) out.set(id, set.size);
@@ -100,7 +106,7 @@ export function rankedBoardPostsDetailed(
 		const ordered = [...posts]
 			.map((post) => {
 				const citations = citationMap.get(post.id) ?? 0;
-				const penalty = post.supersededBy ? 0.25 : 1;
+				const penalty = post.supersededBy || post.outdated ? 0.25 : 1;
 				const score = ((0.5 * citations) / (citations + 1)) * penalty;
 				return { post, score, citations };
 			})
@@ -120,7 +126,7 @@ export function rankedBoardPostsDetailed(
 				.map(([k, v]) => `${k} ${v}`)
 				.join(" ")
 			: "";
-		const tokens = tokenizeBoardText(`${post.topic} ${post.summary} ${post.body} ${labelText}`);
+		const tokens = tokenizeBoardText(`${post.channel ?? post.board ?? ""} ${post.topic} ${post.summary} ${post.body} ${labelText}`);
 		for (const token of tokens) {
 			if (termSet.has(token)) {
 				counts.set(token, (counts.get(token) ?? 0) + 1);
@@ -155,7 +161,7 @@ export function rankedBoardPostsDetailed(
 	const bestRelevance = matches.reduce((best, m) => Math.max(best, m.relevance), 0) || 1;
 	for (const match of matches) {
 		const rawScore = match.relevance / bestRelevance + (0.5 * match.citations) / (match.citations + 1);
-		match.score = match.post.supersededBy ? rawScore * 0.25 : rawScore;
+		match.score = match.post.supersededBy || match.post.outdated ? rawScore * 0.25 : rawScore;
 	}
 
 	matches.sort((a, b) => b.score - a.score || postOrderKey(b.post) - postOrderKey(a.post));

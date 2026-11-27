@@ -13,6 +13,7 @@ import type {
 	ProviderQuotaRecord,
 	Report,
 	Run,
+	RunControlCommandRecord,
 	TaskRecord,
 	TaskStatus,
 } from "./types.ts";
@@ -40,6 +41,7 @@ export interface Documents {
 	quotas: ProviderQuotaRecord;
 	reports: Report;
 	job_cache: { id: string; runId: string; jobId: string };
+	control_commands: RunControlCommandRecord;
 }
 
 export type Collection = keyof Documents;

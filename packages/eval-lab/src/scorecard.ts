@@ -31,10 +31,24 @@ const COORDINATION_TOOLS = new Set([
 	"read_board_post",
 	"board_search",
 	"board_publish",
+	"board_post",
+	"board_edit",
 	"board_visit",
 	"board_wait",
 	"spawn_children",
 	"spawn_agent",
+	"spawn_agents",
+	"spawn_topology",
+	"await_agents",
+	"steer_or_cancel_agent",
+	"evo_launch_family",
+	"evo_spawn_mutation",
+	"evo_spawn_crossover",
+	"evo_stop_family",
+	"evo_transfer_insight",
+	"evo_inspect_diff",
+	"evo_archive_status",
+	"evo_await",
 	"spawn_task",
 	"wait_for_children",
 	"yield_until",
@@ -269,12 +283,15 @@ function extractMechanismTelemetry(params: {
 	let citationCount = 0;
 	let crossSubtreeCitations = 0;
 	let supersededCount = 0;
+	let outdatedCount = 0;
 
 	if (postDocs.length > 0) {
 		for (const p of postDocs) {
-			if (p.visibility === "subtree") postsSubtree++;
+			const isSubtree = p.visibility === "subtree" || (p.channel !== undefined && p.channel !== "swarm");
+			if (isSubtree) postsSubtree++;
 			else postsGlobal++;
 			if (p.supersededBy) supersededCount++;
+			if (p.outdated) outdatedCount++;
 			if (p.parentIds?.length) {
 				citationCount += p.parentIds.length;
 				for (const pid of p.parentIds) {
@@ -294,6 +311,7 @@ function extractMechanismTelemetry(params: {
 		for (const e of postEvents) {
 			if (typeof e.data.supersedes === "string" && e.data.supersedes) supersededCount++;
 		}
+		outdatedCount = events.filter((e) => e.type === "board.outdated").length;
 	}
 
 	const promotedCount = promotedEvents.length;
@@ -302,14 +320,18 @@ function extractMechanismTelemetry(params: {
 	const crossoverProbs = promotedEvents.map((e) => Number(e.data.crossoverProb)).filter(Number.isFinite);
 	const meanOf = (arr: readonly number[]) => (arr.length ? round4(arr.reduce((s, x) => s + x, 0) / arr.length) : undefined);
 
-	// 2. Recursive Forest & Straggler / KV Cache Geometry
+	// 2. Recursive Forest & Unbounded Topology Geometry
 	let maxDepth = 0;
 	let plannerCount = 0;
 	let workerCount = 0;
 	let plannerTokens = 0;
+	const childrenByParent = new Map<string, number>();
 	if (agentDocs.length > 0) {
 		for (const ag of agentDocs) {
 			if (typeof ag.depth === "number" && ag.depth > maxDepth) maxDepth = ag.depth;
+			if (ag.parentAgentId) {
+				childrenByParent.set(ag.parentAgentId, (childrenByParent.get(ag.parentAgentId) ?? 0) + 1);
+			}
 			if (ag.role.toLowerCase().includes("plan") || ag.role === "coordinator") {
 				plannerCount++;
 				plannerTokens += ag.spentTokens;
@@ -327,6 +349,11 @@ function extractMechanismTelemetry(params: {
 		}
 		plannerTokens = tokens.byRole.coordinator;
 	}
+	const subTopologiesSpawned = events.filter((e) => e.type === "topology.spawned").length;
+	const totalAgentsSpawned = Math.max(agentDocs.length, events.filter((e) => e.type === "agent.spawned").length);
+	const avgBranchingFactor = childrenByParent.size
+		? round4([...childrenByParent.values()].reduce((s, c) => s + c, 0) / childrenByParent.size)
+		: 0;
 
 	// Straggler skew ratio across agents with recorded turn durations
 	const wallByAgent = new Map<string, number>();
@@ -399,7 +426,14 @@ function extractMechanismTelemetry(params: {
 	const escalations = events.filter((e) => e.type === "agent.escalated").length;
 	const handoffs = events.filter((e) => e.type === "agent.handoff").length;
 
-	// 6. Meta-Control, Jev Decision Client & Bound Analyst Calibration
+	// 5b. Evolution v4 Director-Led GA Telemetry
+	const familyLaunchedEvents = events.filter((e) => e.type === "evolution.family_launched");
+	const familyPrunedEvents = events.filter((e) => e.type === "evolution.family_pruned");
+	const crossoverStartedEvents = events.filter((e) => e.type === "evolution.crossover_started");
+	const crossoverCompletedEvents = events.filter((e) => e.type === "evolution.crossover_completed");
+	const subDirectorsSpawned = agentDocs.filter((a) => a.role === "planner" && (a.depth ?? 0) > 0).length;
+
+	// 6. Meta-Control, Jev Decision Client & 2-Tier Roofline Calibration
 	const decisionEvents = events.filter((e) => e.type === "decision.evaluated");
 	const decisionQuestions = decisionEvents.reduce((s, e) => s + Number(e.data.questionCount ?? 0), 0);
 	const decisionInputTokens = decisionEvents.reduce((s, e) => s + Number(e.data.inputTokens ?? 0), 0);
@@ -408,17 +442,29 @@ function extractMechanismTelemetry(params: {
 		: 0;
 
 	const morphEvents = events.filter((e) => e.type === "adaptive.morphed");
+	const liveMorphs = morphEvents.filter((e) => e.data.live === true).length;
 	const phaseChanges = events.filter((e) => e.type === "phase.changed").length;
 	const initialTopology = spec.topology ?? spec.controlRung;
 	const finalTopology = morphEvents.length ? String(morphEvents.at(-1)!.data.to ?? initialTopology) : initialTopology;
 
 	const boundEvents = events.filter((e) => e.type === "bound.estimated");
 	let estimatedCeiling: number | null = null;
+	let hardCeiling: number | null | undefined;
+	let paradigmCeiling: number | null | undefined;
+	let boundRefinements = 0;
+	for (const be of boundEvents) {
+		if (be.data.isRefinement === true) boundRefinements++;
+	}
 	for (let i = boundEvents.length - 1; i >= 0; i--) {
-		const raw = boundEvents[i]!.data.estimatedCeiling;
-		if (typeof raw === "number" && Number.isFinite(raw)) {
-			estimatedCeiling = raw;
-			break;
+		const d = boundEvents[i]!.data;
+		if (estimatedCeiling === null && typeof d.estimatedCeiling === "number" && Number.isFinite(d.estimatedCeiling)) {
+			estimatedCeiling = d.estimatedCeiling;
+		}
+		if (hardCeiling === undefined && (d.hardCeiling === null || (typeof d.hardCeiling === "number" && Number.isFinite(d.hardCeiling)))) {
+			hardCeiling = d.hardCeiling as number | null;
+		}
+		if (paradigmCeiling === undefined && (d.paradigmCeiling === null || (typeof d.paradigmCeiling === "number" && Number.isFinite(d.paradigmCeiling)))) {
+			paradigmCeiling = d.paradigmCeiling as number | null;
 		}
 	}
 	const groundTruthCeiling = prepared.theoreticalCeiling;
@@ -426,9 +472,22 @@ function extractMechanismTelemetry(params: {
 		estimatedCeiling !== null && groundTruthCeiling !== undefined && groundTruthCeiling !== 0
 			? round4(Math.abs(estimatedCeiling - groundTruthCeiling) / Math.abs(groundTruthCeiling))
 			: undefined;
+	const paradigmBoundCalibrationError =
+		paradigmCeiling !== null && paradigmCeiling !== undefined && groundTruthCeiling !== undefined && groundTruthCeiling !== 0
+			? round4(Math.abs(paradigmCeiling - groundTruthCeiling) / Math.abs(groundTruthCeiling))
+			: undefined;
+	const maxObservedScore = events
+		.filter((e) => e.type === "finding.verification" && typeof e.data.score === "number")
+		.reduce((m, e) => Math.max(m, Number(e.data.score)), Number.NEGATIVE_INFINITY);
+	const hardBoundValid =
+		hardCeiling !== null && hardCeiling !== undefined && Number.isFinite(maxObservedScore)
+			? maxObservedScore <= hardCeiling + 1e-6
+			: undefined;
 
+	const paradigmShiftRounds = events.filter((e) => e.type === "bound.paradigm_shift").length;
 	const checkpointEvents = events.filter((e) => e.type === "researcher.checkpoint");
 	const earlyStopDecisions = checkpointEvents.filter((e) => String(e.data.action ?? "") === "coalesce").length;
+	const advisoryCheckpoints = checkpointEvents.filter((e) => String(e.data.action ?? "") === "advisory_interrupt").length;
 
 	const fgEvents = events.filter((e) => e.type === "field_guide.updated");
 	const fieldGuideMaxBytes = fgEvents.reduce((m, e) => Math.max(m, Number(e.data.bytes ?? 0)), 0);
@@ -447,14 +506,18 @@ function extractMechanismTelemetry(params: {
 			crossSubtreeCitations,
 			citationYield: promotedCount + postsGlobal > 0 ? round4(crossSubtreeCitations / Math.max(1, promotedCount || postsGlobal)) : 0,
 			supersededCount,
+			outdatedCount,
 		},
 		forest: {
 			maxDepth,
 			plannerCount,
 			workerCount,
+			totalAgentsSpawned,
+			subTopologiesSpawned,
+			avgBranchingFactor,
 			plannerTokenShare: tokens.total > 0 ? round4(plannerTokens / tokens.total) : 0,
-			spawnBatchCalls: dynamics.toolCallsByName.spawn_agents ?? 0,
-			awaitCalls: dynamics.toolCallsByName.await_agents ?? 0,
+			spawnBatchCalls: (dynamics.toolCallsByName.spawn_agents ?? 0) + (dynamics.toolCallsByName.spawn_topology ?? 0),
+			awaitCalls: (dynamics.toolCallsByName.await_agents ?? 0) + (dynamics.toolCallsByName.evo_await ?? 0),
 			steerOrCancelCalls: dynamics.toolCallsByName.steer_or_cancel_agent ?? 0,
 			stragglerSkewRatio,
 			kvCacheBustCount,
@@ -495,19 +558,34 @@ function extractMechanismTelemetry(params: {
 			escalations,
 			handoffs,
 		},
+		evolution: {
+			familiesLaunched: familyLaunchedEvents.length,
+			familiesPruned: familyPrunedEvents.length,
+			subDirectorsSpawned,
+			codeCrossoversAttempted: crossoverStartedEvents.length,
+			codeCrossoversBeatParents: crossoverCompletedEvents.filter((e) => e.data.beatBothParents === true).length,
+		},
 		meta: {
 			decisionCalls: decisionEvents.length,
 			decisionQuestions,
 			decisionInputTokens,
 			meanDecisionLatencyMs,
 			adaptiveMorphs: morphEvents.length,
+			liveMorphs,
 			phaseChanges,
 			initialTopology,
 			finalTopology,
 			boundEstimates: boundEvents.length,
 			estimatedCeiling,
+			...(hardCeiling !== undefined ? { hardCeiling } : {}),
+			...(paradigmCeiling !== undefined ? { paradigmCeiling } : {}),
+			...(hardBoundValid !== undefined ? { hardBoundValid } : {}),
 			...(groundTruthCeiling !== undefined ? { groundTruthCeiling } : {}),
 			...(boundCalibrationError !== undefined ? { boundCalibrationError } : {}),
+			...(paradigmBoundCalibrationError !== undefined ? { paradigmBoundCalibrationError } : {}),
+			boundRefinements,
+			paradigmShiftRounds,
+			advisoryCheckpoints,
 			checkpointsTriggered: checkpointEvents.length,
 			earlyStopDecisions,
 			fieldGuideUpdates: fgEvents.length,
@@ -848,7 +926,7 @@ export async function extractScorecard(options: ExtractScorecardOptions): Promis
 			toolCalls++;
 			const name = String(e.data.tool ?? "unknown");
 			toolCallsByName[name] = (toolCallsByName[name] ?? 0) + 1;
-			if (name === "post_board" || name === "board_publish" || name === "message_peer" || name === "share_context") {
+			if (name === "post_board" || name === "board_publish" || name === "board_post" || name === "message_peer" || name === "share_context") {
 				messageCount++;
 				messageBytes += Buffer.byteLength(JSON.stringify(e.data.args ?? ""));
 			}

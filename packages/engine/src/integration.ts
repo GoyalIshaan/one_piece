@@ -92,6 +92,7 @@ export class IntegrationPipeline implements IntegrationService {
 					runId: this.os.runId,
 					authorAgentId: actorName,
 					authorHandle: actorName,
+					channel: "swarm",
 					topic: "megafile-hotspot",
 					summary: `Hotspot file ${relFile} (${lineCount} lines, ${nextCount} merge conflicts) — consider decomposing into smaller modules.`,
 					isOsActor: true,
@@ -212,7 +213,12 @@ export class IntegrationPipeline implements IntegrationService {
 									},
 									this.resolveVerifySignal(input.closeoutSignal),
 								);
-								if (repFinding.status === "accepted") {
+								const repScore = typeof repFinding.score === "number" ? repFinding.score : undefined;
+								const repairedPartialAdvance =
+									!this.bestGreenAccepted &&
+									repScore !== undefined &&
+									repScore > (this.bestGreenScore ?? 0) + 1e-9;
+								if (repFinding.status === "accepted" || repairedPartialAdvance) {
 									repaired = true;
 									repCommitSha = repMerge.commitSha;
 									addedBranches = [input.branch, repairer.branch];
@@ -221,8 +227,9 @@ export class IntegrationPipeline implements IntegrationService {
 										runId: this.os.runId,
 										authorAgentId: actorName,
 										authorHandle: actorName,
+										channel: "swarm",
 										topic: actorName,
-										summary: `Repaired semantic regression & merged ${input.task?.id ?? input.label} -> trunk ${repMerge.commitSha.slice(0, 8)}`,
+										summary: `Repaired semantic regression & merged ${input.task?.id ?? input.label} -> trunk ${repMerge.commitSha.slice(0, 8)}${repScore !== undefined ? ` (score=${repScore.toFixed(4)})` : ""}`,
 										isOsActor: true,
 									});
 								}

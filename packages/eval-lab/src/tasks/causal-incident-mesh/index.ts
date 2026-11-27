@@ -267,10 +267,10 @@ export const causalIncidentMeshTask: EvalTask = {
 			const shardFile = join(shardDir, "shard.json");
 			return [
 				`Seat assignment: You are Seat ${seatIdx} of ${inst.n} (owning private microservice shard at ${shardFile}).`,
-				"Other seats' shards are kernel-denied by Seatbelt — coordinate strictly via Board v2 (`board_publish`, `board_wait`, `board_search`).",
+				"Other seats' shards are kernel-denied by Seatbelt — coordinate strictly on `#swarm` via `board_post`, `board_wait`, `board_search`, and `board_visit`.",
 				"Workflow:",
 				`1. Read ONLY ${shardFile}. Compute \`true_ts_ms = local_ts_ms - clock_skew_ms\` for every span.`,
-				`2. Immediately call \`board_publish(topic="shard-telemetry", summary="seat ${seatIdx} <service> ...", body=<JSON with service, deploy_commit, clock_skew_ms, spans, local_alerts, policy_fragment>, labels={"seat": "${seatIdx}"})\`.`,
+				`2. Immediately call \`board_post(channel="swarm", topic="shard-telemetry", title="seat ${seatIdx} <service> ...", text=<JSON with service, deploy_commit, clock_skew_ms, spans, local_alerts, policy_fragment>)\`.`,
 				`3. Call \`board_wait(topic="shard-telemetry", min_posts=${inst.n}, timeout_seconds=25)\` (repeat if needed until all ${inst.n} seats publish).`,
 				`4. Reconstruct the exact incident JSON from all ${inst.n} seats and write ONLY \`submissions/seat_${seatIdx}.json\`.`,
 				`5. Verify your JSON schema matches TASK.md and exit cleanly (trunk assembly merges all ${inst.n} seats automatically).`,

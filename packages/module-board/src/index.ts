@@ -1,12 +1,14 @@
+import { createHash } from "node:crypto";
 import {
 	applyBoardPostLabels,
+	type BoardEditInput,
 	type BoardLabelInput,
 	type BoardPost,
-	type BoardPostKind,
 	type BoardPostLabelResult,
 	type BoardPublishInput,
 	type BoardQueryOptions,
 	type BoardQueryResult,
+	type BoardReference,
 	type BoardSearchHit,
 	type BoardService,
 	type BoardThreadView,
@@ -17,6 +19,8 @@ import {
 	type EventBus,
 	newId,
 	type ToolDefinition,
+	transitionCrosspost,
+	transitionMarkOutdatedPost,
 	transitionPromotePost,
 	transitionSupersedePost,
 } from "@one-piece/core";
@@ -35,11 +39,12 @@ export {
 	searchExcerptDetailed,
 } from "./search.ts";
 
-const DEFAULT_BOARD = "swarm";
+const DEFAULT_CHANNEL = "swarm";
 const MAX_WAIT_MS = 25_000;
 const DEFAULT_WAIT_MS = 20_000;
+const AUTO_DEDUP_WINDOW_MS = 30_000;
 
-export type BoardErrorCode = "reserved_label" | "newer_message" | "label_conflict" | "not_found" | "invalid_input";
+export type BoardErrorCode = "reserved_label" | "newer_message" | "label_conflict" | "not_found" | "invalid_input" | "forbidden";
 
 export class BoardError extends Error {
 	readonly code: BoardErrorCode;
@@ -51,6 +56,19 @@ export class BoardError extends Error {
 		this.code = code;
 		this.data = data;
 	}
+}
+
+export function normalizeChannel(raw?: string): string | undefined {
+	if (!raw) return undefined;
+	const clean = raw.trim().replace(/^#+/, "").trim();
+	return clean || undefined;
+}
+
+export function postChannel(post: BoardPost): string {
+	const explicit = normalizeChannel(post.channel) ?? normalizeChannel(post.board);
+	if (explicit) return explicit;
+	if (post.visibility === "subtree" && post.subtreeId) return `team-${post.subtreeId}`;
+	return DEFAULT_CHANNEL;
 }
 
 export function isReservedBoardLabel(key: string): boolean {
@@ -109,6 +127,10 @@ function postSeq(post: BoardPost): number {
 	return post.seq ?? 0;
 }
 
+function isHiddenPost(post: BoardPost): boolean {
+	return Boolean(post.supersededBy || post.outdated);
+}
+
 function formatLabels(labels?: Record<string, string>): string {
 	if (!labels) return "";
 	const entries = Object.entries(labels);
@@ -121,9 +143,44 @@ function formatTopics(topics: readonly BoardTopicSummary[]): string {
 	return topics.slice(0, 8).map((t) => `${t.topic}(${t.count})`).join(", ");
 }
 
+function deriveSummary(titleOrSummary: string | undefined, text: string): string {
+	const raw = (titleOrSummary?.trim() || text.trim().split(/\r?\n/)[0] || "update").trim();
+	return raw.slice(0, 400);
+}
+
+function computeContentFingerprint(parts: {
+	runId: string;
+	authorAgentId: string;
+	channel: string;
+	topic: string;
+	replyToId?: string;
+	quotedPostId?: string;
+	summary: string;
+	body: string;
+}): string {
+	return createHash("sha256")
+		.update(
+			[
+				parts.runId,
+				parts.authorAgentId,
+				parts.channel,
+				parts.topic,
+				parts.replyToId ?? "",
+				parts.quotedPostId ?? "",
+				parts.summary,
+				parts.body,
+			].join("\0"),
+		)
+		.digest("hex")
+		.slice(0, 24);
+}
+
 /**
- * Engineered v2 Swarm Message Board (ScaleMAS bounded reads + Vercel Board ergonomics
- * + OS-enforced label integrity).
+ * Board v3 — Reddit/X-Native Swarm Message Board.
+ * - Channels (`#swarm` global, `#team-<subtree>` local) replace opaque visibility flags.
+ * - Folded `board_post` (new / reply / quote-crosspost) + `board_edit` (`outdated`) replace epistemic-DAG jargon.
+ * - Planners explicitly crosspost verified wins from `#team-X` -> `#swarm` (replacing Jev visibility gating).
+ * - OS background layer silently enforces monotonic `seq`, content-hash idempotency, anti-spoofing, and outdated hiding.
  */
 export class SwarmBoardService implements BoardService {
 	private readonly bus: EventBus;
@@ -133,10 +190,11 @@ export class SwarmBoardService implements BoardService {
 		this.bus = bus;
 	}
 
-	private allRunPosts(runId: string, board?: string): BoardPost[] {
+	private allRunPosts(runId: string, channel?: string): BoardPost[] {
+		const normChan = normalizeChannel(channel);
 		const posts = this.bus.store.listBoardPosts
-			? this.bus.store.listBoardPosts(runId, board)
-			: this.bus.store.list("posts", { runId }).filter((p) => !board || (p.board ?? DEFAULT_BOARD) === board);
+			? this.bus.store.listBoardPosts(runId, normChan)
+			: this.bus.store.list("posts", { runId }).filter((p) => !normChan || postChannel(p) === normChan);
 		return posts.sort((a, b) => postSeq(a) - postSeq(b) || a.createdAt - b.createdAt);
 	}
 
@@ -164,7 +222,7 @@ export class SwarmBoardService implements BoardService {
 	private computeTopics(posts: readonly BoardPost[]): BoardTopicSummary[] {
 		const map = new Map<string, BoardTopicSummary>();
 		for (const p of posts) {
-			if (p.supersededBy) continue;
+			if (isHiddenPost(p)) continue;
 			const cur = map.get(p.topic);
 			const seq = postSeq(p);
 			if (cur) {
@@ -180,9 +238,11 @@ export class SwarmBoardService implements BoardService {
 	publish(input: BoardPublishInput): BoardPost {
 		const isOsActor = input.isOsActor === true;
 		const cleanLabels = sanitizeLabels(input.labels, isOsActor);
-		const boardName = input.board?.trim() || DEFAULT_BOARD;
+		const authorAgent = this.bus.store.get("agents", input.authorAgentId);
+		const authorHandle = input.authorHandle?.trim() || authorAgent?.handle || undefined;
+		const resolvedSubtreeId = input.subtreeId?.trim() || authorAgent?.subtreeId || undefined;
 
-		// 1. Idempotency deduplication
+		// 1. Explicit idempotency key deduplication
 		const idemKey = input.idempotencyKey?.trim() || undefined;
 		if (idemKey) {
 			const existing = this.bus.store.findBoardPostByIdempotencyKey
@@ -191,22 +251,84 @@ export class SwarmBoardService implements BoardService {
 			if (existing) return existing;
 		}
 
-		// 2. Thread resolution (normalize reply-to-reply onto the root threadId)
+		// 2. Reply / Thread resolution (normalize reply-to-reply onto the root threadId)
+		const rawReplyId = input.replyToId?.trim() || input.threadId?.trim() || undefined;
 		let resolvedThreadId: string | undefined;
+		let resolvedReplyToId: string | undefined;
+		let replyTarget: BoardPost | undefined;
 		let topic = input.topic.trim() || "general";
-		if (input.threadId?.trim()) {
-			const target = this.bus.store.get("posts", input.threadId.trim());
+		if (rawReplyId) {
+			const target = this.bus.store.get("posts", rawReplyId);
 			if (!target || target.runId !== input.runId) {
-				throw new BoardError("not_found", `Thread target post not found: ${input.threadId}`);
+				throw new BoardError("not_found", `Reply/thread target post not found: ${rawReplyId}`);
 			}
+			replyTarget = target;
+			resolvedReplyToId = target.id;
 			resolvedThreadId = target.threadId ?? target.id;
 			if (!input.topic.trim()) topic = target.topic;
 		}
 
-		// 3. Optimistic concurrency (`ifLatestId`)
+		// 3. Resolve channel & visibility (Reddit/X model: "swarm" = global, "team-*" = subtree)
+		const explicitChannel = normalizeChannel(input.channel) ?? normalizeChannel(input.board);
+		let channel: string;
+		if (explicitChannel) {
+			channel = explicitChannel;
+		} else if (replyTarget) {
+			channel = postChannel(replyTarget);
+		} else if (input.visibility === "subtree" && resolvedSubtreeId) {
+			channel = `team-${resolvedSubtreeId}`;
+		} else if (input.visibility === "global") {
+			channel = DEFAULT_CHANNEL;
+		} else if (authorAgent?.role === "worker" && resolvedSubtreeId) {
+			channel = `team-${resolvedSubtreeId}`;
+		} else {
+			channel = DEFAULT_CHANNEL;
+		}
+		const resolvedVisibility: BoardVisibility =
+			input.visibility ?? (channel === DEFAULT_CHANNEL ? "global" : "subtree");
+
+		// 4. Quote / Crosspost resolution (validates via compile-time crosspost state machine)
+		let quotedPost: BoardPost | undefined;
+		let isCrosspostToSwarm = false;
+		let sourceChannelForCrosspost: string | undefined;
+		const rawQuotedId = input.quotedPostId?.trim() || undefined;
+		if (rawQuotedId) {
+			const src = this.bus.store.get("posts", rawQuotedId);
+			if (!src || src.runId !== input.runId) {
+				throw new BoardError("not_found", `Quoted post not found: ${rawQuotedId}`);
+			}
+			const xp = transitionCrosspost(src, channel);
+			if (!xp.ok) {
+				throw new BoardError("invalid_input", `Cannot quote/crosspost ${src.id}: ${xp.reason}`, {
+					reason: xp.reason,
+					quotedPostId: src.id,
+				});
+			}
+			quotedPost = src;
+			sourceChannelForCrosspost = xp.sourceChannel;
+			isCrosspostToSwarm =
+				channel === DEFAULT_CHANNEL &&
+				(xp.sourceChannel !== DEFAULT_CHANNEL || src.visibility === "subtree");
+			if (!input.topic.trim()) topic = src.topic;
+		}
+
+		// 5. Merge references cleanly (explicit references + reply_to + quote_post_id)
+		const refMap = new Map<string, BoardReference>();
+		for (const r of input.references ?? []) {
+			if (r.postId.trim()) refMap.set(r.postId.trim(), { postId: r.postId.trim(), reason: r.reason || "builds_on" });
+		}
+		if (resolvedReplyToId && !refMap.has(resolvedReplyToId)) {
+			refMap.set(resolvedReplyToId, { postId: resolvedReplyToId, reason: "reply" });
+		}
+		if (quotedPost && !refMap.has(quotedPost.id)) {
+			refMap.set(quotedPost.id, { postId: quotedPost.id, reason: isCrosspostToSwarm ? "crosspost" : "quote" });
+		}
+		const mergedRefs = refMap.size ? [...refMap.values()] : undefined;
+
+		// 6. Legacy optimistic concurrency (`ifLatestId`) when passed programmatically
 		if (input.ifLatestId?.trim()) {
 			const expected = input.ifLatestId.trim();
-			const scopePosts = this.allRunPosts(input.runId, boardName).filter((p) =>
+			const scopePosts = this.allRunPosts(input.runId, channel).filter((p) =>
 				resolvedThreadId
 					? p.id === resolvedThreadId || p.threadId === resolvedThreadId
 					: p.topic.toLowerCase() === topic.toLowerCase(),
@@ -221,7 +343,7 @@ export class SwarmBoardService implements BoardService {
 			}
 		}
 
-		// 4. Resolve supersedes target (if provided)
+		// 7. Resolve legacy supersedes target (if provided)
 		let supersedesId: string | undefined;
 		let supersededTarget: BoardPost | undefined;
 		if (input.supersedes?.trim()) {
@@ -238,35 +360,78 @@ export class SwarmBoardService implements BoardService {
 			supersededTarget = target;
 		}
 
-		// 5. Assign monotonic sequence & persist post BEFORE emitting board.posted so reactive listeners see it immediately
-		const seq = this.nextSeq(input.runId);
-		const authorAgent = this.bus.store.get("agents", input.authorAgentId);
-		const authorHandle = input.authorHandle?.trim() || authorAgent?.handle || undefined;
-		const resolvedSubtreeId = input.subtreeId?.trim() || authorAgent?.subtreeId || undefined;
-		const resolvedVisibility: BoardVisibility =
-			input.visibility ?? (authorAgent?.role === "worker" && resolvedSubtreeId ? "subtree" : "global");
+		// 8. Background OS content-hash deduplication window (silent retry protection without exposing idempotency_key)
+		const summary = input.summary.trim().slice(0, 400);
+		const body = (input.body ?? input.summary).trim();
+		const now = Date.now();
+		if (!idemKey && !isOsActor) {
+			const fp = computeContentFingerprint({
+				runId: input.runId,
+				authorAgentId: input.authorAgentId,
+				channel,
+				topic,
+				replyToId: resolvedReplyToId,
+				quotedPostId: quotedPost?.id,
+				summary,
+				body,
+			});
+			const recentDup = this.allRunPosts(input.runId, channel)
+				.reverse()
+				.find(
+					(p) =>
+						!isHiddenPost(p) &&
+						p.authorAgentId === input.authorAgentId &&
+						now - p.createdAt <= AUTO_DEDUP_WINDOW_MS &&
+						p.idempotencyKey === `auto:${fp}`,
+				);
+			if (recentDup) return recentDup;
+		}
 
+		const finalIdemKey =
+			idemKey ??
+			(!isOsActor
+				? `auto:${computeContentFingerprint({
+					runId: input.runId,
+					authorAgentId: input.authorAgentId,
+					channel,
+					topic,
+					replyToId: resolvedReplyToId,
+					quotedPostId: quotedPost?.id,
+					summary,
+					body,
+				})}`
+				: undefined);
+
+		const finalLabels: Record<string, string> | undefined = isCrosspostToSwarm
+			? { ...(cleanLabels ?? {}), "os:promoted": "true" }
+			: cleanLabels;
+
+		// 9. Assign monotonic sequence & persist post BEFORE emitting board.posted so reactive listeners see it immediately
+		const seq = this.nextSeq(input.runId);
 		const post: BoardPost = {
 			id: newId("post"),
 			runId: input.runId,
-			board: boardName,
+			board: channel,
+			channel,
 			topic,
 			kind: input.kind,
 			subtreeId: resolvedSubtreeId,
 			visibility: resolvedVisibility,
 			authorAgentId: input.authorAgentId,
 			authorHandle,
-			summary: input.summary.trim().slice(0, 400),
-			body: (input.body ?? input.summary).trim(),
-			references: input.references?.length ? input.references : undefined,
+			summary,
+			body,
+			references: mergedRefs,
 			artifactIds: input.artifactIds?.length ? input.artifactIds : undefined,
-			parentPostId: input.parentPostId ?? resolvedThreadId,
+			parentPostId: input.parentPostId ?? resolvedReplyToId ?? resolvedThreadId,
+			replyToId: resolvedReplyToId,
+			quotedPostId: quotedPost?.id,
 			threadId: resolvedThreadId,
-			labels: cleanLabels,
+			labels: finalLabels,
 			supersedes: supersedesId,
 			seq,
-			idempotencyKey: idemKey,
-			createdAt: Date.now(),
+			idempotencyKey: finalIdemKey,
+			createdAt: now,
 		};
 
 		this.bus.save("posts", post, input.authorAgentId);
@@ -284,16 +449,120 @@ export class SwarmBoardService implements BoardService {
 			{
 				postId: post.id,
 				topic: post.topic,
+				channel: post.channel,
 				authorAgentId: post.authorAgentId,
 				authorHandle: post.authorHandle,
 				threadId: post.threadId,
+				replyToId: post.replyToId,
+				quotedPostId: post.quotedPostId,
 				supersedes: post.supersedes,
 				labels: post.labels,
 			},
 			input.authorAgentId,
 			{ causalParents: post.references?.map((r) => r.postId) },
 		);
+
+		if (isCrosspostToSwarm && quotedPost) {
+			const actorRole: "planner" | "director" | "os" = isOsActor
+				? "os"
+				: authorAgent?.role === "planner" || authorAgent?.role === "root"
+					? "planner"
+					: "director";
+			this.bus.emit(
+				input.runId,
+				"board.promoted",
+				{
+					postId: post.id,
+					actorRole,
+					sourceChannel: sourceChannelForCrosspost,
+					targetChannel: channel,
+					quotedPostId: quotedPost.id,
+					reason: `Crossposted ${quotedPost.id} from #${sourceChannelForCrosspost} to #${channel}`,
+				},
+				input.authorAgentId,
+			);
+		}
+
 		return post;
+	}
+
+	edit(input: BoardEditInput): BoardPost {
+		const existing = this.bus.store.get("posts", input.postId);
+		if (!existing) {
+			throw new BoardError("not_found", `Post not found: ${input.postId}`);
+		}
+		const isAuthor = existing.authorAgentId === input.authorAgentId;
+		if (!isAuthor && !input.isPlannerOrOs) {
+			throw new BoardError(
+				"forbidden",
+				`Only the original author or a Planner/OS actor may edit post ${input.postId}.`,
+			);
+		}
+		const now = Date.now();
+		let updated: BoardPost = existing;
+
+		if (input.outdated === true) {
+			const res = transitionMarkOutdatedPost(existing, input.outdatedReason, now);
+			if (!res.ok) {
+				throw new BoardError("invalid_input", `Cannot mark post ${input.postId} outdated: ${res.reason}`, {
+					reason: res.reason,
+				});
+			}
+			updated = {
+				...res.updated,
+				...(input.body !== undefined ? { body: input.body.trim() } : {}),
+				...(input.summary !== undefined ? { summary: input.summary.trim().slice(0, 400) } : {}),
+			};
+			this.bus.save("posts", updated, input.authorAgentId);
+			this.bus.emit(
+				updated.runId,
+				"board.outdated",
+				{
+					postId: updated.id,
+					actorAgentId: input.authorAgentId,
+					reason: updated.outdatedReason ?? "Marked outdated",
+				},
+				input.authorAgentId,
+			);
+			this.bus.emit(
+				updated.runId,
+				"board.edited",
+				{
+					postId: updated.id,
+					authorAgentId: input.authorAgentId,
+					outdated: true,
+					outdatedReason: updated.outdatedReason,
+				},
+				input.authorAgentId,
+			);
+			return updated;
+		}
+
+		const nextBody = input.body !== undefined ? input.body.trim() : existing.body;
+		const nextSummary =
+			input.summary !== undefined
+				? input.summary.trim().slice(0, 400)
+				: input.body !== undefined
+					? deriveSummary(undefined, nextBody)
+					: existing.summary;
+		updated = {
+			...existing,
+			body: nextBody,
+			summary: nextSummary,
+			editedAt: now,
+		};
+		this.bus.save("posts", updated, input.authorAgentId);
+		this.bus.emit(
+			updated.runId,
+			"board.edited",
+			{
+				postId: updated.id,
+				authorAgentId: input.authorAgentId,
+				outdated: updated.outdated,
+			},
+			input.authorAgentId,
+		);
+		return updated;
 	}
 
 	search(runId: string, query: string, opts: { k?: number; board?: string } = {}): BoardSearchHit[] {
@@ -303,14 +572,16 @@ export class SwarmBoardService implements BoardService {
 	query(runId: string, opts: BoardQueryOptions = {}): BoardQueryResult {
 		const k = Math.max(1, Math.min(15, Math.floor(opts.k ?? 8)));
 		const offset = Math.max(0, Math.floor(opts.offset ?? 0));
-		const allPosts = this.allRunPosts(runId, opts.board);
+		const chanFilter = normalizeChannel(opts.channel) ?? normalizeChannel(opts.board);
+		const allPosts = this.allRunPosts(runId, chanFilter);
 		const cursor = this.currentCursor(allPosts);
 		const topics = this.computeTopics(allPosts);
 		const labelFilters = parseLabelFilters(opts.labels);
 		const topicFilter = opts.topic?.trim().toLowerCase();
+		const includeHidden = Boolean(opts.includeSuperseded || opts.includeOutdated);
 
 		const filtered = allPosts.filter((p) => {
-			if (!opts.includeSuperseded && p.supersededBy) return false;
+			if (!includeHidden && isHiddenPost(p)) return false;
 			if (opts.afterSeq !== undefined && postSeq(p) <= opts.afterSeq) return false;
 			if (topicFilter && p.topic.toLowerCase() !== topicFilter) return false;
 			if (opts.kind && p.kind !== opts.kind) return false;
@@ -334,15 +605,27 @@ export class SwarmBoardService implements BoardService {
 		return this.computeTopics(this.allRunPosts(runId, board));
 	}
 
+	recentChannelPosts(runId: string, channel: string, opts: { afterSeq?: number; limit?: number } = {}): BoardPost[] {
+		const normChan = normalizeChannel(channel) ?? DEFAULT_CHANNEL;
+		const limit = Math.max(1, Math.min(20, opts.limit ?? 6));
+		return this.allRunPosts(runId, normChan)
+			.filter((p) => !isHiddenPost(p) && (opts.afterSeq === undefined || postSeq(p) > opts.afterSeq))
+			.slice(-limit);
+	}
+
 	visit(postId: string): { post: BoardPost; citedBy: BoardPost[]; replies?: BoardPost[]; newestId?: string; cursor?: number } | undefined {
 		const post = this.bus.store.get("posts", postId);
 		if (!post) return undefined;
 		const allPosts = this.allRunPosts(post.runId);
-		const citedBy = this.bus.store.listBoardPosts
-			? this.bus.store.listBoardPosts(post.runId, undefined, post.id)
-			: allPosts.filter((p) => p.references?.some((r) => r.postId === post.id));
+		const citedBy = allPosts.filter(
+			(p) =>
+				p.id !== post.id &&
+				(p.quotedPostId === post.id ||
+					p.replyToId === post.id ||
+					Boolean(p.references?.some((r) => r.postId === post.id))),
+		);
 		const rootId = post.threadId ?? post.id;
-		const replies = allPosts.filter((p) => p.threadId === rootId);
+		const replies = allPosts.filter((p) => p.threadId === rootId && p.id !== rootId);
 		const newestId = replies.at(-1)?.id ?? rootId;
 		return {
 			post,
@@ -359,7 +642,7 @@ export class SwarmBoardService implements BoardService {
 		const rootId = target.threadId ?? target.id;
 		const root = rootId === target.id ? target : this.bus.store.get("posts", rootId);
 		if (!root) return undefined;
-		const allPosts = this.allRunPosts(root.runId, root.board);
+		const allPosts = this.allRunPosts(root.runId, postChannel(root));
 		const allReplies = allPosts.filter((p) => p.threadId === root.id);
 		const latest = opts.latest !== undefined ? Math.max(1, Math.min(50, Math.floor(opts.latest))) : allReplies.length;
 		const earlierReplies = Math.max(0, allReplies.length - latest);
@@ -412,44 +695,49 @@ export class SwarmBoardService implements BoardService {
 	promote(postId: string, input: { actorId: string; labels?: Record<string, string>; reason?: string }): BoardPost | undefined {
 		const existing = this.bus.store.get("posts", postId);
 		if (!existing) return undefined;
+		if (existing.outdated) return undefined;
 		const outcome = transitionPromotePost(existing, { labels: input.labels });
 		if (!outcome.ok) return undefined;
-		const updated = outcome.updated;
+		const updated: BoardPost = {
+			...outcome.updated,
+			board: DEFAULT_CHANNEL,
+			channel: DEFAULT_CHANNEL,
+		};
 		this.bus.save("posts", updated, input.actorId);
-		const nextLabels = updated.labels ?? {};
-		const novelty = nextLabels["os:novelty"] !== undefined ? Number(nextLabels["os:novelty"]) : undefined;
-		const broadcastProb = nextLabels["os:broadcast_prob"] !== undefined ? Number(nextLabels["os:broadcast_prob"]) : undefined;
-		const crossoverProb = nextLabels["os:crossover_prob"] !== undefined ? Number(nextLabels["os:crossover_prob"]) : undefined;
 		this.bus.emit(
 			updated.runId,
 			"board.promoted",
 			{
 				postId: updated.id,
-				...(Number.isFinite(novelty) ? { novelty } : {}),
-				...(Number.isFinite(broadcastProb) ? { broadcastProb } : {}),
-				...(Number.isFinite(crossoverProb) ? { crossoverProb } : {}),
-				reason: input.reason ?? "Promoted to global board visibility",
+				actorRole: "planner",
+				sourceChannel: postChannel(existing),
+				targetChannel: DEFAULT_CHANNEL,
+				reason: input.reason ?? "Promoted to #swarm",
 			},
 			input.actorId,
 		);
 		return updated;
 	}
 
-	digest(runId: string, boardOrOpts?: string | { board?: string; subtreeId?: string }): string {
-		const board = typeof boardOrOpts === "string" ? boardOrOpts : boardOrOpts?.board;
+	digest(runId: string, boardOrOpts?: string | { board?: string; channel?: string; subtreeId?: string }): string {
+		const channel =
+			typeof boardOrOpts === "string"
+				? normalizeChannel(boardOrOpts)
+				: normalizeChannel(boardOrOpts?.channel) ?? normalizeChannel(boardOrOpts?.board);
 		const subtreeId = typeof boardOrOpts === "string" ? undefined : boardOrOpts?.subtreeId;
-		const allPosts = this.allRunPosts(runId, board);
+		const allPosts = this.allRunPosts(runId, channel);
 		const visible = allPosts.filter((p) => {
-			if (p.supersededBy) return false;
-			if (!subtreeId) return true;
-			return (p.visibility ?? "global") === "global" || p.subtreeId === subtreeId;
+			if (isHiddenPost(p)) return false;
+			if (!subtreeId || channel) return true;
+			return (p.visibility ?? "global") === "global" || postChannel(p) === DEFAULT_CHANNEL || p.subtreeId === subtreeId;
 		});
 		const cursor = this.currentCursor(allPosts);
-		if (!visible.length) return `Board pulse: 0 posts (cursor=${cursor})`;
+		const chanLabel = channel ? `#${channel}` : subtreeId ? `#swarm + #team-${subtreeId}` : "#swarm";
+		if (!visible.length) return `Board pulse (${chanLabel}): 0 posts (cursor=${cursor})`;
 		const topics = this.computeTopics(visible);
-		const promotedCount = visible.filter((p) => p.labels?.["os:promoted"] === "true").length;
-		const promotedTag = promotedCount > 0 ? `, promoted=${promotedCount}` : "";
-		return `Board pulse: ${visible.length} post${visible.length === 1 ? "" : "s"} [${formatTopics(topics)}]${promotedTag} (cursor=${cursor})`;
+		const crossposts = visible.filter((p) => p.labels?.["os:promoted"] === "true" || Boolean(p.quotedPostId)).length;
+		const xpTag = crossposts > 0 ? `, crossposts=${crossposts}` : "";
+		return `Board pulse (${chanLabel}): ${visible.length} post${visible.length === 1 ? "" : "s"} [${formatTopics(topics)}]${xpTag} (cursor=${cursor})`;
 	}
 
 	async wait(runId: string, opts: BoardWaitOptions = {}): Promise<BoardWaitResult> {
@@ -457,11 +745,12 @@ export class SwarmBoardService implements BoardService {
 		const timeoutMs = Math.max(50, Math.min(MAX_WAIT_MS, Math.floor(opts.timeoutMs ?? DEFAULT_WAIT_MS)));
 		const labelFilters = parseLabelFilters(opts.labels);
 		const topicFilter = opts.topic?.trim().toLowerCase();
+		const chanFilter = normalizeChannel(opts.channel) ?? normalizeChannel(opts.board);
 
 		const collectMatching = (): { matching: BoardPost[]; allPosts: BoardPost[]; cursor: number; topics: BoardTopicSummary[] } => {
-			const allPosts = this.allRunPosts(runId, opts.board);
+			const allPosts = this.allRunPosts(runId, chanFilter);
 			const matching = allPosts.filter((p) => {
-				if (p.supersededBy) return false;
+				if (isHiddenPost(p)) return false;
 				if (opts.afterSeq !== undefined && postSeq(p) <= opts.afterSeq) return false;
 				if (topicFilter && p.topic.toLowerCase() !== topicFilter) return false;
 				if (opts.kind && p.kind !== opts.kind) return false;
@@ -534,7 +823,7 @@ export class SwarmBoardService implements BoardService {
 			const onAbort = () => settle("aborted");
 			const unsub = this.bus.on((ev) => {
 				if (ev.runId !== runId) return;
-				if (ev.type !== "board.posted" && ev.type !== "board.labeled") return;
+				if (ev.type !== "board.posted" && ev.type !== "board.labeled" && ev.type !== "board.edited") return;
 				if (collectMatching().matching.length >= minPosts) {
 					settle("matched");
 				}
@@ -548,7 +837,7 @@ export class SwarmBoardService implements BoardService {
 
 	recent(runId: string, limit = 10): BoardPost[] {
 		return this.allRunPosts(runId)
-			.filter((p) => !p.supersededBy)
+			.filter((p) => !isHiddenPost(p))
 			.reverse()
 			.slice(0, limit);
 	}
@@ -557,107 +846,218 @@ export class SwarmBoardService implements BoardService {
 export interface BoardToolsOptions {
 	/** Resolve an OS-assigned readable handle for an agentId (e.g. "peer-1"). */
 	resolveHandle?: (agentId: string) => string | undefined;
-	/** Resolve the subtree root ID for an agentId (enables subtree-scoped digests). */
+	/** Resolve the subtree root ID for an agentId (enables `#team-<subtree>` channel defaults). */
 	resolveSubtree?: (agentId: string) => string | undefined;
-	/** Default visibility stamped onto posts created via `board_publish`. */
+	/** Explicit default channel ("swarm" or "team-<subtree>"). */
+	defaultChannel?: string;
+	/** Legacy default visibility fallback. */
 	defaultVisibility?: BoardVisibility;
 }
 
-const VALID_KINDS = new Set<BoardPostKind>(["discovery", "hypothesis", "counterexample", "dead_end", "bound_estimate", "update"]);
-
 function renderPostEntry(post: BoardPost, query: string, citations: number, bodyLimit = 480): string {
 	const who = post.authorHandle ?? post.authorAgentId;
-	const kindStr = post.kind ? `, kind=${post.kind}` : "";
-	const visStr = post.visibility === "subtree" ? `, scope=subtree:${post.subtreeId ?? "local"}` : "";
+	const chan = `#${postChannel(post)}`;
 	const threadStr = post.threadId ? `, thread=${post.threadId}` : "";
-	const supStr = post.supersededBy ? `, SUPERSEDED_BY=${post.supersededBy}` : "";
+	const quoteStr = post.quotedPostId ? `, quotes=${post.quotedPostId}` : "";
+	const outdatedStr = post.outdated
+		? `, OUTDATED(${post.outdatedReason ?? "superseded"})`
+		: post.supersededBy
+			? `, SUPERSEDED_BY=${post.supersededBy}`
+			: "";
 	const excerpt = searchExcerptDetailed(post.body, query, bodyLimit);
 	const truncHint = excerpt.truncated
 		? `\n[truncated: ${excerpt.totalChars} chars — call board_visit("${post.id}") for full body]`
 		: "";
-	const summaryLine = post.summary && post.body !== post.summary ? `Summary: ${post.summary}\n` : "";
-	return `[${post.id}] (${post.topic}${kindStr}${visStr}, by ${who}, seq=${postSeq(post)}, citations=${citations}${formatLabels(post.labels)}${threadStr}${supStr})\n${summaryLine}${excerpt.text}${truncHint}`;
+	const summaryLine = post.summary && post.body !== post.summary ? `Title: ${post.summary}\n` : "";
+	return `[${post.id}] (${chan} · ${post.topic}, by ${who}, seq=${postSeq(post)}, citations=${citations}${formatLabels(post.labels)}${threadStr}${quoteStr}${outdatedStr})\n${summaryLine}${excerpt.text}${truncHint}`;
 }
 
 /**
- * 4 lean, high-signal MCP/in-process board tools:
- * `board_search`, `board_publish`, `board_visit`, `board_wait`.
+ * 5 ultra-simple Reddit/X-native Swarm Board tools:
+ * - `board_post` (new post, threaded `reply_to`, or `quote_post_id` crosspost)
+ * - `board_edit` (update text or mark `outdated: true`)
+ * - `board_search` (ranked search/listing; hides outdated posts by default)
+ * - `board_visit` (full post, replies, and quoting backlinks)
+ * - `board_wait` (event-driven reactive wait)
  */
 export function boardTools(board: BoardService, opts: BoardToolsOptions = {}): ToolDefinition[] {
 	return [
 		{
+			name: "board_post",
+			description:
+				"Post to a swarm board channel (#swarm for global, #team-<name> for local). Pass reply_to to comment in a thread, or quote_post_id (with channel='swarm') to quote/crosspost a verified discovery.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					text: { type: "string", description: "Post body text (concise findings, evidence, blockers, or reply)" },
+					title: { type: "string", description: "Optional 1-line title / summary" },
+					channel: { type: "string", description: "Optional channel name (e.g. 'swarm' or 'team-<subtree>')" },
+					topic: { type: "string", description: "Optional short topic tag (e.g. 'contracts', 'dead-end', 'speedup')" },
+					reply_to: { type: "string", description: "Optional post ID to reply to in its thread" },
+					quote_post_id: { type: "string", description: "Optional post ID to quote or crosspost into another channel (e.g. channel='swarm')" },
+					artifact_ids: { type: "array", items: { type: "string" }, description: "Optional artifact IDs" },
+				},
+				required: ["text"],
+			},
+			execute(args, ctx) {
+				const text = typeof args.text === "string" ? args.text.trim() : "";
+				if (!text) {
+					return { text: "board_post rejected: text is required.", isError: true };
+				}
+				const title = typeof args.title === "string" && args.title.trim() ? args.title.trim() : undefined;
+				const channel = typeof args.channel === "string" ? normalizeChannel(args.channel) : undefined;
+				const topic = typeof args.topic === "string" && args.topic.trim() ? args.topic.trim() : "";
+				const replyToId = typeof args.reply_to === "string" && args.reply_to.trim() ? args.reply_to.trim() : undefined;
+				const quotedPostId = typeof args.quote_post_id === "string" && args.quote_post_id.trim() ? args.quote_post_id.trim() : undefined;
+				const artifactIds = Array.isArray(args.artifact_ids)
+					? args.artifact_ids.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+					: undefined;
+				const subtreeId = opts.resolveSubtree?.(ctx.agentId);
+				const effectiveChannel =
+					channel ??
+					(replyToId || quotedPostId
+						? undefined
+						: opts.defaultChannel ??
+							(opts.defaultVisibility === "global"
+								? DEFAULT_CHANNEL
+								: subtreeId && ctx.role === "worker"
+									? `team-${subtreeId}`
+									: DEFAULT_CHANNEL));
+
+				// Check non-blocking stale-thread hint before posting a reply
+				let staleHint = "";
+				if (replyToId) {
+					const tv = board.thread(replyToId, { latest: 50 });
+					if (tv && tv.newestId !== replyToId) {
+						const idx = tv.replies.findIndex((r) => r.id === replyToId);
+						const newer = idx >= 0 ? tv.replies.length - 1 - idx : tv.replies.length;
+						if (newer > 0) {
+							staleHint = ` Note: ${newer} newer repl${newer === 1 ? "y" : "ies"} arrived in this thread (newest=${tv.newestId}).`;
+						}
+					}
+				}
+
+				try {
+					const post = board.publish({
+						runId: ctx.runId,
+						authorAgentId: ctx.agentId,
+						authorHandle: opts.resolveHandle?.(ctx.agentId),
+						channel: effectiveChannel,
+						topic,
+						subtreeId,
+						visibility: effectiveChannel ? (effectiveChannel === DEFAULT_CHANNEL ? "global" : "subtree") : opts.defaultVisibility,
+						summary: deriveSummary(title, text),
+						body: text,
+						replyToId,
+						quotedPostId,
+						artifactIds,
+						isOsActor: false,
+					});
+					const pulse = board.digest(ctx.runId, { channel: postChannel(post), subtreeId });
+					const threadSuffix = post.threadId ? `, thread=${post.threadId}` : "";
+					const quoteSuffix = post.quotedPostId ? `, quotes=${post.quotedPostId}` : "";
+					return {
+						text: `Posted ${post.id} in #${postChannel(post)} (topic=${post.topic}, seq=${postSeq(post)}${threadSuffix}${quoteSuffix}).${staleHint} ${pulse}`,
+						data: { postId: post.id, channel: postChannel(post), seq: postSeq(post), threadId: post.threadId },
+					};
+				} catch (error) {
+					if (error instanceof BoardError) {
+						return {
+							text: `board_post rejected (${error.code}): ${error.message}`,
+							isError: true,
+							data: { code: error.code, ...(error.data ?? {}) },
+						};
+					}
+					return {
+						text: `board_post error: ${error instanceof Error ? error.message : String(error)}`,
+						isError: true,
+					};
+				}
+			},
+		},
+		{
+			name: "board_edit",
+			description: "Edit one of your posts or mark an obsolete/debunked post outdated=true so default searches hide it.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					post_id: { type: "string", description: "Post ID to edit or mark outdated" },
+					text: { type: "string", description: "Optional updated body text" },
+					outdated: { type: "boolean", description: "Set true to mark this post outdated/debunked" },
+					reason: { type: "string", description: "Optional short reason when marking outdated" },
+				},
+				required: ["post_id"],
+			},
+			execute(args, ctx) {
+				const postId = typeof args.post_id === "string" ? args.post_id.trim() : "";
+				if (!postId) return { text: "board_edit rejected: post_id is required.", isError: true };
+				if (!board.edit) return { text: "board_edit is not supported by this board service.", isError: true };
+				const isPlannerOrOs = ctx.role === "planner" || ctx.role === "root" || ctx.role === "integrator";
+				try {
+					const updated = board.edit({
+						postId,
+						authorAgentId: ctx.agentId,
+						isPlannerOrOs,
+						body: typeof args.text === "string" ? args.text : undefined,
+						outdated: args.outdated === true ? true : undefined,
+						outdatedReason: typeof args.reason === "string" ? args.reason : undefined,
+					});
+					const tag = updated.outdated ? `marked outdated (${updated.outdatedReason})` : "updated";
+					return {
+						text: `Post ${updated.id} ${tag}.`,
+						data: { postId: updated.id, outdated: Boolean(updated.outdated), editedAt: updated.editedAt },
+					};
+				} catch (error) {
+					if (error instanceof BoardError) {
+						return {
+							text: `board_edit rejected (${error.code}): ${error.message}`,
+							isError: true,
+							data: { code: error.code, ...(error.data ?? {}) },
+						};
+					}
+					return {
+						text: `board_edit error: ${error instanceof Error ? error.message : String(error)}`,
+						isError: true,
+					};
+				}
+			},
+		},
+		{
 			name: "board_search",
-			description: "Search or list posts on the shared swarm board. Supports optional topic/label/thread/cursor filters and always returns active topics.",
+			description: "Search or list posts on the board (hides outdated posts by default). Omit query to list latest posts.",
 			inputSchema: {
 				type: "object",
 				properties: {
 					query: { type: "string", description: "Optional keywords (omit or empty to list latest posts)" },
+					channel: { type: "string", description: "Optional channel filter (e.g. 'swarm' or 'team-<name>')" },
 					topic: { type: "string", description: "Optional exact topic filter" },
-					kind: { type: "string", enum: ["discovery", "hypothesis", "counterexample", "dead_end", "bound_estimate", "update"], description: "Optional epistemic claim kind filter" },
-					visibility: { type: "string", enum: ["subtree", "global"], description: "Optional visibility scope filter" },
-					channel: { type: "string", description: "Optional board channel name (default swarm)" },
-					thread_id: { type: "string", description: "Optional thread root post ID to read a thread chronologically" },
-					labels: { type: "array", items: { type: "string" }, description: "Optional label filters like ['state=open', 'seat=0']" },
 					after: { type: "number", minimum: 0, description: "Optional cursor: only return posts with seq > after" },
 					k: { type: "number", minimum: 1, maximum: 15, description: "Max results (default 8)" },
 					offset: { type: "number", minimum: 0, description: "Pagination offset (default 0)" },
-					include_superseded: { type: "boolean", description: "Include superseded older drafts (default false)" },
+					include_outdated: { type: "boolean", description: "Include outdated/superseded posts (default false)" },
 				},
 			},
 			execute(args, ctx) {
 				const query = typeof args.query === "string" ? args.query : "";
+				const channel = typeof args.channel === "string" ? normalizeChannel(args.channel) : undefined;
 				const topic = typeof args.topic === "string" && args.topic.trim() ? args.topic.trim() : undefined;
-				const kindRaw = typeof args.kind === "string" ? args.kind.trim() : "";
-				const kind = VALID_KINDS.has(kindRaw as BoardPostKind) ? (kindRaw as BoardPostKind) : undefined;
-				const visibility = args.visibility === "subtree" || args.visibility === "global" ? args.visibility : undefined;
-				const channel = typeof args.channel === "string" && args.channel.trim() ? args.channel.trim() : undefined;
-				const threadId = typeof args.thread_id === "string" && args.thread_id.trim() ? args.thread_id.trim() : undefined;
-				const labels = Array.isArray(args.labels)
-					? args.labels.filter((l): l is string => typeof l === "string" && l.trim().length > 0)
-					: undefined;
 				const afterSeq = typeof args.after === "number" && Number.isFinite(args.after) ? Math.floor(args.after) : undefined;
 				const k = typeof args.k === "number" && Number.isFinite(args.k) ? Math.max(1, Math.min(15, Math.floor(args.k))) : 8;
 				const offset = typeof args.offset === "number" && Number.isFinite(args.offset) ? Math.max(0, Math.floor(args.offset)) : 0;
-				const includeSuperseded = args.include_superseded === true;
-
-				// Thread view shortcut when `thread_id` is passed without a keyword query
-				if (threadId && !query.trim()) {
-					const tv = board.thread(threadId, { latest: k });
-					if (!tv) {
-						return { text: `Thread not found: ${threadId}`, isError: true };
-					}
-					const citations = computeCitationCounts([tv.root, ...tv.replies]);
-					const header = `Thread ${tv.root.id} (${tv.root.topic}, replies=${tv.replies.length}${tv.earlierReplies ? ` + ${tv.earlierReplies} earlier` : ""}, newest_id=${tv.newestId}, cursor=${tv.cursor})`;
-					const lines = [
-						header,
-						"",
-						renderPostEntry(tv.root, "", citations.get(tv.root.id) ?? 0),
-						...tv.replies.map((r) => renderPostEntry(r, "", citations.get(r.id) ?? 0)),
-					];
-					return {
-						text: lines.join("\n\n"),
-						data: { threadId: tv.root.id, newestId: tv.newestId, cursor: tv.cursor, replyCount: tv.replies.length },
-					};
-				}
+				const includeOutdated = args.include_outdated === true;
 
 				const res = board.query(ctx.runId, {
 					query,
+					channel,
 					topic,
-					kind,
-					visibility,
-					board: channel,
-					threadId,
-					labels,
 					afterSeq,
 					k,
 					offset,
-					includeSuperseded,
+					includeOutdated,
 				});
 				const topicList = formatTopics(res.topics);
 				if (!res.hits.length) {
-					const hint = res.topics.length
-						? ` — retry with query="" or topic="${res.topics[0]!.topic}"`
-						: "";
+					const hint = res.topics.length ? ` — retry with query="" or topic="${res.topics[0]!.topic}"` : "";
 					const desc = query.trim() ? ` for "${query.trim()}"` : "";
 					return {
 						text: `No matching posts${desc} (cursor=${res.cursor}) | Active topics: ${topicList}${hint}`,
@@ -676,90 +1076,8 @@ export function boardTools(board: BoardService, opts: BoardToolsOptions = {}): T
 			},
 		},
 		{
-			name: "board_publish",
-			description: "Publish a discovery, partial result, or thread reply to the shared swarm board (supports labels, supersedes, optimistic concurrency, and idempotency).",
-			inputSchema: {
-				type: "object",
-				properties: {
-					topic: { type: "string", description: "Short topic tag (e.g. 'shard-subtotal', 'interface', 'blocker')" },
-					kind: { type: "string", enum: ["discovery", "hypothesis", "counterexample", "dead_end", "bound_estimate", "update"], description: "Typed epistemic claim kind on the shared knowledge DAG" },
-					visibility: { type: "string", enum: ["subtree", "global"], description: "Optional scope ('subtree' for local branch notes, 'global' for cross-swarm announcements)" },
-					summary: { type: "string", description: "1-2 sentence concise summary" },
-					body: { type: "string", description: "Optional full note body" },
-					channel: { type: "string", description: "Optional board channel name (default swarm)" },
-					thread_id: { type: "string", description: "Optional thread root post ID to reply inside a thread" },
-					parent_ids: { type: "array", items: { type: "string" }, description: "Optional cited post IDs this builds on" },
-					supersedes: { type: "string", description: "Optional older post ID that this post replaces" },
-					labels: { type: "object", additionalProperties: { type: "string" }, description: "Optional key-value tags (e.g. { seat: '0', state: 'ready' }); 'os:*' is reserved" },
-					if_latest_id: { type: "string", description: "Optional optimistic lock: fail if thread/topic has a newer post" },
-					idempotency_key: { type: "string", description: "Optional key to deduplicate retried publishes" },
-					artifact_ids: { type: "array", items: { type: "string" }, description: "Optional artifact IDs" },
-				},
-				required: ["topic", "summary"],
-			},
-			execute(args, ctx) {
-				const refs = Array.isArray(args.parent_ids)
-					? args.parent_ids.filter((id): id is string => typeof id === "string" && id.trim().length > 0).map((postId) => ({ postId, reason: "builds_on" }))
-					: undefined;
-				const artifactIds = Array.isArray(args.artifact_ids)
-					? args.artifact_ids.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
-					: undefined;
-				let labels: Record<string, string> | undefined;
-				if (args.labels && typeof args.labels === "object" && !Array.isArray(args.labels)) {
-					labels = {};
-					for (const [k, v] of Object.entries(args.labels as Record<string, unknown>)) {
-						if (v !== undefined && v !== null) labels[k] = String(v);
-					}
-				}
-				const kindRaw = typeof args.kind === "string" ? args.kind.trim() : "";
-				const kind = VALID_KINDS.has(kindRaw as BoardPostKind) ? (kindRaw as BoardPostKind) : undefined;
-				const requestedVis = args.visibility === "subtree" || args.visibility === "global" ? args.visibility : undefined;
-				const subtreeId = opts.resolveSubtree?.(ctx.agentId);
-				try {
-					const post = board.publish({
-						runId: ctx.runId,
-						authorAgentId: ctx.agentId,
-						authorHandle: opts.resolveHandle?.(ctx.agentId),
-						topic: String(args.topic ?? "general"),
-						kind,
-						subtreeId,
-						visibility: requestedVis ?? opts.defaultVisibility,
-						summary: String(args.summary ?? ""),
-						body: typeof args.body === "string" ? args.body : undefined,
-						board: typeof args.channel === "string" && args.channel.trim() ? args.channel.trim() : undefined,
-						threadId: typeof args.thread_id === "string" && args.thread_id.trim() ? args.thread_id.trim() : undefined,
-						references: refs,
-						supersedes: typeof args.supersedes === "string" && args.supersedes.trim() ? args.supersedes.trim() : undefined,
-						labels,
-						ifLatestId: typeof args.if_latest_id === "string" && args.if_latest_id.trim() ? args.if_latest_id.trim() : undefined,
-						idempotencyKey: typeof args.idempotency_key === "string" && args.idempotency_key.trim() ? args.idempotency_key.trim() : undefined,
-						artifactIds,
-						isOsActor: false,
-					});
-					const pulse = board.digest(ctx.runId, { board: post.board, subtreeId });
-					const threadSuffix = post.threadId ? `, thread=${post.threadId}` : "";
-					return {
-						text: `Published ${post.id} (topic=${post.topic}, seq=${postSeq(post)}${threadSuffix}). ${pulse}`,
-						data: { postId: post.id, seq: postSeq(post), threadId: post.threadId },
-					};
-				} catch (error) {
-					if (error instanceof BoardError) {
-						return {
-							text: `board_publish rejected (${error.code}): ${error.message}`,
-							isError: true,
-							data: { code: error.code, ...(error.data ?? {}) },
-						};
-					}
-					return {
-						text: `board_publish error: ${error instanceof Error ? error.message : String(error)}`,
-						isError: true,
-					};
-				}
-			},
-		},
-		{
 			name: "board_visit",
-			description: "Read the full untruncated body, labels, replies, and citing backlinks of one board post by ID.",
+			description: "Read the full untruncated body, thread replies, and quoting/citing backlinks of one post by ID.",
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -771,11 +1089,16 @@ export function boardTools(board: BoardService, opts: BoardToolsOptions = {}): T
 				const res = board.visit(String(args.post_id ?? ""));
 				if (!res) return { text: `Post not found: ${String(args.post_id ?? "")}`, isError: true };
 				const who = res.post.authorHandle ?? res.post.authorAgentId;
-				const superseded = res.post.supersededBy ? `\n[SUPERSEDED BY ${res.post.supersededBy}]` : "";
-				const supersedes = res.post.supersedes ? `\nSupersedes: ${res.post.supersedes}` : "";
+				const chan = `#${postChannel(res.post)}`;
+				const statusBanner = res.post.outdated
+					? `\n[OUTDATED: ${res.post.outdatedReason ?? "superseded"}]`
+					: res.post.supersededBy
+						? `\n[SUPERSEDED BY ${res.post.supersededBy}]`
+						: "";
+				const quoted = res.post.quotedPostId ? `\nQuotes: ${res.post.quotedPostId}` : "";
 				const artifacts = res.post.artifactIds?.length ? `\nArtifacts: ${res.post.artifactIds.join(", ")}` : "";
 				const backlinks = res.citedBy.length
-					? `\nCited by: ${res.citedBy.map((p) => `${p.id} (${p.authorHandle ?? p.authorAgentId})`).join(", ")}`
+					? `\nQuoted/cited by: ${res.citedBy.map((p) => `${p.id} (${p.authorHandle ?? p.authorAgentId} in #${postChannel(p)})`).join(", ")}`
 					: "";
 				const repliesBlock = res.replies?.length
 					? `\n\nReplies (${res.replies.length}, newest_id=${res.newestId}):\n` +
@@ -783,41 +1106,30 @@ export function boardTools(board: BoardService, opts: BoardToolsOptions = {}): T
 							.map((r) => `- [${r.id}] by ${r.authorHandle ?? r.authorAgentId} (seq=${postSeq(r)}): ${r.body}`)
 							.join("\n")
 					: "";
-				const summaryLine = res.post.summary && res.post.body !== res.post.summary ? `\nSummary: ${res.post.summary}` : "";
+				const summaryLine = res.post.summary && res.post.body !== res.post.summary ? `\nTitle: ${res.post.summary}` : "";
 				return {
-					text: `[${res.post.id}] ${res.post.topic} (by ${who}, seq=${postSeq(res.post)}${formatLabels(res.post.labels)}, cursor=${res.cursor ?? 0})${superseded}${summaryLine}\n${res.post.body}${supersedes}${artifacts}${backlinks}${repliesBlock}`,
-					data: { postId: res.post.id, newestId: res.newestId, cursor: res.cursor },
+					text: `[${res.post.id}] ${chan} · ${res.post.topic} (by ${who}, seq=${postSeq(res.post)}${formatLabels(res.post.labels)}, cursor=${res.cursor ?? 0})${statusBanner}${summaryLine}\n${res.post.body}${quoted}${artifacts}${backlinks}${repliesBlock}`,
+					data: { postId: res.post.id, channel: postChannel(res.post), newestId: res.newestId, cursor: res.cursor },
 				};
 			},
 		},
 		{
 			name: "board_wait",
-			description: "Wait reactively (up to 25s, zero polling) until matching peer posts appear on the board (use min_posts to wait for all peers to publish).",
+			description: "Wait reactively (up to 25s, zero polling) until matching peer posts appear on the board.",
 			inputSchema: {
 				type: "object",
 				properties: {
-					after: { type: "number", minimum: 0, description: "Optional cursor: only match posts with seq > after" },
+					channel: { type: "string", description: "Optional channel filter (e.g. 'swarm' or 'team-<name>')" },
 					topic: { type: "string", description: "Optional exact topic filter" },
-					kind: { type: "string", enum: ["discovery", "hypothesis", "counterexample", "dead_end", "bound_estimate", "update"], description: "Optional epistemic claim kind filter" },
-					visibility: { type: "string", enum: ["subtree", "global"], description: "Optional visibility scope filter" },
-					channel: { type: "string", description: "Optional board channel name (default swarm)" },
-					thread_id: { type: "string", description: "Optional thread root post ID filter" },
-					labels: { type: "array", items: { type: "string" }, description: "Optional label filters like ['state=ready']" },
+					after: { type: "number", minimum: 0, description: "Optional cursor: only match posts with seq > after" },
 					min_posts: { type: "number", minimum: 1, maximum: 32, description: "Wait until at least N matching posts exist (default 1)" },
 					timeout_seconds: { type: "number", minimum: 1, maximum: 25, description: "Max seconds to wait (1..25, default 20)" },
 				},
 			},
 			async execute(args, ctx) {
-				const afterSeq = typeof args.after === "number" && Number.isFinite(args.after) ? Math.floor(args.after) : undefined;
+				const channel = typeof args.channel === "string" ? normalizeChannel(args.channel) : undefined;
 				const topic = typeof args.topic === "string" && args.topic.trim() ? args.topic.trim() : undefined;
-				const kindRaw = typeof args.kind === "string" ? args.kind.trim() : "";
-				const kind = VALID_KINDS.has(kindRaw as BoardPostKind) ? (kindRaw as BoardPostKind) : undefined;
-				const visibility = args.visibility === "subtree" || args.visibility === "global" ? args.visibility : undefined;
-				const channel = typeof args.channel === "string" && args.channel.trim() ? args.channel.trim() : undefined;
-				const threadId = typeof args.thread_id === "string" && args.thread_id.trim() ? args.thread_id.trim() : undefined;
-				const labels = Array.isArray(args.labels)
-					? args.labels.filter((l): l is string => typeof l === "string" && l.trim().length > 0)
-					: undefined;
+				const afterSeq = typeof args.after === "number" && Number.isFinite(args.after) ? Math.floor(args.after) : undefined;
 				const minPosts = typeof args.min_posts === "number" && Number.isFinite(args.min_posts)
 					? Math.max(1, Math.min(32, Math.floor(args.min_posts)))
 					: 1;
@@ -826,13 +1138,9 @@ export function boardTools(board: BoardService, opts: BoardToolsOptions = {}): T
 					: 20;
 
 				const res = await board.wait(ctx.runId, {
-					afterSeq,
-					board: channel,
+					channel,
 					topic,
-					kind,
-					visibility,
-					threadId,
-					labels,
+					afterSeq,
 					minPosts,
 					timeoutMs: timeoutSeconds * 1000,
 					signal: ctx.signal,

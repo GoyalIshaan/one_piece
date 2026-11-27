@@ -84,10 +84,11 @@ describe("v2 Harness Engineering: Static KV Prefixes, Scoped Tools, Skills, Code
 				const cacheKeys = new Set(spy.spawnedSpecs.map((s) => s.cacheKeyPrefix));
 				expect(cacheKeys.size).toBe(1);
 
-				// Lean scoped tool menu: NO claim_task, NO complete_task, NO nominate, NO scheduler on default CPU-only config!
+				// Lean scoped tool menu: Board v3 5-tool surface, NO claim_task, NO complete_task, NO nominate, NO scheduler on default CPU-only config!
 				const toolNames = (spy.spawnedSpecs[0]!.tools ?? []).map((t) => t.name);
 				expect(toolNames).toContain("board_search");
-				expect(toolNames).toContain("board_publish");
+				expect(toolNames).toContain("board_post");
+				expect(toolNames).toContain("board_edit");
 				expect(toolNames).toContain("read_artifact");
 				expect(toolNames).toContain("report_finding");
 				expect(toolNames).toContain("load_skill");

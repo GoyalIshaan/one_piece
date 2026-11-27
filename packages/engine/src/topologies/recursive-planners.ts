@@ -24,11 +24,14 @@ export function recursivePlannersTopology(opts: RecursivePlannersOptions = {}): 
 
 	return {
 		name: "recursive-planners",
-		description: "Strict 2-role recursive Planner/Worker search forest with shared Board v2 epistemic claims, Jev triage, and verified trunk assembly.",
+		description: "Strict 2-role recursive Planner/Worker search forest with Reddit/X Board v3 channels, composable spawn_topology, and verified trunk assembly.",
 		async run(os: SwarmOsApi, { goal, rubric, signal, closeoutSignal }): Promise<TopologyOutcome> {
+			if ((await os.waitIfPaused?.(signal)) === "coalescing") {
+				return { status: "stopped", summary: "Recursive-Planners coalesced before launch." };
+			}
 			os.bus.emit(os.runId, "phase.changed", {
 				to: "recursive-forest",
-				reason: "Launching root recursive Planner with Board read-write and dynamic Planner/Worker spawning",
+				reason: "Launching root recursive Planner with Board v3 read-write, Planner/Worker spawning, and composable spawn_topology",
 			});
 
 			const root = await os.spawnWorker({
@@ -41,6 +44,7 @@ export function recursivePlannersTopology(opts: RecursivePlannersOptions = {}): 
 				cacheKeyPrefix: `${os.runId}:recursive-planner`,
 				toolScope: {
 					board: "read-write",
+					defaultChannel: "swarm",
 					artifacts: true,
 					findings: true,
 					tasks: false,
@@ -48,6 +52,7 @@ export function recursivePlannersTopology(opts: RecursivePlannersOptions = {}): 
 					scheduler: "auto",
 					canSpawn: true,
 					spawnAgents: true,
+					spawnTopology: true,
 					passiveSnapshotOnExit: true,
 					subtreeId: "root",
 					defaultPostVisibility: "global",
@@ -57,9 +62,9 @@ export function recursivePlannersTopology(opts: RecursivePlannersOptions = {}): 
 					"You are the root recursive Planner of a physics-bounded swarm operating in isolated git worktrees.",
 					"There are strictly two roles: `planner` (recursive search-tree manager with Board read-write + spawning) and `worker` (leaf executor, cannot spawn).",
 					"You may:",
-					"1. Spawn multiple `planner` and/or `worker` agents in parallel or back-to-back via `spawn_agents(agents=[...])`.",
+					"1. Spawn multiple `planner` and/or `worker` agents in parallel or back-to-back via `spawn_agents(agents=[...])`, or compose any registered sub-topology via `spawn_topology(topology, goal)`.",
 					"2. Collect child results reactively with `await_agents(mode='all'|'any')` and redirect/prune branches with `steer_or_cancel_agent`.",
-					"3. Share non-obvious discoveries, hypotheses, counterexamples, and dead-ends across the whole forest via `board_publish(topic, kind, summary, body, parent_ids)`.",
+					"3. Share discoveries and dead-ends via `board_post` (`#swarm` for global, `#team-<subtree>` for local); crosspost verified child findings from `#team-X` up to `#swarm` with `board_post(quote_post_id=..., channel='swarm')`, and mark stale claims `outdated: true` via `board_edit`.",
 					"4. Solve compact tasks directly in your own worktree when decomposition is unnecessary.",
 					"All committed branches across your forest are automatically snapshotted, verified, and mechanically assembled onto trunk at closeout.",
 				].join("\n"),
@@ -138,6 +143,9 @@ export function recursivePlannersTopology(opts: RecursivePlannersOptions = {}): 
 				);
 			}
 
+			if ((await os.waitIfPaused?.(signal)) === "coalescing") {
+				// Proceed directly to mechanical trunk assembly of committed branches so zero verified work is lost.
+			}
 			if (!signal.aborted) {
 				await os.consolidateFieldGuide?.({ mode: opts.dreamingMode ?? "deterministic" });
 			}

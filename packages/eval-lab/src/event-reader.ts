@@ -16,9 +16,13 @@ export interface PostDocSummary {
 	id: string;
 	authorAgentId: string;
 	subtreeId?: string;
+	channel?: string;
 	visibility?: string;
 	parentIds?: string[];
+	replyToId?: string;
+	quotedPostId?: string;
 	supersededBy?: string;
+	outdated?: boolean;
 	labels?: Record<string, string>;
 }
 
@@ -148,6 +152,12 @@ export function readRunEvents(dbPath: string, runId: string, maxSeq?: number): R
 				if (typeof doc.parentPostId === "string" && doc.parentPostId) {
 					citedIds.add(doc.parentPostId);
 				}
+				if (typeof doc.replyToId === "string" && doc.replyToId) {
+					citedIds.add(doc.replyToId);
+				}
+				if (typeof doc.quotedPostId === "string" && doc.quotedPostId) {
+					citedIds.add(doc.quotedPostId);
+				}
 				if (Array.isArray(doc.references)) {
 					for (const r of doc.references) {
 						if (r && typeof r === "object" && typeof (r as { postId?: unknown }).postId === "string") {
@@ -159,9 +169,13 @@ export function readRunEvents(dbPath: string, runId: string, maxSeq?: number): R
 					id: doc.id,
 					authorAgentId: String(doc.authorAgentId ?? ""),
 					subtreeId: typeof doc.subtreeId === "string" ? doc.subtreeId : undefined,
+					channel: typeof doc.channel === "string" ? doc.channel : typeof doc.board === "string" ? doc.board : undefined,
 					visibility: typeof doc.visibility === "string" ? doc.visibility : undefined,
 					parentIds: citedIds.size ? [...citedIds] : undefined,
+					replyToId: typeof doc.replyToId === "string" ? doc.replyToId : undefined,
+					quotedPostId: typeof doc.quotedPostId === "string" ? doc.quotedPostId : undefined,
 					supersededBy: typeof doc.supersededBy === "string" ? doc.supersededBy : undefined,
+					outdated: doc.outdated === true ? true : undefined,
 					labels: doc.labels && typeof doc.labels === "object" ? (doc.labels as Record<string, string>) : undefined,
 				});
 			}

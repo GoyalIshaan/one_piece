@@ -5,10 +5,12 @@ import {
 	type AgentRecord,
 	assertNever,
 	type BoardService,
+	type BoundOverride,
 	type BudgetVector,
 	type DecisionModelClient,
 	type DriverTier,
 	EventBus,
+	type ExecutionControlMode,
 	FileArtifactStore,
 	type FindingVerifier,
 	GitWorktreeManager,
@@ -20,6 +22,7 @@ import {
 	type ReviewLens,
 	type Role,
 	type Run,
+	type RunControlStatus,
 	shortHandle,
 	type SpawnWorkerRequest,
 	type Store,
@@ -46,6 +49,7 @@ import { spillLargeOutput, workspaceTools } from "@one-piece/module-workspace";
 import { type PoolConfig, Scheduler, schedulerTools } from "@one-piece/scheduler";
 import { CloseoutController } from "./closeout.ts";
 import { createCodeModeTool } from "./codemode.ts";
+import { RunControlController } from "./control-plane.ts";
 import {
 	buildDeterministicFieldGuide,
 	DEFAULT_FIELD_GUIDE_MAX_LINES,
@@ -56,7 +60,7 @@ import {
 } from "./field-guide.ts";
 import { IntegrationPipeline } from "./integration.ts";
 import { FileSkillRegistry, loadSkillTool } from "./skills.ts";
-import { BoardTriageService } from "./triage.ts";
+import { createTopology, TOPOLOGY_NAMES } from "./topologies/index.ts";
 import { TriggerEngine } from "./triggers.ts";
 import { TrustLayer } from "./trust.ts";
 
@@ -93,6 +97,8 @@ export interface SwarmOsConfig {
 	fieldGuideMaxLines?: number;
 	/** Optional System-1 calibrated Decision Model client (e.g., TypeSafe Jev). */
 	decisionClient?: DecisionModelClient;
+	/** Execution control mode: `"research"` (pausable, human checkpoints) or `"eval"` (strictly unpausable, variance-free). */
+	controlMode?: ExecutionControlMode;
 	rawConfig?: Record<string, unknown>;
 	store: Store;
 	router: QuotaPoolRouter;
@@ -143,10 +149,12 @@ export class SwarmOS implements SwarmOsApi {
 	readonly skills: FileSkillRegistry;
 	readonly integration: IntegrationPipeline;
 	readonly decisionClient?: DecisionModelClient;
-	readonly triage: BoardTriageService;
+	readonly controlMode: ExecutionControlMode;
 	readonly fieldGuidePath: string;
 
 	private currentRun: Run;
+	private readonly control: RunControlController;
+	private readonly unsubBestPointer: () => void;
 	private readonly reservePct: number;
 	private readonly wallSeconds?: number;
 	private readonly closeoutGraceMs: number;
@@ -192,6 +200,13 @@ export class SwarmOS implements SwarmOsApi {
 			readonly phase: "active";
 			readonly reserveTimer: ReturnType<typeof setTimeout>;
 			readonly hardTimer: ReturnType<typeof setTimeout>;
+			readonly reserveDeadlineMs: number;
+			readonly hardDeadlineMs: number;
+		}
+		| {
+			readonly phase: "paused";
+			readonly remainingReserveMs: number;
+			readonly remainingHardMs: number;
 		}
 		| { readonly phase: "closeout_grace"; readonly graceTimer: ReturnType<typeof setTimeout> }
 		| { readonly phase: "expired" }
@@ -238,11 +253,46 @@ export class SwarmOS implements SwarmOsApi {
 		this.artifacts = new FileArtifactStore(this.runId, this.runDir, this.bus);
 		this.board = new SwarmBoardService(this.bus);
 		this.decisionClient = cfg.decisionClient;
-		this.triage = new BoardTriageService({
+		this.controlMode = cfg.controlMode ?? "research";
+		this.control = new RunControlController({
 			runId: this.runId,
-			board: this.board,
+			runDir: this.runDir,
+			mode: this.controlMode,
+			store: this.store,
 			bus: this.bus,
-			decisionClient: this.decisionClient,
+			onPause: () => this.pauseWallBudgetTimers(),
+			onResume: () => this.resumeWallBudgetTimers(),
+			onLiveSteer: (message, targetAgentId) => {
+				for (const [id, active] of this.activeHandles.entries()) {
+					if (targetAgentId && id !== targetAgentId) continue;
+					void active.handle.steer?.(`[Human researcher steer] ${message}`).catch(() => {});
+				}
+			},
+			onCoalesce: (reason) => {
+				if (!this.workAbort.signal.aborted) {
+					this.workAbort.abort(new Error(`Coalesce requested: ${reason}`));
+				}
+			},
+		});
+		this.unsubBestPointer = this.bus.on((ev) => {
+			if (ev.runId !== this.runId || ev.type !== "finding.verdict") return;
+			const fid = typeof ev.data.findingId === "string" ? ev.data.findingId : undefined;
+			if (!fid) return;
+			const finding = this.store.get("findings", fid);
+			if (!finding || finding.status !== "accepted") return;
+			const sub = finding.submissions.at(-1);
+			if (!sub) return;
+			this.control.updateBestSoFar({
+				runId: this.runId,
+				findingId: finding.id,
+				revision: sub.revision,
+				score: finding.score ?? sub.score,
+				accepted: true,
+				artifactSha256: sub.artifactSha256,
+				snapshotDir: sub.snapshotDir,
+				claim: finding.claim,
+				updatedAt: Date.now(),
+			});
 		});
 		this.secrets = new LocalSecretBroker(this.runId, this.bus, { secrets: cfg.secrets ?? [] });
 		this.skills = new FileSkillRegistry({ projectDir: cfg.workspace, extraDirs: cfg.skillsDirs });
@@ -294,7 +344,10 @@ export class SwarmOS implements SwarmOsApi {
 			spawnReviewer: (req) => this.spawnWorker(req),
 		});
 
-		this.closeout = new CloseoutController(this.runId, this.runDir, this.bus, this.trust);
+		this.closeout = new CloseoutController(this.runId, this.runDir, this.bus, this.trust, {
+			worktrees: this.worktrees,
+			closeoutSignal: this.closeoutAbort.signal,
+		});
 		this.integration = new IntegrationPipeline(this);
 
 		this.triggers = new TriggerEngine({
@@ -325,43 +378,90 @@ export class SwarmOS implements SwarmOsApi {
 		this.triggers.start();
 		if (this.wallSeconds && this.wallSeconds > 0) {
 			const reserveMs = Math.max(1_000, Math.floor(this.wallSeconds * (1 - this.reservePct) * 1000));
-			const reserveTimer = setTimeout(() => {
-				if (this.wallBudgetState.phase !== "active") return;
-				const { next, changed } = transitionRun(this.currentRun, { type: "enter_closing", reason: "Wall-clock reserve reached", now: Date.now() });
-				if (changed) {
-					this.currentRun = next;
-					this.bus.save("runs", this.currentRun);
-					this.bus.emit(this.runId, "run.closing", { reason: "Wall-clock reserve reached", reservePct: this.reservePct });
-				}
-			}, reserveMs);
-			reserveTimer.unref?.();
-
-			// Hard wall-clock cutoff: abort active LLM turns via workAbort, while keeping closeoutAbort
-			// alive for a bounded non-preemptible grace window so mechanical assembly & verification succeed.
 			const hardMs = Math.max(reserveMs + 1_000, Math.ceil(this.wallSeconds * 1000));
-			const hardTimer = setTimeout(() => {
-				if (this.wallBudgetState.phase !== "active") return;
-				clearTimeout(this.wallBudgetState.reserveTimer);
-				if (!this.workAbort.signal.aborted) {
-					this.workAbort.abort(new Error(`Wall-clock limit (${this.wallSeconds}s) exceeded`));
-				}
-				if (!this.closeoutAbort.signal.aborted) {
-					const graceTimer = setTimeout(() => {
-						if (this.wallBudgetState.phase !== "closeout_grace") return;
-						this.wallBudgetState = { phase: "expired" };
-						if (!this.closeoutAbort.signal.aborted) {
-							this.closeoutAbort.abort(new Error(`Closeout grace (${this.closeoutGraceMs}ms) exceeded`));
-						}
-					}, Math.max(1_000, this.closeoutGraceMs));
-					graceTimer.unref?.();
-					this.wallBudgetState = { phase: "closeout_grace", graceTimer };
-				} else {
-					this.wallBudgetState = { phase: "expired" };
-				}
-			}, hardMs);
-			hardTimer.unref?.();
-			this.wallBudgetState = { phase: "active", reserveTimer, hardTimer };
+			this.armWallBudgetTimers(reserveMs, hardMs);
 		}
+	}
+
+	private armWallBudgetTimers(reserveMs: number, hardMs: number): void {
+		const now = Date.now();
+		const safeReserve = Math.max(50, reserveMs);
+		const safeHard = Math.max(safeReserve + 50, hardMs);
+		const reserveTimer = setTimeout(() => {
+			if (this.wallBudgetState.phase !== "active") return;
+			const { next, changed } = transitionRun(this.currentRun, {
+				type: "enter_closing",
+				reason: "Wall-clock reserve reached",
+				now: Date.now(),
+			});
+			if (changed) {
+				this.currentRun = next;
+				this.bus.save("runs", this.currentRun);
+				this.bus.emit(this.runId, "run.closing", { reason: "Wall-clock reserve reached", reservePct: this.reservePct });
+			}
+		}, safeReserve);
+		reserveTimer.unref?.();
+
+		const hardTimer = setTimeout(() => {
+			if (this.wallBudgetState.phase !== "active") return;
+			clearTimeout(this.wallBudgetState.reserveTimer);
+			if (!this.workAbort.signal.aborted) {
+				this.workAbort.abort(new Error(`Wall-clock limit (${this.wallSeconds}s) exceeded`));
+			}
+			if (!this.closeoutAbort.signal.aborted) {
+				const graceTimer = setTimeout(() => {
+					if (this.wallBudgetState.phase !== "closeout_grace") return;
+					this.wallBudgetState = { phase: "expired" };
+					if (!this.closeoutAbort.signal.aborted) {
+						this.closeoutAbort.abort(new Error(`Closeout grace (${this.closeoutGraceMs}ms) exceeded`));
+					}
+				}, Math.max(1_000, this.closeoutGraceMs));
+				graceTimer.unref?.();
+				this.wallBudgetState = { phase: "closeout_grace", graceTimer };
+			} else {
+				this.wallBudgetState = { phase: "expired" };
+			}
+		}, safeHard);
+		hardTimer.unref?.();
+		this.wallBudgetState = {
+			phase: "active",
+			reserveTimer,
+			hardTimer,
+			reserveDeadlineMs: now + safeReserve,
+			hardDeadlineMs: now + safeHard,
+		};
+	}
+
+	private pauseWallBudgetTimers(): void {
+		if (this.wallBudgetState.phase !== "active") return;
+		const now = Date.now();
+		clearTimeout(this.wallBudgetState.reserveTimer);
+		clearTimeout(this.wallBudgetState.hardTimer);
+		const remainingReserveMs = Math.max(50, this.wallBudgetState.reserveDeadlineMs - now);
+		const remainingHardMs = Math.max(remainingReserveMs + 50, this.wallBudgetState.hardDeadlineMs - now);
+		this.wallBudgetState = { phase: "paused", remainingReserveMs, remainingHardMs };
+	}
+
+	private resumeWallBudgetTimers(): void {
+		if (this.wallBudgetState.phase !== "paused") return;
+		const { remainingReserveMs, remainingHardMs } = this.wallBudgetState;
+		this.armWallBudgetTimers(remainingReserveMs, remainingHardMs);
+	}
+
+	pollControl(): { readonly state: RunControlStatus; readonly newSteeringNotes: readonly string[]; readonly boundOverride?: BoundOverride } {
+		return this.control.poll();
+	}
+
+	waitIfPaused(signal?: AbortSignal): Promise<"running" | "coalescing" | "aborted"> {
+		return this.control.waitIfPaused(signal ?? this.workAbort.signal);
+	}
+
+	requestCoalesce(reason?: string): void {
+		this.control.enqueueLocal({ type: "coalesce", reason: reason ?? "Coalesce requested by OS" }, "os");
+	}
+
+	activeSteeringNotes(): readonly string[] {
+		return this.control.activeSteeringNotes();
 	}
 
 	get closeoutSignal(): AbortSignal {
@@ -381,7 +481,7 @@ export class SwarmOS implements SwarmOsApi {
 	}
 
 	isInCloseoutReserve(): boolean {
-		if (this.currentRun.status === "closing") return true;
+		if (this.currentRun.status === "closing" || this.control.status === "coalescing") return true;
 		const { budget, spent } = this.currentRun;
 		if (budget.tokens && budget.tokens > 0) {
 			const remaining = 1 - (spent.tokens ?? 0) / budget.tokens;
@@ -392,8 +492,8 @@ export class SwarmOS implements SwarmOsApi {
 			if (remaining <= this.reservePct) return true;
 		}
 		if (this.wallSeconds && this.wallSeconds > 0) {
-			const elapsedSec = (Date.now() - this.startedAt) / 1000;
-			const remaining = 1 - elapsedSec / this.wallSeconds;
+			const activeElapsedMs = Math.max(0, Date.now() - this.startedAt - this.control.totalPausedMs);
+			const remaining = 1 - activeElapsedMs / (this.wallSeconds * 1000);
 			if (remaining <= this.reservePct) return true;
 		}
 		return false;
@@ -401,7 +501,8 @@ export class SwarmOS implements SwarmOsApi {
 
 	remainingWallMs(): number | undefined {
 		if (!this.wallSeconds || this.wallSeconds <= 0) return undefined;
-		return Math.max(0, Math.floor(this.wallSeconds * 1000 - (Date.now() - this.startedAt)));
+		const activeElapsedMs = Math.max(0, Date.now() - this.startedAt - this.control.totalPausedMs);
+		return Math.max(0, Math.floor(this.wallSeconds * 1000 - activeElapsedMs));
 	}
 
 	createTask(input: {
@@ -590,12 +691,17 @@ export class SwarmOS implements SwarmOsApi {
 		const boardToolOpts = {
 			resolveHandle: (id: string) => this.store.get("agents", id)?.handle,
 			resolveSubtree: (id: string) => opts.subtreeId ?? this.store.get("agents", id)?.subtreeId,
+			defaultChannel: opts.defaultChannel,
 			defaultVisibility: opts.defaultPostVisibility ?? (role === "worker" ? ("subtree" as const) : ("global" as const)),
 		};
 		if (boardMode === "read-write") {
 			tools.push(...boardTools(this.board, boardToolOpts));
 		} else if (boardMode === "read") {
-			tools.push(...boardTools(this.board, boardToolOpts).filter((t) => t.name === "board_search" || t.name === "board_visit"));
+			tools.push(
+				...boardTools(this.board, boardToolOpts).filter(
+					(t) => t.name === "board_search" || t.name === "board_visit" || t.name === "board_wait",
+				),
+			);
 		}
 
 		if (opts.artifacts !== false) {
@@ -891,11 +997,14 @@ export class SwarmOS implements SwarmOsApi {
 											...sharedChildScope,
 											canSpawn: true,
 											spawnAgents: true,
+											spawnTopology: true,
+											defaultChannel: "swarm",
 											defaultPostVisibility: "global",
 										},
 										systemPrompt: [
 											"You are a recursive Planner managing a search subtree in an isolated git worktree.",
-											"You may solve directly, spawn parallel or sequential child Planners/Workers via `spawn_agents` + `await_agents`, and publish discoveries/hypotheses/dead-ends to Board v2 (`board_publish`) so sibling Planners learn from your branch.",
+											"You may solve directly, spawn parallel or sequential child Planners/Workers via `spawn_agents` + `await_agents`, or compose any nested sub-topology via `spawn_topology`.",
+											"Use Reddit/X board tools (`board_post`, `board_edit`, `board_search`, `board_visit`, `board_wait`): crosspost verified child discoveries from `#team-<subtree>` up to `#swarm` via `board_post(quote_post_id=..., channel='swarm')`, and mark debunked claims `outdated: true` via `board_edit`.",
 										].join("\n"),
 									})
 									: await this.spawnWorker({
@@ -906,11 +1015,13 @@ export class SwarmOS implements SwarmOsApi {
 											...sharedChildScope,
 											canSpawn: false,
 											spawnAgents: false,
+											spawnTopology: false,
+											defaultChannel: `team-${childSubtree}`,
 											defaultPostVisibility: "subtree",
 										},
 										systemPrompt: [
 											"You are a focused leaf Worker in an isolated git worktree (cannot spawn sub-agents).",
-											"Implement and verify your assigned task cleanly, and publish key discoveries, counterexamples, or dead-ends via `board_publish(kind=...)`.",
+											"Implement and verify your assigned task cleanly. Post progress to your team channel via `board_post` (or pass `channel='swarm'` directly for urgent repo-wide blockers/landmines).",
 										].join("\n"),
 									});
 								resolvedAgentId = child.agent.id;
@@ -1032,7 +1143,7 @@ export class SwarmOS implements SwarmOsApi {
 				},
 				{
 					name: "await_agents",
-					description: "Wait for spawned child Planners/Workers to finish (mode='all' or 'any') and run Board triage so high-signal child discoveries are promoted.",
+					description: "Wait for spawned child Planners/Workers/sub-topologies to finish (mode='all' or 'any') and review any new posts in their #team-<subtree> channels for crossposting to #swarm.",
 					inputSchema: {
 						type: "object",
 						properties: {
@@ -1042,6 +1153,10 @@ export class SwarmOS implements SwarmOsApi {
 						},
 					},
 					execute: async (args, ctx) => {
+						const ctrlState = await this.waitIfPaused(ctx.signal);
+						if (ctrlState === "coalescing") {
+							return { text: "Run is coalescing — wrap up and nominate best verified result." };
+						}
 						const requestedIds = Array.isArray(args.agent_ids)
 							? args.agent_ids.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
 							: [];
@@ -1087,25 +1202,49 @@ export class SwarmOS implements SwarmOsApi {
 							return { text: `await_agents timed out after ${args.timeout_seconds}s while ${targets.length} child(ren) remain running.` };
 						}
 
-						// Run Decision-Model Board triage on newly produced subtree claims before returning to parent Planner.
-						await this.triage.triagePosts({
-							goal: this.currentRun.goal.text,
-							signal: this.closeoutAbort.signal,
-						}).catch(() => {});
+						// Remove settled children from active map so repeated `await_agents(mode='any')` calls don't re-return finished slots.
+						for (const r of settled) {
+							for (const [k, v] of this.spawnedChildren.entries()) {
+								if (v.agentId === r.agentId) this.spawnedChildren.delete(k);
+							}
+						}
+
+						// Surface recent child `#team-<subtree>` channel posts so parent Planners can explicitly crosspost verified wins to `#swarm`.
+						const seenChannels = new Set<string>();
+						const channelDigestLines: string[] = [];
+						for (const r of settled) {
+							const ag = this.store.get("agents", r.agentId);
+							const sub = ag?.subtreeId;
+							if (!sub) continue;
+							const chan = `team-${sub}`;
+							if (seenChannels.has(chan)) continue;
+							seenChannels.add(chan);
+							const recentPosts = this.board.recentChannelPosts?.(this.runId, chan, { limit: 4 }) ?? [];
+							for (const p of recentPosts) {
+								channelDigestLines.push(`  - [${p.id}] #${chan} by ${p.authorHandle ?? p.authorAgentId}: ${p.summary.slice(0, 140)}`);
+							}
+						}
 
 						const lines = settled.map(
 							(r) =>
 								`- ${r.handle} (${r.role}, id=${r.agentId}, status=${r.status}${r.branch ? `, branch=${r.branch}` : ""}${r.score !== undefined ? `, score=${r.score.toFixed(4)}` : ""}): ${r.summary.slice(0, 320)}`,
 						);
+						const channelBlock = channelDigestLines.length
+							? `\n\nRecent child team-channel posts (crosspost verified wins to #swarm with board_post(quote_post_id=..., channel='swarm')):\n${channelDigestLines.join("\n")}`
+							: "";
+						const poll = this.pollControl();
+						const steerBlock = poll.newSteeringNotes.length
+							? `\n\nHuman steering updates:\n${poll.newSteeringNotes.map((s) => `- ${s}`).join("\n")}`
+							: "";
 						return {
-							text: `Collected ${settled.length} child result(s):\n${lines.join("\n")}`,
+							text: `Collected ${settled.length} child result(s):\n${lines.join("\n")}${channelBlock}${steerBlock}`,
 							data: { results: settled },
 						};
 					},
 				},
 				{
 					name: "steer_or_cancel_agent",
-					description: "Redirect (steer) or cancel a live spawned child agent when a sibling discovers a better direction or dead-end.",
+					description: "Redirect (steer) or cancel a live spawned child agent or sub-topology when a sibling discovers a better direction or dead-end.",
 					inputSchema: {
 						type: "object",
 						properties: {
@@ -1130,6 +1269,123 @@ export class SwarmOS implements SwarmOsApi {
 					},
 				},
 			);
+		}
+
+		// Universal Composable Topology Recursion: ONLY non-worker roles may spawn nested sub-topologies.
+		// Zero artificial depth or worker caps — governed organically by run budget & PhysicsConcurrencyGovernor!
+		if (role !== "worker" && opts.spawnTopology) {
+			tools.push({
+				name: "spawn_topology",
+				description:
+					"Launch any registered swarm topology asynchronously on a scoped sub-goal (shares run budget and concurrency governor; returns an ID you can collect with await_agents). Topologies differ only in execution structure: 'adaptive' (auto-selects topology), 'evolution' (async Director-led genetic search with code crossover), 'recursive-planners' (dynamic 2-role planner/worker forest), 'substrate-peers' (flat symmetric board peers + trunk assembly), 'pull-refinery' (DAG ticket queue + serialized merge refinery), 'elastic-phase' (scout -> wide explore -> dream -> narrow integrate), 'hierarchy' (planner -> parallel workers -> integrator), 'single' (1 worker).",
+				inputSchema: {
+					type: "object",
+					properties: {
+						topology: {
+							type: "string",
+							enum: [...TOPOLOGY_NAMES],
+							description: "Registered topology structure to run",
+						},
+						goal: { type: "string", description: "Scoped sub-goal for this sub-topology" },
+						handle: { type: "string", description: "Optional readable handle (e.g. 'sub-evo-kernel')" },
+						base_ref: { type: "string", description: "Optional git branch/SHA to branch this sub-topology from" },
+						rubric: { type: "string", description: "Optional verification rubric" },
+					},
+					required: ["topology", "goal"],
+				},
+				execute: async (args, ctx) => {
+					if (this.workAbort.signal.aborted || this.isInCloseoutReserve()) {
+						return { text: "Cannot spawn sub-topology during closeout reserve or after abort.", isError: true };
+					}
+					const topologyName = String(args.topology ?? "").trim();
+					if (!(TOPOLOGY_NAMES as readonly string[]).includes(topologyName)) {
+						return { text: `Unknown topology "${topologyName}". Available: ${TOPOLOGY_NAMES.join(", ")}`, isError: true };
+					}
+					const subGoal = String(args.goal ?? "").trim();
+					if (!subGoal) {
+						return { text: "spawn_topology rejected: goal must be non-empty.", isError: true };
+					}
+					const parentRec = this.store.get("agents", ctx.agentId);
+					const parentDepth = parentRec?.depth ?? 0;
+					const parentSubtree = parentRec?.subtreeId ?? ctx.agentId;
+					const handle = typeof args.handle === "string" && args.handle.trim()
+						? args.handle.trim()
+						: `sub-${topologyName}-d${parentDepth + 1}`;
+					const subId = newId("sub");
+					const subtreeId = `${parentSubtree}/${handle}`;
+					const baseRef = typeof args.base_ref === "string" && args.base_ref.trim() ? args.base_ref.trim() : undefined;
+					const rubric = typeof args.rubric === "string" && args.rubric.trim() ? args.rubric.trim() : undefined;
+					const subAbort = new AbortController();
+					const combined = AbortSignal.any([this.workAbort.signal, subAbort.signal]);
+
+					const promise: Promise<SpawnedChildOutcome> = (async () => {
+						try {
+							const out = await this.runSubTopology({
+								parentAgentId: ctx.agentId,
+								topology: topologyName,
+								goal: subGoal,
+								rubric,
+								baseRef,
+								subtreeId,
+								depth: parentDepth + 1,
+								signal: combined,
+							});
+							if (out.status === "failed") {
+								return {
+									agentId: subId,
+									handle,
+									role: "planner",
+									status: "failed",
+									branch: out.bestBranch,
+									summary: out.summary.slice(0, 800),
+								};
+							}
+							return {
+								agentId: subId,
+								handle,
+								role: "planner",
+								status: out.status === "stopped" ? "interrupted" : "completed",
+								branch: out.bestBranch,
+								score: out.bestScore,
+								summary: out.summary.slice(0, 800),
+							};
+						} catch (err) {
+							return {
+								agentId: subId,
+								handle,
+								role: "planner",
+								status: "failed",
+								summary: err instanceof Error ? err.message : String(err),
+							};
+						}
+					})();
+
+					this.spawnedChildren.set(subId, {
+						agentId: subId,
+						parentAgentId: ctx.agentId,
+						role: "planner",
+						handle,
+						subtreeId,
+						promise,
+						cancel: () => subAbort.abort(new Error(`Cancelled sub-topology ${handle} by parent ${ctx.agentId}`)),
+						steer: async (msg: string) => {
+							this.board.publish({
+								runId: this.runId,
+								authorAgentId: ctx.agentId,
+								channel: `team-${subtreeId}`,
+								topic: "parent-steer",
+								summary: `Steer for ${handle}: ${msg.slice(0, 240)}`,
+								body: msg,
+							});
+						},
+					});
+
+					return {
+						text: `Launched sub-topology ${handle} (topology=${topologyName}, id=${subId}, depth=${parentDepth + 1}). Collect results via await_agents(agent_ids=["${subId}"]).`,
+						data: { agentId: subId, handle, topology: topologyName, subtreeId, depth: parentDepth + 1 },
+					};
+				},
+			});
 		}
 
 		if (opts.skills !== false && this.skills.renderOnDemandCatalog(role, opts.excludeSkills).length > 0) {
@@ -1235,9 +1491,135 @@ export class SwarmOS implements SwarmOsApi {
 		return tools.sort((a, b) => a.name.localeCompare(b.name));
 	}
 
+	async runSubTopology(req: {
+		parentAgentId: string;
+		topology: string;
+		goal: string;
+		rubric?: string;
+		baseRef?: string;
+		subtreeId: string;
+		depth: number;
+		options?: Record<string, unknown>;
+		signal: AbortSignal;
+	}): Promise<TopologyOutcome & { bestBranch?: string; bestScore?: number }> {
+		const subAgentIds = new Set<string>();
+		this.bus.emit(
+			this.runId,
+			"topology.spawned",
+			{
+				parentAgentId: req.parentAgentId,
+				topology: req.topology,
+				subtreeId: req.subtreeId,
+				depth: req.depth,
+				baseRef: req.baseRef,
+				goalPreview: req.goal.slice(0, 200),
+			},
+			req.parentAgentId,
+		);
+
+		const parentOs = this;
+		const scopedOs: SwarmOsApi = {
+			runId: this.runId,
+			runDir: this.runDir,
+			bus: this.bus,
+			store: this.store,
+			worktrees: this.worktrees,
+			artifacts: this.artifacts,
+			board: this.board,
+			scheduler: this.scheduler,
+			secrets: this.secrets,
+			trust: this.trust,
+			router: this.router,
+			mcp: this.mcp,
+			closeoutSignal: this.closeoutSignal,
+			integration: this.integration,
+			decisionClient: this.decisionClient,
+			controlMode: this.controlMode,
+			fieldGuidePath: this.fieldGuidePath,
+			setFieldGuideEnabled: (enabled) => this.setFieldGuideEnabled(enabled),
+			run: () => this.run(),
+			isInCloseoutReserve: () => this.isInCloseoutReserve(),
+			remainingWallMs: () => this.remainingWallMs(),
+			createTask: (input) => this.createTask(input),
+			readyTasks: () => this.readyTasks(),
+			defaultToolsFor: (role, opts) =>
+				this.defaultToolsFor(role, {
+					...(opts ?? {}),
+					subtreeId: opts?.subtreeId ?? req.subtreeId,
+				}),
+			spawnWorker: async (spawnReq) => {
+				const handle = await parentOs.spawnWorker({
+					...spawnReq,
+					parentAgentId: spawnReq.parentAgentId ?? req.parentAgentId,
+					subtreeId: spawnReq.subtreeId ?? req.subtreeId,
+					depth: spawnReq.depth ?? req.depth,
+					baseRef: spawnReq.baseRef ?? req.baseRef,
+				} as SpawnWorkerRequest);
+				subAgentIds.add(handle.agent.id);
+				return handle;
+			},
+			nominate: (findingId, revision, auto) => this.nominate(findingId, revision, auto),
+			fieldGuideSnapshot: () => this.fieldGuideSnapshot(),
+			consolidateFieldGuide: (opts) => this.consolidateFieldGuide(opts),
+			pollControl: () => this.pollControl(),
+			waitIfPaused: (sig) => this.waitIfPaused(sig),
+			requestCoalesce: (reason) => this.requestCoalesce(reason),
+			activeSteeringNotes: () => this.activeSteeringNotes(),
+			runSubTopology: (nested) => this.runSubTopology(nested),
+		};
+
+		const plugin = createTopology(req.topology, {
+			...(req.options ?? {}),
+			controlMode: this.controlMode,
+		});
+		const outcome = await plugin.run(scopedOs, {
+			goal: req.goal,
+			rubric: req.rubric,
+			signal: req.signal,
+			closeoutSignal: this.closeoutAbort.signal,
+		});
+
+		const subFindings = this.store
+			.list("findings", { runId: this.runId })
+			.filter((f) => subAgentIds.has(f.authorAgentId))
+			.sort((a, b) => (b.score ?? -Infinity) - (a.score ?? -Infinity));
+		const bestFinding = subFindings[0];
+		const bestAgent = bestFinding
+			? this.store.get("agents", bestFinding.authorAgentId)
+			: [...subAgentIds]
+				.map((id) => this.store.get("agents", id))
+				.find((a) => Boolean(a?.branch));
+		const bestBranch = bestAgent?.branch;
+		const bestScore = bestFinding?.score;
+
+		this.bus.emit(
+			this.runId,
+			"topology.completed",
+			{
+				parentAgentId: req.parentAgentId,
+				topology: req.topology,
+				subtreeId: req.subtreeId,
+				status: outcome.status,
+				bestScore,
+				branch: bestBranch,
+			},
+			req.parentAgentId,
+		);
+
+		return {
+			...outcome,
+			...(bestBranch ? { bestBranch } : {}),
+			...(bestScore !== undefined ? { bestScore } : {}),
+		};
+	}
+
 	async spawnWorker(req: SpawnWorkerRequest): Promise<WorkerHandle> {
 		if (this.lifecycle.kind === "disposed") {
 			throw new Error(`Cannot spawn worker (${req.role}) after SwarmOS has been disposed`);
+		}
+		const pauseGate = await this.waitIfPaused(this.workAbort.signal);
+		if (pauseGate === "coalescing" && !req.readOnly && req.role !== "integrator" && req.role !== "reviewer") {
+			throw new Error(`Cannot spawn ${req.role}: run is coalescing`);
 		}
 		const agentId = newId("agt");
 		const effectiveDeniedReadPaths = [...new Set([...this.runDeniedReadPaths, ...(req.deniedReadPaths ?? [])])];
@@ -1275,11 +1657,13 @@ export class SwarmOS implements SwarmOsApi {
 			// Enforce strict 2-role invariant: leaf workers NEVER gain spawn permissions.
 			const canSpawnEffective = req.role === "worker" ? false : (req.canSpawn ?? req.toolScope?.canSpawn ?? false);
 			const spawnAgentsEffective = req.role === "worker" ? false : (req.toolScope?.spawnAgents ?? false);
+			const spawnTopologyEffective = req.role === "worker" ? false : (req.toolScope?.spawnTopology ?? false);
 			return req.tools ??
 				this.defaultToolsFor(req.role, {
 					...(req.toolScope ?? {}),
 					canSpawn: canSpawnEffective,
 					spawnAgents: spawnAgentsEffective,
+					spawnTopology: spawnTopologyEffective,
 					subtreeId: effectiveSubtreeId,
 					readOnly: req.readOnly ?? req.toolScope?.readOnly ?? false,
 					excludeSkills: req.skills,
@@ -2093,6 +2477,7 @@ export class SwarmOS implements SwarmOsApi {
 			case "closeout_grace":
 				clearTimeout(this.wallBudgetState.graceTimer);
 				break;
+			case "paused":
 			case "unbounded":
 			case "expired":
 			case "disposed":
@@ -2107,10 +2492,12 @@ export class SwarmOS implements SwarmOsApi {
 		if (this.lifecycle.kind === "disposed") return;
 		this.lifecycle = { kind: "disposed" };
 		this.clearWallBudgetTimers();
+		this.unsubBestPointer();
 		this.triggers.stop();
 		this.workAbort.abort();
 		this.closeoutAbort.abort();
 		await Promise.allSettled([...this.activeHandles.values()].map(({ handle }) => handle.close()));
+		this.worktrees.cleanupDetachedWorktrees();
 		await this.scheduler.dispose();
 		await this.mcp.close();
 	}

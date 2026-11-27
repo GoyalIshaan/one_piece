@@ -4,14 +4,21 @@ import {
 	type AgentStatus,
 	assertNever,
 	type BoardPost,
+	type BoundOverride,
+	type BreakableAssumption,
 	type ClaimedTaskRecord,
 	type EvidenceLevel,
+	type EvolutionFamilyRecord,
 	type Exclusive,
+	type ExecutionControlMode,
 	type Finding,
 	type FindingSubmission,
 	type ProviderQuotaRecord,
 	type ReviewRound,
+	type RooflineBoundSnapshot,
 	type Run,
+	type RunControlPayload,
+	type RunControlStatus,
 	type TaskRecord,
 	type TaskStatus,
 	TERMINAL_AGENT_STATUSES,
@@ -537,3 +544,364 @@ export function transitionDriverWindow(
 			return assertNever(event, "Unhandled DriverWindowEvent");
 	}
 }
+
+// --- 11. Board v3 Outdated & Crosspost State Machines ---
+// Invariants:
+// - An already-outdated or superseded post cannot be marked outdated twice or crossposted.
+// - Crossposting produces a validated quote/repost targeting a concrete destination channel.
+
+export type OutdatedBoardPost = BoardPost & { readonly outdated: true; readonly outdatedReason: string; readonly editedAt: number };
+
+export type MarkOutdatedPostOutcome = Exclusive<
+	| { readonly ok: true; readonly updated: OutdatedBoardPost }
+	| { readonly ok: false; readonly reason: "already_outdated" | "already_superseded" }
+>;
+
+export function transitionMarkOutdatedPost(
+	target: BoardPost,
+	reason: string | undefined,
+	now = Date.now(),
+): MarkOutdatedPostOutcome {
+	if (target.outdated) {
+		return { ok: false, reason: "already_outdated" };
+	}
+	if (target.supersededBy) {
+		return { ok: false, reason: "already_superseded" };
+	}
+	const cleanReason = reason?.trim() || "Marked outdated";
+	return {
+		ok: true,
+		updated: {
+			...target,
+			outdated: true,
+			outdatedReason: cleanReason,
+			editedAt: now,
+		},
+	};
+}
+
+export type CrosspostOutcome = Exclusive<
+	| { readonly ok: true; readonly sourcePostId: string; readonly sourceChannel: string; readonly targetChannel: string }
+	| { readonly ok: false; readonly reason: "source_outdated" | "source_superseded" | "empty_channel" }
+>;
+
+export function transitionCrosspost(
+	source: BoardPost,
+	targetChannel: string,
+): CrosspostOutcome {
+	const cleanTarget = targetChannel.trim();
+	if (!cleanTarget) {
+		return { ok: false, reason: "empty_channel" };
+	}
+	if (source.outdated) {
+		return { ok: false, reason: "source_outdated" };
+	}
+	if (source.supersededBy) {
+		return { ok: false, reason: "source_superseded" };
+	}
+	const sourceChannel = source.channel?.trim() || source.board?.trim() || (source.visibility === "subtree" && source.subtreeId ? `team-${source.subtreeId}` : "swarm");
+	return {
+		ok: true,
+		sourcePostId: source.id,
+		sourceChannel,
+		targetChannel: cleanTarget,
+	};
+}
+
+// --- 12. Evolution v4 Family Lifecycle State Machine ---
+// Invariant: Terminal family states (`converged | merged | pruned`) cannot accept new agents or re-prune;
+// `merged` always carries `mergedIntoFamilyId` + `crossoverFindingId`.
+
+export type EvolutionFamilyEvent =
+	| { readonly type: "attach_agent"; readonly agentId: string; readonly now: number }
+	| { readonly type: "detach_agent"; readonly agentId: string; readonly now: number }
+	| { readonly type: "converge"; readonly bestFindingId: string; readonly reason: string; readonly now: number }
+	| { readonly type: "merge"; readonly mergedIntoFamilyId: string; readonly crossoverFindingId: string; readonly now: number }
+	| { readonly type: "prune"; readonly reason: string; readonly now: number };
+
+export type EvolutionFamilyTransitionResult = Exclusive<
+	| { readonly ok: true; readonly next: EvolutionFamilyRecord }
+	| { readonly ok: false; readonly reason: "family_not_active" | "invalid_merge_self" }
+>;
+
+export function transitionEvolutionFamily(
+	current: EvolutionFamilyRecord,
+	event: EvolutionFamilyEvent,
+): EvolutionFamilyTransitionResult {
+	if (current.status !== "active") {
+		return { ok: false, reason: "family_not_active" };
+	}
+	const {
+		status: _s,
+		activeAgentIds: _a,
+		bestFindingId: _bf,
+		mergedIntoFamilyId: _mf,
+		crossoverFindingId: _cf,
+		reason: _r,
+		...base
+	} = current;
+
+	switch (event.type) {
+		case "attach_agent": {
+			const nextAgents = current.activeAgentIds.includes(event.agentId)
+				? current.activeAgentIds
+				: [...current.activeAgentIds, event.agentId];
+			return {
+				ok: true,
+				next: { ...base, status: "active", activeAgentIds: nextAgents, updatedAt: event.now },
+			};
+		}
+		case "detach_agent": {
+			const nextAgents = current.activeAgentIds.filter((id) => id !== event.agentId);
+			return {
+				ok: true,
+				next: { ...base, status: "active", activeAgentIds: nextAgents, updatedAt: event.now },
+			};
+		}
+		case "converge":
+			return {
+				ok: true,
+				next: {
+					...base,
+					status: "converged",
+					bestFindingId: event.bestFindingId,
+					reason: event.reason.trim() || "Converged",
+					updatedAt: event.now,
+				},
+			};
+		case "merge":
+			if (event.mergedIntoFamilyId === current.id) {
+				return { ok: false, reason: "invalid_merge_self" };
+			}
+			return {
+				ok: true,
+				next: {
+					...base,
+					status: "merged",
+					mergedIntoFamilyId: event.mergedIntoFamilyId,
+					crossoverFindingId: event.crossoverFindingId,
+					updatedAt: event.now,
+				},
+			};
+		case "prune":
+			return {
+				ok: true,
+				next: {
+					...base,
+					status: "pruned",
+					reason: event.reason.trim() || "Pruned",
+					updatedAt: event.now,
+				},
+			};
+		default:
+			return assertNever(event, "Unhandled EvolutionFamilyEvent");
+	}
+}
+
+// --- 13. External Run Control State Machine ---
+// Invariant: `coalescing` is a terminal absorbing state (late pause/resume/steer cannot resurrect it);
+// `"eval"` mode forbids `pause` so anytime benchmarking remains strictly unpausable.
+
+export type RunControlState = Exclusive<
+	| { readonly status: "running"; readonly totalPausedMs: number }
+	| { readonly status: "paused"; readonly pausedAt: number; readonly reason: string; readonly totalPausedMs: number }
+	| { readonly status: "coalescing"; readonly reason: string; readonly totalPausedMs: number }
+>;
+
+export type RunControlTransitionResult = Exclusive<
+	| {
+		readonly accepted: true;
+		readonly next: RunControlState;
+		readonly transitioned: boolean;
+		readonly pausedDeltaMs?: number;
+		readonly steeringNote?: string;
+		readonly boundOverride?: BoundOverride;
+	}
+	| {
+		readonly accepted: false;
+		readonly next: RunControlState;
+		readonly rejectedReason: string;
+	}
+>;
+
+export function transitionRunControl(
+	current: RunControlState,
+	payload: RunControlPayload,
+	opts: { readonly mode: ExecutionControlMode; readonly now: number },
+): RunControlTransitionResult {
+	if (current.status === "coalescing") {
+		return {
+			accepted: false,
+			next: current,
+			rejectedReason: `Run is already coalescing; cannot apply "${payload.type}".`,
+		};
+	}
+
+	switch (payload.type) {
+		case "pause": {
+			if (opts.mode === "eval") {
+				return {
+					accepted: false,
+					next: current,
+					rejectedReason: 'Pause is disabled in "eval" mode to preserve fair anytime benchmarking.',
+				};
+			}
+			if (current.status === "paused") {
+				return { accepted: true, next: current, transitioned: false };
+			}
+			return {
+				accepted: true,
+				next: {
+					status: "paused",
+					pausedAt: opts.now,
+					reason: payload.reason?.trim() || "Paused by external control command",
+					totalPausedMs: current.totalPausedMs,
+				},
+				transitioned: true,
+			};
+		}
+		case "resume": {
+			if (current.status !== "paused") {
+				return {
+					accepted: true,
+					next: current,
+					transitioned: false,
+					...(payload.steeringNote?.trim() ? { steeringNote: payload.steeringNote.trim() } : {}),
+				};
+			}
+			const pausedDeltaMs = Math.max(0, opts.now - current.pausedAt);
+			return {
+				accepted: true,
+				next: {
+					status: "running",
+					totalPausedMs: current.totalPausedMs + pausedDeltaMs,
+				},
+				transitioned: true,
+				pausedDeltaMs,
+				...(payload.steeringNote?.trim() ? { steeringNote: payload.steeringNote.trim() } : {}),
+			};
+		}
+		case "steer": {
+			const msg = payload.message.trim();
+			if (!msg) {
+				return { accepted: false, next: current, rejectedReason: "Steer message cannot be empty." };
+			}
+			return {
+				accepted: true,
+				next: current,
+				transitioned: false,
+				steeringNote: msg,
+			};
+		}
+		case "update_bound":
+			return {
+				accepted: true,
+				next: current,
+				transitioned: false,
+				boundOverride: payload.override,
+			};
+		case "coalesce": {
+			const extraPaused = current.status === "paused" ? Math.max(0, opts.now - current.pausedAt) : 0;
+			return {
+				accepted: true,
+				next: {
+					status: "coalescing",
+					reason: payload.reason?.trim() || "Graceful coalesce requested",
+					totalPausedMs: current.totalPausedMs + extraPaused,
+				},
+				transitioned: true,
+				...(extraPaused > 0 ? { pausedDeltaMs: extraPaused } : {}),
+			};
+		}
+		default:
+			return assertNever(payload, "Unhandled RunControlPayload");
+	}
+}
+
+// --- 14. Roofline Bound Monotonic Empirical Clamping ---
+// Invariant: If an accepted verified finding empirically exceeds `paradigmCeiling` (or `hardCeiling`),
+// mark the violated assumption `"broken"` and clear the falsified ceiling so ratios never exceed 1.0 impossibly.
+
+export interface RooflineClampResult {
+	readonly next: RooflineBoundSnapshot;
+	readonly paradigmBroken: boolean;
+	readonly hardBroken: boolean;
+	readonly brokenAssumptionIds: readonly string[];
+}
+
+export function clampRooflineBoundEmpirically(
+	bound: RooflineBoundSnapshot,
+	observedScore: number,
+): RooflineClampResult {
+	if (!Number.isFinite(observedScore)) {
+		return { next: bound, paradigmBroken: false, hardBroken: false, brokenAssumptionIds: [] };
+	}
+	const eps = 1e-9;
+	const exceeds = (ceil: number | null) =>
+		ceil !== null &&
+		Number.isFinite(ceil) &&
+		(bound.higherIsBetter ? observedScore > ceil + eps : observedScore < ceil - eps);
+
+	const paradigmBroken = exceeds(bound.paradigmCeiling);
+	const hardBroken = exceeds(bound.hardCeiling);
+	if (!paradigmBroken && !hardBroken) {
+		return { next: bound, paradigmBroken: false, hardBroken: false, brokenAssumptionIds: [] };
+	}
+
+	const brokenAssumptionIds: string[] = [];
+	const nextAssumptions: BreakableAssumption[] = bound.breakableAssumptions.map((a) => {
+		if (paradigmBroken && a.tier === "paradigm" && (a.status === "active" || a.status === "attempted")) {
+			brokenAssumptionIds.push(a.id);
+			return { ...a, status: "broken" };
+		}
+		if (hardBroken && a.tier === "hard" && a.status !== "broken") {
+			brokenAssumptionIds.push(a.id);
+			return { ...a, status: "broken" };
+		}
+		return a;
+	});
+
+	const nextHardCeiling = hardBroken ? null : bound.hardCeiling;
+	const nextParadigmCeiling = paradigmBroken ? null : bound.paradigmCeiling;
+	const nextEstimated = nextParadigmCeiling ?? nextHardCeiling;
+
+	return {
+		next: {
+			...bound,
+			hardCeiling: nextHardCeiling,
+			isProvenHard: hardBroken ? false : bound.isProvenHard,
+			paradigmCeiling: nextParadigmCeiling,
+			estimatedCeiling: nextEstimated,
+			breakableAssumptions: nextAssumptions,
+			revision: bound.revision + 1,
+		},
+		paradigmBroken,
+		hardBroken,
+		brokenAssumptionIds,
+	};
+}
+
+export function applyBoundOverrideToRoofline(
+	bound: RooflineBoundSnapshot,
+	override: BoundOverride,
+): RooflineBoundSnapshot {
+	const hardCeiling = override.hardCeiling !== undefined ? override.hardCeiling : bound.hardCeiling;
+	const paradigmCeiling = override.paradigmCeiling !== undefined ? override.paradigmCeiling : bound.paradigmCeiling;
+	const activeBottleneck = override.activeBottleneck?.trim() || bound.activeBottleneck;
+	const breakableAssumptions = override.markAssumptionBroken
+		? bound.breakableAssumptions.map((a) =>
+			a.id === override.markAssumptionBroken ? { ...a, status: "broken" as const } : a,
+		)
+		: bound.breakableAssumptions;
+	return {
+		...bound,
+		hardCeiling,
+		paradigmCeiling,
+		estimatedCeiling: paradigmCeiling ?? hardCeiling,
+		activeBottleneck,
+		breakableAssumptions,
+		revision: bound.revision + 1,
+	};
+}
+
+export type RunControlStatusValue = RunControlStatus;

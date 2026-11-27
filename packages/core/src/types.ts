@@ -160,12 +160,14 @@ export interface BoardPost {
 	id: string;
 	runId: string;
 	board?: string;
+	/** Reddit/X-native channel name ("swarm" for global, "team-<subtreeId>" for local team boards). */
+	channel?: string;
 	topic: string;
-	/** Typed epistemic claim classification on the shared knowledge DAG. */
+	/** Typed epistemic claim classification on the shared knowledge DAG (legacy/optional). */
 	kind?: BoardPostKind;
 	/** Subtree root identifier of the author (enables low-noise local digests). */
 	subtreeId?: string;
-	/** Two-tier visibility: subtree-local by default for workers, promoted to global by Decision Model triage. */
+	/** Visibility derived from channel ("swarm" -> global, "team-*" -> subtree). */
 	visibility?: BoardVisibility;
 	authorAgentId: string;
 	authorHandle?: string;
@@ -174,13 +176,126 @@ export interface BoardPost {
 	references?: BoardReference[];
 	artifactIds?: string[];
 	parentPostId?: string;
+	/** Direct reply target post ID (Board v3). */
+	replyToId?: string;
+	/** Quoted / crossposted source post ID (Board v3). */
+	quotedPostId?: string;
 	threadId?: string;
 	labels?: Record<string, string>;
 	supersedes?: string;
 	supersededBy?: string;
+	editedAt?: number;
+	outdated?: boolean;
+	outdatedReason?: string;
 	seq?: number;
 	idempotencyKey?: string;
 	createdAt: number;
+}
+
+// --- Evolution v4 (Director-Led Asynchronous Recursive GA) Types ---
+
+export type EvolutionFamilyPhase = Exclusive<
+	| { readonly status: "active"; readonly activeAgentIds: readonly string[] }
+	| { readonly status: "converged"; readonly bestFindingId: string; readonly reason: string }
+	| { readonly status: "merged"; readonly mergedIntoFamilyId: string; readonly crossoverFindingId: string }
+	| { readonly status: "pruned"; readonly reason: string }
+>;
+
+export interface EvolutionFamilyFields {
+	readonly id: string;
+	readonly parentFamilyId?: string;
+	readonly directorAgentId: string;
+	readonly name: string;
+	readonly hypothesis: string;
+	readonly nicheTag: string;
+	readonly channel: string;
+	readonly depth: number;
+	readonly createdAt: number;
+	readonly updatedAt: number;
+}
+
+export type EvolutionFamilyRecord = EvolutionFamilyFields & EvolutionFamilyPhase;
+
+export type EvolutionOperator = "seed" | "mutate" | "crossover" | "subdirector";
+
+export interface EvolutionEliteRecord {
+	readonly findingId: string;
+	readonly revision: number;
+	readonly familyId: string;
+	readonly branch: string;
+	readonly commitSha: string;
+	readonly treeSha: string;
+	readonly score: number;
+	readonly accepted: boolean;
+	readonly operator: EvolutionOperator;
+	readonly parentFindingIds: readonly string[];
+	readonly nicheSignature: string;
+	readonly diffStat: string;
+	readonly summary: string;
+	readonly createdAt: number;
+}
+
+// --- Roofline Bounds & External Research/Eval Control Plane Types ---
+
+export type ExecutionControlMode = "eval" | "research";
+
+export type RunControlStatus = "running" | "paused" | "coalescing";
+
+export interface BreakableAssumption {
+	readonly id: string;
+	readonly assumption: string;
+	readonly unlockHint: string;
+	readonly tier: "paradigm" | "hard";
+	readonly status: "active" | "attempted" | "broken" | "confirmed_hard";
+}
+
+export interface RooflineBoundSnapshot {
+	readonly metricName: string;
+	readonly higherIsBetter: boolean;
+	/** Tier 1: Physical / mathematical speed-of-light limit (hard roof). */
+	readonly hardCeiling: number | null;
+	/** True only if hardCeiling is an exact mathematical/spec limit (e.g. score=1.0 or proven exact floor). */
+	readonly isProvenHard: boolean;
+	/** Tier 2: Bottleneck-constrained ceiling under the current algorithmic paradigm. */
+	readonly paradigmCeiling: number | null;
+	/** Backwards-compatible scalar alias: paradigmCeiling ?? hardCeiling. */
+	readonly estimatedCeiling: number | null;
+	readonly activeBottleneck: string;
+	readonly derivationSummary: string;
+	readonly keyAssumptions: string[];
+	readonly breakableAssumptions: readonly BreakableAssumption[];
+	/** Fraction of Tier-2 paradigmCeiling that triggers a paradigm-shift directive (default 0.90). */
+	readonly paradigmShiftFraction: number;
+	/** Fraction of Tier-1 hardCeiling that triggers completion/checkpoint (default 0.96). */
+	readonly stoppingFraction: number;
+	readonly confidence: number;
+	readonly revision: number;
+	readonly boardPostId?: string;
+}
+
+export interface BoundOverride {
+	readonly hardCeiling?: number | null;
+	readonly paradigmCeiling?: number | null;
+	readonly activeBottleneck?: string;
+	readonly markAssumptionBroken?: string;
+}
+
+export type RunControlPayload = Exclusive<
+	| { readonly type: "pause"; readonly reason?: string }
+	| { readonly type: "resume"; readonly steeringNote?: string }
+	| { readonly type: "steer"; readonly message: string; readonly targetAgentId?: string; readonly scope?: "next_wave" | "live_workers" | "both" }
+	| { readonly type: "update_bound"; readonly override: BoundOverride; readonly reason?: string }
+	| { readonly type: "coalesce"; readonly reason?: string }
+>;
+
+export interface RunControlCommandRecord {
+	readonly id: string;
+	readonly runId: string;
+	readonly issuedBy: "cli" | "dashboard" | "callback" | "os";
+	readonly createdAt: number;
+	readonly acknowledgedAt?: number;
+	readonly rejectedReason?: string;
+	readonly payload: RunControlPayload;
 }
 
 export interface ArtifactRecord {

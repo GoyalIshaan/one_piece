@@ -9,12 +9,15 @@ import type {
 	BoardPost,
 	BoardPostKind,
 	BoardVisibility,
+	BoundOverride,
 	EvidenceLevel,
 	Exclusive,
+	ExecutionControlMode,
 	Finding,
 	JsonSchema,
 	Role,
 	Run,
+	RunControlStatus,
 	RunNomination,
 	TaskRecord,
 	ToolDefinition,
@@ -45,6 +48,20 @@ export interface WorktreeManager {
 	mergeIntoTrunk(branch: string, opts?: { message?: string }): MergeTrunkResult;
 	mergePreviewDiff(branch: string): { baseSha: string; trunkDiff: string; branchDiff: string };
 	resetTrunk?(ref: string): boolean;
+	/** Return unified git diff between two refs (capped for LLM context safety). */
+	diffRefs?(baseRef: string, targetRef: string, opts?: { maxChars?: number; paths?: readonly string[] }): string;
+	/** Read a file at a specific git ref (path-traversal safe, capped). */
+	showFileAtRef?(ref: string, relPath: string, opts?: { maxChars?: number }): string;
+	/** Create a detached read-only reference worktree under `runDir/refs/<label>` for code-level crossover inspection. */
+	createReadOnlyReference?(ref: string, label: string): string;
+	/** Create an isolated detached worktree for zero-LLM closeout salvage merges (never mutates trunk). */
+	createDetachedWorktree?(baseRef: string, label: string): string;
+	/** Attempt a clean conflict-free git merge of `branch` into an arbitrary isolated worktree path. */
+	mergeBranchIntoWorktree?(worktreePath: string, branch: string, message?: string): MergeTrunkResult;
+	/** Reset an arbitrary isolated worktree cleanly back to `ref`. */
+	resetWorktree?(worktreePath: string, ref: string): boolean;
+	/** Clean up any detached reference/salvage worktrees created during this run. */
+	cleanupDetachedWorktrees?(): void;
 	remove(worktreePath: string): void;
 }
 
@@ -105,6 +122,8 @@ export interface TrustService {
 	challengeFinding(findingId: string, challengeJson: string, actorId: string, signal?: AbortSignal): Promise<Finding>;
 	verifyAndReview(findingId: string, opts?: { runBlindReviewer?: boolean; signal?: AbortSignal }): Promise<Finding>;
 	bestVerifiedFinding(runId: string): { finding: Finding; revision: number } | undefined;
+	/** Closeout-only fallback: highest-scoring frozen verified snapshot with positive score > 0 when no accepted finding exists. */
+	bestPartialScoredFinding?(runId: string): { finding: Finding; revision: number; score: number } | undefined;
 	drainPending(): Promise<void>;
 }
 
@@ -113,6 +132,8 @@ export interface BoardPublishInput {
 	authorAgentId: string;
 	authorHandle?: string;
 	topic: string;
+	/** Reddit/X-native channel ("swarm" or "team-<subtreeId>"). Takes precedence over legacy `board`. */
+	channel?: string;
 	kind?: BoardPostKind;
 	subtreeId?: string;
 	visibility?: BoardVisibility;
@@ -122,6 +143,10 @@ export interface BoardPublishInput {
 	references?: Array<{ postId: string; reason: string }>;
 	artifactIds?: string[];
 	parentPostId?: string;
+	/** Direct reply target post ID (Board v3). */
+	replyToId?: string;
+	/** Quoted / crossposted source post ID (Board v3). */
+	quotedPostId?: string;
 	threadId?: string;
 	labels?: Record<string, string>;
 	supersedes?: string;
@@ -131,11 +156,22 @@ export interface BoardPublishInput {
 	isOsActor?: boolean;
 }
 
+export interface BoardEditInput {
+	postId: string;
+	authorAgentId: string;
+	isPlannerOrOs?: boolean;
+	body?: string;
+	summary?: string;
+	outdated?: boolean;
+	outdatedReason?: string;
+}
+
 export interface BoardQueryOptions {
 	query?: string;
 	k?: number;
 	offset?: number;
 	board?: string;
+	channel?: string;
 	topic?: string;
 	kind?: BoardPostKind;
 	subtreeId?: string;
@@ -144,6 +180,7 @@ export interface BoardQueryOptions {
 	labels?: readonly string[];
 	afterSeq?: number;
 	includeSuperseded?: boolean;
+	includeOutdated?: boolean;
 }
 
 export interface BoardTopicSummary {
@@ -184,6 +221,7 @@ export interface BoardLabelInput {
 export interface BoardWaitOptions {
 	afterSeq?: number;
 	board?: string;
+	channel?: string;
 	topic?: string;
 	kind?: BoardPostKind;
 	visibility?: BoardVisibility;
@@ -213,6 +251,7 @@ export type BoardWaitResult = Exclusive<
 
 export interface BoardService {
 	publish(input: BoardPublishInput): BoardPost;
+	edit?(input: BoardEditInput): BoardPost;
 	search(runId: string, query: string, opts?: { k?: number; board?: string }): BoardSearchHit[];
 	query(runId: string, opts?: BoardQueryOptions): BoardQueryResult;
 	topics(runId: string, board?: string): BoardTopicSummary[];
@@ -221,7 +260,8 @@ export interface BoardService {
 	label(postId: string, input: BoardLabelInput): BoardPostLabelResult;
 	/** Promote a subtree-local epistemic post to global visibility with OS curation labels. */
 	promote?(postId: string, input: { actorId: string; labels?: Record<string, string>; reason?: string }): BoardPost | undefined;
-	digest(runId: string, boardOrOpts?: string | { board?: string; subtreeId?: string }): string;
+	recentChannelPosts?(runId: string, channel: string, opts?: { afterSeq?: number; limit?: number }): BoardPost[];
+	digest(runId: string, boardOrOpts?: string | { board?: string; channel?: string; subtreeId?: string }): string;
 	wait(runId: string, opts?: BoardWaitOptions): Promise<BoardWaitResult>;
 	recent(runId: string, limit?: number): BoardPost[];
 }
@@ -243,10 +283,16 @@ export interface ToolScope {
 	canSpawn?: boolean;
 	/** Expose first-class recursive Planner spawning tools (`spawn_agents`, `await_agents`, `steer_or_cancel_agent`). Strictly denied for `role === "worker"`. */
 	spawnAgents?: boolean;
+	/** Expose composable `spawn_topology` tool so planners/directors can recursively invoke any registered topology. Strictly denied for `role === "worker"`. */
+	spawnTopology?: boolean;
+	/** Mark agent as an Evolution v4 Director (used for strict compile-time role enforcement). Strictly denied for `role === "worker"`. */
+	evolutionDirector?: boolean;
 	/** Automatically capture & verify a passive snapshot whenever a worker exits with new commits. */
 	passiveSnapshotOnExit?: boolean;
 	/** Subtree ID for scoped board publishing & digests. */
 	subtreeId?: string;
+	/** Default Board v3 channel ("swarm" or "team-<subtreeId>"). */
+	defaultChannel?: string;
 	/** Default visibility stamped onto agent board posts ("subtree" for workers, "global" for top planners). */
 	defaultPostVisibility?: BoardVisibility;
 	/** Read-only worker flag. */
@@ -269,9 +315,11 @@ export interface ToolScope {
 	editFormat?: "search_replace" | "apply_patch";
 }
 
-export type WorkerToolScope = Omit<ToolScope, "canSpawn" | "spawnAgents"> & {
+export type WorkerToolScope = Omit<ToolScope, "canSpawn" | "spawnAgents" | "spawnTopology" | "evolutionDirector"> & {
 	readonly canSpawn?: false;
 	readonly spawnAgents?: false;
+	readonly spawnTopology?: false;
+	readonly evolutionDirector?: false;
 };
 
 interface SpawnWorkerRequestBase {
@@ -545,6 +593,32 @@ export interface SwarmOsApi {
 	fieldGuideSnapshot?(): string;
 	/** Wave-boundary dreaming: consolidate board posts, verifier receipts, and handoffs into <= 80 lines. */
 	consolidateFieldGuide?(opts?: { mode?: "deterministic" | "llm" }): Promise<{ lines: number; bytes: number; path: string }>;
+	/** Execution control mode ("research" supports human pause/steer/briefs; "eval" is strictly unpausable). */
+	readonly controlMode?: ExecutionControlMode;
+	/** Poll SQLite WAL for newly arrived external control commands (`pause`, `resume`, `steer`, `update_bound`, `coalesce`). */
+	pollControl?(): {
+		readonly state: RunControlStatus;
+		readonly newSteeringNotes: readonly string[];
+		readonly boundOverride?: BoundOverride;
+	};
+	/** Pause-gate awaited at wave, phase, and spawn boundaries. */
+	waitIfPaused?(signal?: AbortSignal): Promise<"running" | "coalescing" | "aborted">;
+	/** Trigger graceful coalesce (aborts workAbort while preserving closeoutAbort for final nomination). */
+	requestCoalesce?(reason?: string): void;
+	/** Accumulated active human steering notes for this run. */
+	activeSteeringNotes?(): readonly string[];
+	/** Invoke any registered topology recursively inside a scoped child facade (unbounded depth, governed by physics + budget). */
+	runSubTopology?(req: {
+		parentAgentId: string;
+		topology: string;
+		goal: string;
+		rubric?: string;
+		baseRef?: string;
+		subtreeId: string;
+		depth: number;
+		options?: Record<string, unknown>;
+		signal: AbortSignal;
+	}): Promise<TopologyOutcome & { bestBranch?: string; bestScore?: number }>;
 }
 
 export interface TopologyPlugin {

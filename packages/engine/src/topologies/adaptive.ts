@@ -3,6 +3,7 @@ import { basename, dirname, extname, join, relative } from "node:path";
 import {
 	assertNever,
 	type Exclusive,
+	type ExecutionControlMode,
 	getChoiceAnswer,
 	getNoulAnswer,
 	type SwarmOsApi,
@@ -13,6 +14,7 @@ import type { CheckpointPolicy, HumanCheckpointHandler } from "../bounds.ts";
 import { probeWorkspaceEnvironment } from "../field-guide.ts";
 import { elasticPhaseTopology, type ElasticPhaseOptions } from "./elastic-phase.ts";
 import { evolutionTopology, type EvolutionTopologyOptions } from "./evolution.ts";
+import { hierarchyTopology } from "./hierarchy.ts";
 import { pullRefineryTopology } from "./pull-refinery.ts";
 import { recursivePlannersTopology } from "./recursive-planners.ts";
 import { substratePeersTopology, type SubstrateSeatConfig } from "./substrate-peers.ts";
@@ -31,16 +33,18 @@ export interface AdaptiveTopologyOptions {
 	enableFieldGuideOverride?: boolean;
 	/** Enable mid-run telemetry morphing check via Decision Model (default true). */
 	enableMidRunMorph?: boolean;
-	/** First-principles bound estimation override (when omitted, decided by Jev). */
+	/** First-principles Roofline bound estimation override (when omitted, decided by Jev). */
 	estimateBounds?: boolean;
-	/** Researcher checkpoint policy (default "coalesce"). */
+	/** Execution control mode ("eval" vs "research"). */
+	controlMode?: ExecutionControlMode;
+	/** Researcher checkpoint policy. */
 	checkpointPolicy?: CheckpointPolicy;
 	onHumanCheckpoint?: HumanCheckpointHandler;
 	/** Minimum Jev confidence required to accept its routing choice over structural fallback (default 0.55). */
 	minDecisionConfidence?: number;
 }
 
-export type AdaptiveDelegateName = "elastic-phase" | "evolution" | "recursive-planners" | "substrate-peers" | "pull-refinery";
+export type AdaptiveDelegateName = "elastic-phase" | "evolution" | "recursive-planners" | "substrate-peers" | "pull-refinery" | "hierarchy";
 
 export interface AdaptiveExecutionPlan {
 	readonly source: "decision-model" | "structural-heuristic";
@@ -352,12 +356,23 @@ const VALID_DELEGATES = new Set<AdaptiveDelegateName>([
 	"recursive-planners",
 	"substrate-peers",
 	"pull-refinery",
+	"hierarchy",
 ]);
+
+/** Strictly neutral, structure-only descriptions (zero task-domain biasing!). */
+export const NEUTRAL_TOPOLOGY_CRITERIA = {
+	"elastic-phase": "Four-stage sequential width schedule: 1 scout partitions work into lanes -> K parallel isolated workers execute lanes -> context reset/consolidation -> 1 integrator merges branches and repairs.",
+	evolution: "Asynchronous Director-led genetic search over a shared verified git archive: optional serial Phase-0 2-tier Roofline analysis -> seeds distinct parallel families -> supports recursive child family directors, pruning, and code-level branch crossover/merging.",
+	"recursive-planners": "Dynamic two-role Planner/Worker tree: root planner recursively spawns child planners, leaf workers, and nested sub-topologies over shared board channels, assembling committed branches at closeout.",
+	"substrate-peers": "Flat symmetric communicating peers in isolated worktrees coordinating directly over a shared message board, followed by mechanical trunk assembly.",
+	"pull-refinery": "Upfront dependency-DAG task queue with atomic ticket leasing by parallel workers and a serialized one-by-one merge refinery.",
+	hierarchy: "Planner decomposes work into subtasks (optionally spawning recursive sub-topologies), parallel leaf workers execute, and a single integrator synthesizes results.",
+} as const;
 
 /**
  * Calibrated System-1 Decision-Model Pre-Flight Meta-Router (TypeSafe Jev).
- * Evaluates 6 atomic routing questions in 1 single ~200ms pass (0 output tokens) and
- * falls back seamlessly to `classifyAdaptiveRegime()` when offline or below confidence threshold.
+ * Evaluates 6 atomic routing questions using strictly neutral structural topology descriptions
+ * (zero task-domain biasing or heuristic leakage) and falls back to `classifyAdaptiveRegime()` offline.
  */
 export async function resolveAdaptiveExecutionPlan(
 	os: SwarmOsApi,
@@ -379,7 +394,7 @@ export async function resolveAdaptiveExecutionPlan(
 			regime: fallback.regime,
 			delegate: fallback.delegate,
 			dreamingMode: "deterministic",
-			enableBoard: fallback.delegate !== "evolution",
+			enableBoard: true,
 			estimateBounds: fallback.regime === "scalar-optimization",
 			widthMultiplier: 1,
 			confidence: 0.7,
@@ -388,12 +403,12 @@ export async function resolveAdaptiveExecutionPlan(
 	}
 
 	const probe = probeWorkspaceEnvironment(params.workspaceDir, os.worktrees.baseSha);
+	// Strictly neutral state: NEVER inject heuristic delegate recommendation or domain biases into Jev!
 	const state = [
 		`Goal: ${params.goal}`,
 		params.rubric ? `Rubric: ${params.rubric}` : "",
 		`Privately Sharded Seats: ${params.hasSeatConfigs ? "YES (mandatory cross-seat board consensus)" : "NO"}`,
 		`Structural Metrics: codeFiles=${fallback.codeFiles}, codeBytes=${fallback.codeBytes}, sourceDirs=${fallback.sourceDirs}, internalImportEdges=${fallback.internalImportEdges}, maxImportFanOut=${fallback.maxImportFanOut}, importCouplingDensity=${fallback.importCouplingDensity}, specPhaseHeadings=${fallback.specPhaseHeadings}`,
-		`Heuristic Baseline Recommendation: ${fallback.delegate} (${fallback.regime})`,
 		"",
 		probe,
 	].filter(Boolean).join("\n");
@@ -404,14 +419,8 @@ export async function resolveAdaptiveExecutionPlan(
 			questions: {
 				initial_topology: {
 					type: "choice",
-					instructions: "Which swarm topology should execute this task initially?",
-					criteria: {
-						"elastic-phase": "Scout -> Wide Explore -> Dream -> Narrow single-writer integration; strongest for privately sharded consensus or multi-phase repo migrations",
-						evolution: "Multi-generation parallel search with MAP-Elites crossover; strongest for compact scalar optimization or tightly coupled single-context repos",
-						"recursive-planners": "Recursive 2-role Planner/Worker search forest with shared Board; strongest for open-ended, broad, or deeply decomposable search spaces",
-						"substrate-peers": "Flat communicating peers over Board v2; strongest for symmetric discovery or peer sharded exchange",
-						"pull-refinery": "Task-board ticket leasing with sequential refinery merges; strongest for cleanly independent multi-ticket feature queues",
-					},
+					instructions: "Which swarm execution structure fits this workspace and goal best?",
+					criteria: NEUTRAL_TOPOLOGY_CRITERIA,
 				},
 				enable_wave1_field_guide: {
 					type: "noul",
@@ -423,19 +432,19 @@ export async function resolveAdaptiveExecutionPlan(
 				},
 				enable_board: {
 					type: "noul",
-					instructions: "Should workers share epistemic discoveries and dead-ends via Board v2 during execution?",
+					instructions: "Should workers actively share discoveries and dead-ends via Board v3 channels during execution?",
 				},
 				estimate_first_principles_bound: {
 					type: "noul",
-					instructions: "Is this an open-ended optimization or discovery task where deriving a Phase-0 first-principles theoretical ceiling would guide stopping?",
+					instructions: "Would deriving a serial Phase-0 2-tier Roofline bound (hard speed-of-light ceiling + current-paradigm bottleneck ceiling + breakable assumptions) help guide initial search strategy and paradigm shifts?",
 				},
 				initial_width_tier: {
 					type: "choice",
 					instructions: "What initial parallel worker width tier fits this workload best?",
 					criteria: {
-						narrow: "Small focused parallelism (2 workers) for simple or sequential work",
-						balanced: "Standard parallelism (4 workers) for typical multi-branch tasks",
-						wide: "High parallelism (6-8 workers) for broad search spaces or many independent modules",
+						narrow: "Small focused parallelism (2 workers)",
+						balanced: "Standard parallelism (4 workers)",
+						wide: "High parallelism (6-8 workers)",
 					},
 				},
 			},
@@ -531,9 +540,10 @@ async function runDelegateTopology(
 		case "evolution": {
 			const evoOpts: EvolutionTopologyOptions = {
 				populationPerGen: opts.populationPerGen ?? scaledWidth,
-				generations: opts.generations ?? 2,
+				generations: opts.generations ?? "unbounded",
 				estimateBounds: opts.estimateBounds ?? plan.estimateBounds,
-				checkpointPolicy: opts.checkpointPolicy ?? "coalesce",
+				controlMode: opts.controlMode ?? os.controlMode,
+				checkpointPolicy: opts.checkpointPolicy,
 				onHumanCheckpoint: opts.onHumanCheckpoint,
 				dreamingMode: plan.dreamingMode,
 				enableBoard: plan.enableBoard,
@@ -567,23 +577,28 @@ async function runDelegateTopology(
 			};
 			return elasticPhaseTopology(elasticOpts).run(os, input);
 		}
+		case "hierarchy":
+			return hierarchyTopology({
+				maxWorkers: scaledWidth,
+				recursive: true,
+			}).run(os, input);
 		default:
 			return assertNever(delegate, "Unhandled AdaptiveDelegateName");
 	}
 }
 
 /**
- * Adaptive Meta-Router Topology (v3):
- * - Uses TypeSafe Jev (`os.decisionClient`) in a single ~200ms forward pass to choose initial topology,
- *   Wave-1 Field Guide gating, dreaming mode, Board access, bound estimation, and width tier.
- * - Gracefully degrades to the zero-token structural heuristic when offline or below confidence threshold.
- * - Supports live mid-run telemetry morphing if the initial topology fails to produce an accepted deliverable
- *   while budget remains (e.g., pivoting from parallel decomposition into evolution on merge-conflict spikes).
+ * Adaptive Meta-Router Topology (v4):
+ * - Uses TypeSafe Jev (`os.decisionClient`) with strictly neutral structure-only topology descriptions
+ *   (zero task-domain biasing or heuristic leakage).
+ * - Bus-driven `LiveMorphWatchdog` detects mid-flight distress (consecutive un-repaired rollbacks or stall bursts)
+ *   while real wall/token budget remains, aborts the stalling delegate via a child AbortController (preserving commits),
+ *   and pivots live before closeout reserve hits—plus retains post-hoc fallback morphing.
  */
 export function adaptiveTopology(opts: AdaptiveTopologyOptions = {}): TopologyPlugin {
 	return {
 		name: "adaptive",
-		description: "System-1 Decision-Model Meta-Router (TypeSafe Jev + structural fallback) with Wave-1 Field Guide gating and mid-run telemetry morphing.",
+		description: "Unbiased System-1 Decision-Model Meta-Router with live bus-driven mid-run morphing and composable sub-topologies.",
 		async run(os: SwarmOsApi, { goal, rubric, signal, closeoutSignal }): Promise<TopologyOutcome> {
 			const hasSeatConfigs = Boolean(opts.seatConfigs && opts.seatConfigs.length > 0);
 			const plan = await resolveAdaptiveExecutionPlan(os, {
@@ -606,10 +621,134 @@ export function adaptiveTopology(opts: AdaptiveTopologyOptions = {}): TopologyPl
 				reason: `[${plan.source}/${plan.regime}] ${plan.reason}`,
 			});
 
-			const firstOut = await runDelegateTopology(plan.delegate, os, opts, plan, { goal, rubric, signal, closeoutSignal });
+			const allowMorph = (opts.enableMidRunMorph ?? true) && Boolean(os.decisionClient) && !hasSeatConfigs;
+			const minConf = opts.minDecisionConfidence ?? 0.55;
+			const firstAbort = new AbortController();
+			const firstSignal = AbortSignal.any([signal, firstAbort.signal]);
+			let liveMorphTarget: { readonly target: AdaptiveDelegateName; readonly confidence: number; readonly reason: string } | undefined;
+			let liveMorphCheckInFlight = false;
+			let consecutiveUnrepairedRollbacks = 0;
+			let liveStalls = 0;
+			let liveConflicts = 0;
+
+			const initialWallBudgetMs = os.remainingWallMs?.();
+			const unsubWatchdog = allowMorph
+				? os.bus.on((ev) => {
+					if (ev.runId !== os.runId || liveMorphTarget || liveMorphCheckInFlight || signal.aborted || os.isInCloseoutReserve()) {
+						return;
+					}
+					if (ev.type === "refinery.semantic_regression") {
+						if (ev.data.repaired === true) {
+							consecutiveUnrepairedRollbacks = 0;
+						} else if (ev.data.rolledBack === true) {
+							consecutiveUnrepairedRollbacks += 1;
+						}
+					} else if (ev.type === "agent.stalled") {
+						liveStalls += 1;
+					} else if (ev.type === "peer.conflict_detected" || ev.type === "refinery.conflict_resolved") {
+						liveConflicts += 1;
+					} else {
+						return;
+					}
+
+					const remWall = os.remainingWallMs?.();
+					const enoughWallLeft =
+						remWall === undefined ||
+						initialWallBudgetMs === undefined ||
+						remWall > initialWallBudgetMs * 0.30;
+					const distressTripped =
+						enoughWallLeft &&
+						(consecutiveUnrepairedRollbacks >= 2 || liveStalls >= 2 || liveConflicts >= 3);
+					if (!distressTripped) return;
+
+					liveMorphCheckInFlight = true;
+					void os.decisionClient!
+						.decide({
+							state: [
+								`Goal: ${goal}`,
+								`Live Delegate In-Flight: ${plan.delegate}`,
+								`Live Distress Signals: consecutiveUnrepairedRollbacks=${consecutiveUnrepairedRollbacks}, stalls=${liveStalls}, mergeConflicts=${liveConflicts}, remainingWallMs=${remWall ?? "unbounded"}`,
+							].join("\n"),
+							questions: {
+								should_pivot_to_evolution: {
+									type: "noul",
+									instructions: "Should we abort the stalling delegate mid-flight and morph to async Director-led `evolution` now while budget remains?",
+								},
+								should_widen_with_recursive_planners: {
+									type: "noul",
+									instructions: "Should we abort the stalling delegate mid-flight and morph to `recursive-planners` now while budget remains?",
+								},
+							},
+							signal,
+						})
+						.then((morphRes) => {
+							os.bus.emit(os.runId, "decision.evaluated", {
+								purpose: "adaptive_live_morph_watchdog",
+								provider: morphRes.provider,
+								model: morphRes.model,
+								questionCount: 2,
+								inputTokens: morphRes.inputTokens,
+								latencyMs: morphRes.latencyMs,
+							});
+							const pivotEvo = getNoulAnswer(morphRes.answers, "should_pivot_to_evolution");
+							const pivotRec = getNoulAnswer(morphRes.answers, "should_widen_with_recursive_planners");
+							if (plan.delegate !== "evolution" && pivotEvo && pivotEvo.p >= 0.72 && pivotEvo.confidence >= minConf) {
+								liveMorphTarget = {
+									target: "evolution",
+									confidence: pivotEvo.confidence,
+									reason: `LiveMorphWatchdog pivoted mid-flight -> evolution (P=${pivotEvo.p.toFixed(2)}, rollbacks=${consecutiveUnrepairedRollbacks}, stalls=${liveStalls})`,
+								};
+								firstAbort.abort(new Error(liveMorphTarget.reason));
+							} else if (plan.delegate !== "recursive-planners" && pivotRec && pivotRec.p >= 0.72 && pivotRec.confidence >= minConf) {
+								liveMorphTarget = {
+									target: "recursive-planners",
+									confidence: pivotRec.confidence,
+									reason: `LiveMorphWatchdog pivoted mid-flight -> recursive-planners (P=${pivotRec.p.toFixed(2)}, stalls=${liveStalls})`,
+								};
+								firstAbort.abort(new Error(liveMorphTarget.reason));
+							}
+						})
+						.catch(() => {})
+						.finally(() => {
+							liveMorphCheckInFlight = false;
+						});
+				})
+				: undefined;
+
+			let firstOut: TopologyOutcome;
+			try {
+				firstOut = await runDelegateTopology(plan.delegate, os, opts, plan, {
+					goal,
+					rubric,
+					signal: firstSignal,
+					closeoutSignal,
+				});
+			} finally {
+				unsubWatchdog?.();
+			}
+
+			if (liveMorphTarget && !signal.aborted && !os.isInCloseoutReserve()) {
+				os.bus.emit(os.runId, "adaptive.morphed", {
+					from: plan.delegate,
+					to: liveMorphTarget.target,
+					reason: liveMorphTarget.reason,
+					confidence: liveMorphTarget.confidence,
+					live: true,
+				});
+				const morphedOut = await runDelegateTopology(
+					liveMorphTarget.target,
+					os,
+					opts,
+					{ ...plan, delegate: liveMorphTarget.target },
+					{ goal, rubric, signal, closeoutSignal },
+				);
+				return {
+					...morphedOut,
+					summary: `Adaptive[${plan.delegate} -> live-morphed:${liveMorphTarget.target}]: ${morphedOut.summary}`,
+				};
+			}
 
 			const bestAfterFirst = os.trust.bestVerifiedFinding(os.runId);
-			const allowMorph = (opts.enableMidRunMorph ?? true) && Boolean(os.decisionClient) && !hasSeatConfigs;
 			if (allowMorph && !bestAfterFirst && !signal.aborted && !os.isInCloseoutReserve()) {
 				const events = os.store.events(os.runId);
 				const conflicts = events.filter((e) => e.type === "peer.conflict_detected" || e.type === "refinery.conflict_resolved").length;
@@ -630,7 +769,7 @@ export function adaptiveTopology(opts: AdaptiveTopologyOptions = {}): TopologyPl
 						questions: {
 							should_pivot_to_evolution: {
 								type: "noul",
-								instructions: "Should the swarm morph to full-context `evolution` search to recover from merge conflicts, semantic regressions, or decomposition stalls?",
+								instructions: "Should the swarm morph to async Director-led `evolution` search to recover from merge conflicts, semantic regressions, or decomposition stalls?",
 							},
 							should_widen_with_recursive_planners: {
 								type: "noul",
@@ -651,7 +790,6 @@ export function adaptiveTopology(opts: AdaptiveTopologyOptions = {}): TopologyPl
 
 					const pivotEvo = getNoulAnswer(morphRes.answers, "should_pivot_to_evolution");
 					const pivotRec = getNoulAnswer(morphRes.answers, "should_widen_with_recursive_planners");
-					const minConf = opts.minDecisionConfidence ?? 0.55;
 
 					type MidRunMorphDecision = Exclusive<
 						| { readonly morph: false }
@@ -685,6 +823,7 @@ export function adaptiveTopology(opts: AdaptiveTopologyOptions = {}): TopologyPl
 							to: decision.target,
 							reason: decision.reason,
 							confidence: decision.confidence,
+							live: false,
 						});
 						const morphedOut = await runDelegateTopology(
 							decision.target,

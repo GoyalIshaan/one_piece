@@ -1,7 +1,18 @@
 import { Mailbox } from "./mailbox.ts";
 import type { Redactor } from "./redact.ts";
 import type { Collection, Documents, HarnessEvent, Store } from "./store.ts";
-import type { AgentStatus, EvidenceLevel, FinishedJob, Job, ReviewRound, Run, TaskStatus } from "./types.ts";
+import type {
+	AgentStatus,
+	EvidenceLevel,
+	ExecutionControlMode,
+	FinishedJob,
+	Job,
+	ReviewRound,
+	Run,
+	RunControlPayload,
+	RunControlStatus,
+	TaskStatus,
+} from "./types.ts";
 
 type RunEnded = { status: Exclude<Run["status"], "running">; reason: string };
 
@@ -10,7 +21,10 @@ export interface LifecycleEvents {
 	"run.closing": { reason: string; reservePct?: number };
 	"run.finishing": RunEnded;
 	"run.finished": RunEnded;
-	"run.nominated": { findingId: string; revision: number; auto: boolean; artifactSha256?: string };
+	"run.nominated": { findingId: string; revision: number; auto: boolean; artifactSha256?: string; partialFallback?: boolean };
+	"run.control_applied": { commandId: string; type: RunControlPayload["type"]; issuedBy: string; nextState: RunControlStatus; detail?: string };
+	"run.paused": { reason: string };
+	"run.resumed": { pausedMs: number; steeringNote?: string };
 	"agent.spawned": { agentId: string; role: string; driverId: string; model?: string; taskId?: string; workspace?: string; waitedMs?: number };
 	"agent.status": { status: AgentStatus; reason?: string };
 	"agent.turn": {
@@ -58,12 +72,17 @@ export interface LifecycleEvents {
 	"board.posted": {
 		postId: string;
 		topic: string;
+		channel?: string;
 		authorAgentId: string;
 		authorHandle?: string;
 		threadId?: string;
+		replyToId?: string;
+		quotedPostId?: string;
 		supersedes?: string;
 		labels?: Record<string, string>;
 	};
+	"board.edited": { postId: string; authorAgentId: string; outdated?: boolean; outdatedReason?: string };
+	"board.outdated": { postId: string; actorAgentId: string; reason: string };
 	"board.labeled": { postId: string; set?: Record<string, string>; unset?: string[]; actorId: string };
 	"artifact.stored": { artifactId: string; sha256: string; bytes: number; label: string };
 	"job.started": { jobId: string; pool: string; exclusive: boolean };
@@ -79,10 +98,92 @@ export interface LifecycleEvents {
 	"quota.drained": { driverId: string; reason: string };
 	"governor.scaled": { driverId: string; prevWindow: number; nextWindow: number; reason: string; freeMemMb: number; cpuLoadRatio: number };
 	"decision.evaluated": { purpose: string; provider: string; model: string; questionCount: number; inputTokens: number; latencyMs: number };
-	"board.promoted": { postId: string; novelty?: number; broadcastProb?: number; crossoverProb?: number; reason: string };
-	"bound.estimated": { metricName: string; estimatedCeiling: number | null; stoppingFraction: number; confidence: number; assumptions: string[] };
-	"adaptive.morphed": { from: string; to: string; reason: string; confidence?: number };
-	"researcher.checkpoint": { policy: "coalesce" | "interactive"; trigger: string; bestScore?: number; estimatedCeiling?: number | null; action: string };
+	"board.promoted": {
+		postId: string;
+		novelty?: number;
+		broadcastProb?: number;
+		crossoverProb?: number;
+		actorRole?: "planner" | "director" | "os";
+		sourceChannel?: string;
+		targetChannel?: string;
+		quotedPostId?: string;
+		reason: string;
+	};
+	"bound.estimated": {
+		metricName: string;
+		estimatedCeiling: number | null;
+		hardCeiling?: number | null;
+		paradigmCeiling?: number | null;
+		isProvenHard?: boolean;
+		activeBottleneck?: string;
+		isRefinement?: boolean;
+		stoppingFraction: number;
+		confidence: number;
+		assumptions: string[];
+	};
+	"bound.paradigm_shift": {
+		generation: number;
+		bestScore: number;
+		paradigmCeiling: number;
+		hardCeiling: number | null;
+		targetAssumption: string;
+		unlockHint: string;
+	};
+	"adaptive.morphed": { from: string; to: string; reason: string; confidence?: number; live?: boolean };
+	"researcher.checkpoint": {
+		policy: "coalesce" | "interactive" | "pause" | "notify";
+		trigger: string;
+		bestScore?: number;
+		estimatedCeiling?: number | null;
+		hardCeiling?: number | null;
+		paradigmCeiling?: number | null;
+		briefPath?: string;
+		controlMode?: ExecutionControlMode;
+		action: string;
+	};
+	"evolution.family_launched": {
+		familyId: string;
+		parentFamilyId?: string;
+		directorAgentId: string;
+		name: string;
+		hypothesis: string;
+		nicheTag: string;
+		depth: number;
+	};
+	"evolution.family_pruned": { familyId: string; reason: string; bestScore?: number };
+	"evolution.crossover_started": {
+		crossoverId: string;
+		parentA: string;
+		parentB: string;
+		branchA: string;
+		branchB: string;
+		mode: "direct" | "subtree";
+	};
+	"evolution.crossover_completed": {
+		crossoverId: string;
+		parentA: string;
+		parentB: string;
+		beatBothParents: boolean;
+		childScore?: number;
+		parentMaxScore?: number;
+		findingId?: string;
+	};
+	"topology.spawned": {
+		parentAgentId: string;
+		topology: string;
+		subtreeId: string;
+		depth: number;
+		baseRef?: string;
+		goalPreview: string;
+	};
+	"topology.completed": {
+		parentAgentId: string;
+		topology: string;
+		subtreeId: string;
+		status: string;
+		bestScore?: number;
+		branch?: string;
+	};
 	"phase.changed": { from?: string; to: string; reason: string };
 	"budget.charged": {
 		agentId?: string;
