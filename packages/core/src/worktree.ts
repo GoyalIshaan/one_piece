@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import type { MergeTrunkResult, WorktreeHandle, WorktreeManager } from "./topology.ts";
 
@@ -9,6 +9,10 @@ export const WORKTREE_EXCLUDE_PATTERNS: readonly string[] = [
 	".gemini/settings.json",
 	".grok/config.toml",
 	".one_piece/",
+	".eval-exec",
+	".eval-tmp/",
+	".onepiece-eval.patch",
+	".onepiece-snapshot.json",
 	"__pycache__/",
 	"*.pyc",
 	"*.pyo",
@@ -41,6 +45,10 @@ function isGitRepoRoot(dir: string): boolean {
 	}
 }
 
+type TrunkWorktreeState =
+	| { readonly status: "uninitialized" }
+	| { readonly status: "provisioned"; readonly path: string; readonly branch: string };
+
 /**
  * Manages isolated per-worker git worktrees (or standalone initialized git clones for non-git seeds)
  * so no two concurrent writers ever mutate the same working directory.
@@ -50,7 +58,7 @@ export class GitWorktreeManager implements WorktreeManager {
 	readonly baseSha: string;
 	private readonly worktreeRoot: string;
 	private readonly runId: string;
-	private _trunkPath?: string;
+	private trunkState: TrunkWorktreeState = { status: "uninitialized" };
 
 	constructor(sourceWorkspace: string, runDir: string, runId: string) {
 		this.runId = runId;
@@ -95,11 +103,11 @@ export class GitWorktreeManager implements WorktreeManager {
 
 	/** Dedicated isolated trunk worktree so Refinery merges never mutate the user's live checked-out branch. */
 	get trunkPath(): string {
-		if (!this._trunkPath || !existsSync(this._trunkPath)) {
+		if (this.trunkState.status === "uninitialized" || !existsSync(this.trunkState.path)) {
 			const trunk = this.create("trunk", this.baseSha);
-			this._trunkPath = trunk.path;
+			this.trunkState = { status: "provisioned", path: trunk.path, branch: trunk.branch };
 		}
-		return this._trunkPath;
+		return this.trunkState.path;
 	}
 
 	create(agentId: string, baseRef = this.baseSha): WorktreeHandle {
@@ -116,7 +124,36 @@ export class GitWorktreeManager implements WorktreeManager {
 		}
 		git(this.repoRoot, ["worktree", "add", "-b", branch, worktreePath, baseRef]);
 		this.writeGitExclude(worktreePath, WORKTREE_EXCLUDE_PATTERNS);
+		this.mirrorUntrackedWorkspaceLinks(worktreePath);
 		return { path: worktreePath, branch, baseSha: baseRef };
+	}
+
+	/**
+	 * Zero-copy mirror of top-level gitignored read-only symlinks (e.g., MLE-bench `data -> <publicSrc>`)
+	 * and the gitignored `.eval-exec` container helper from `repoRoot` into each linked worktree.
+	 */
+	private mirrorUntrackedWorkspaceLinks(worktreePath: string): void {
+		try {
+			for (const name of readdirSync(this.repoRoot)) {
+				if (name === ".git" || name === ".swarm" || name === ".one_piece") continue;
+				const src = join(this.repoRoot, name);
+				const dst = join(worktreePath, name);
+				if (existsSync(dst)) continue;
+				const st = lstatSync(src);
+				if (st.isSymbolicLink()) {
+					symlinkSync(readlinkSync(src), dst);
+				} else if (name === ".eval-exec" && st.isFile()) {
+					copyFileSync(src, dst);
+					try {
+						chmodSync(dst, 0o755);
+					} catch {
+						// Ignore chmod failure on non-POSIX filesystems.
+					}
+				}
+			}
+		} catch {
+			// Best-effort mirror.
+		}
 	}
 
 	writeGitExclude(worktreePath: string, patterns: readonly string[]): void {

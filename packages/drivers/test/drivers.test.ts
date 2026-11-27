@@ -383,7 +383,7 @@ describe("drivers & 3-class quota classification", () => {
 			kind: "codex-exec" as const,
 			capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema: false, supportsMcpHttp: false },
 			async healthCheck() {
-				return { ok: true, driverId: id, kind: "codex-exec" as const };
+				return { ok: true as const, driverId: id, kind: "codex-exec" as const };
 			},
 			async spawn() {
 				return { driverId: id, async runTurn() { return { status: "completed" as const, finalText: "ok" }; }, async close() {} };
@@ -425,7 +425,7 @@ describe("drivers & 3-class quota classification", () => {
 			id,
 			kind: "codex-exec" as const,
 			capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema: false, supportsMcpHttp: false },
-			healthCheck: async () => ({ ok: true, driverId: id, kind: "codex-exec" as const }),
+			healthCheck: async () => ({ ok: true as const, driverId: id, kind: "codex-exec" as const }),
 			spawn: async () => ({ driverId: id, runTurn: async () => ({ status: "completed" as const, finalText: "" }), close: async () => {} }),
 		});
 
@@ -470,7 +470,7 @@ describe("drivers & 3-class quota classification", () => {
 			id,
 			kind: "codex-exec" as const,
 			capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema, supportsMcpHttp: false },
-			healthCheck: async () => ({ ok: true, driverId: id, kind: "codex-exec" as const }),
+			healthCheck: async () => ({ ok: true as const, driverId: id, kind: "codex-exec" as const }),
 			spawn: async () => ({ driverId: id, runTurn: async () => ({ status: "completed" as const, finalText: "" }), close: async () => {} }),
 		});
 		const schemaRouter = new DriverQuotaRouter({
@@ -540,7 +540,7 @@ describe("drivers & 3-class quota classification", () => {
 			id,
 			kind,
 			capabilities: { supportsSteer: false, supportsResume: false, supportsOutputSchema, supportsMcpHttp: false },
-			healthCheck: async () => ({ ok: true, driverId: id, kind }),
+			healthCheck: async () => ({ ok: true as const, driverId: id, kind }),
 			spawn: async () => ({ driverId: id, runTurn: async () => ({ status: "completed" as const, finalText: "" }), close: async () => {} }),
 		});
 

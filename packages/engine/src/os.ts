@@ -81,6 +81,8 @@ export interface SwarmOsConfig {
 	reviewLenses?: ReviewLens[];
 	maxRepeatedTurns?: number;
 	networkOffWorkers?: boolean;
+	/** Allow workers to reach the local Docker daemon socket (for offline benchmark containers via `./.eval-exec`). */
+	allowDockerSocket?: boolean;
 	/** Additional directories to scan for curated SKILL.md folders. */
 	skillsDirs?: string[];
 	/** Automatically roll over bloated in-process sessions via .swarm/HANDOFF.md after 2 compactions (default true). */
@@ -107,6 +109,17 @@ function nextHigherTier(tier: DriverTier): DriverTier | undefined {
 function isOpenAiEditModel(model?: string): boolean {
 	return Boolean(model && /(?:^|[/_-])(gpt|codex|o[134])(?:[^a-z]|$)/i.test(model));
 }
+
+export type SpawnedChildOutcome = {
+	readonly agentId: string;
+	readonly handle: string;
+	readonly role: Role;
+	readonly branch?: string;
+	readonly summary: string;
+} & (
+	| { readonly status: "completed" | "yielded" | "interrupted"; readonly commitSha?: string; readonly score?: number }
+	| { readonly status: "rate_limited" | "failed"; readonly commitSha?: never; readonly score?: never }
+);
 
 /**
  * Layer B — Thin Shared Swarm OS.
@@ -140,6 +153,7 @@ export class SwarmOS implements SwarmOsApi {
 	private readonly runDeniedReadPaths: readonly string[];
 	private readonly startedAt: number;
 	private readonly networkOffWorkers: boolean;
+	private readonly allowDockerSocket: boolean;
 	private readonly autoHandoffOnSecondCompaction: boolean;
 	private readonly fieldGuideMaxLines: number;
 	private fieldGuideState:
@@ -155,16 +169,7 @@ export class SwarmOS implements SwarmOsApi {
 			role: Role;
 			handle: string;
 			subtreeId: string;
-			promise: Promise<{
-				agentId: string;
-				handle: string;
-				role: Role;
-				status: string;
-				branch?: string;
-				commitSha?: string;
-				score?: number;
-				summary: string;
-			}>;
+			promise: Promise<SpawnedChildOutcome>;
 			cancel: () => void;
 			steer: (msg: string) => Promise<void>;
 		}
@@ -216,6 +221,7 @@ export class SwarmOS implements SwarmOsApi {
 		this.runDeniedReadPaths = cfg.deniedReadPaths ? [...cfg.deniedReadPaths] : [];
 		this.startedAt = Date.now();
 		this.networkOffWorkers = cfg.networkOffWorkers ?? false;
+		this.allowDockerSocket = cfg.allowDockerSocket ?? false;
 		this.autoHandoffOnSecondCompaction = cfg.autoHandoffOnSecondCompaction ?? true;
 		this.fieldGuideMaxLines = cfg.fieldGuideMaxLines ?? DEFAULT_FIELD_GUIDE_MAX_LINES;
 		this.fieldGuidePath = join(this.runDir, "field-guide", "index.md");
@@ -281,6 +287,7 @@ export class SwarmOS implements SwarmOsApi {
 			runId: this.runId,
 			runDir: this.runDir,
 			bus: this.bus,
+			artifacts: this.artifacts,
 			verifier: cfg.verifier,
 			enableBlindReview: cfg.enableBlindReview ?? false,
 			reviewLenses: cfg.reviewLenses,
@@ -855,7 +862,7 @@ export class SwarmOS implements SwarmOsApi {
 							const childIdPlaceholder = newId("agt");
 							let resolvedAgentId = childIdPlaceholder;
 
-							const childPromise = (async () => {
+							const childPromise = (async (): Promise<SpawnedChildOutcome> => {
 								const sharedChildReq = {
 									handle: childHandle,
 									parentAgentId: ctx.agentId,
@@ -940,6 +947,17 @@ export class SwarmOS implements SwarmOsApi {
 										.list("findings", { runId: this.runId })
 										.filter((f) => f.authorAgentId === child.agent.id)
 										.sort((a, b) => (b.score ?? -Infinity) - (a.score ?? -Infinity))[0];
+									const summary = turnRes.finalText.slice(0, 800) || `Child ${child.agent.handle} finished (${turnRes.status}).`;
+									if (turnRes.status === "failed" || turnRes.status === "rate_limited") {
+										return {
+											agentId: child.agent.id,
+											handle: child.agent.handle,
+											role: childRole,
+											status: turnRes.status,
+											branch: child.branch,
+											summary,
+										};
+									}
 									return {
 										agentId: child.agent.id,
 										handle: child.agent.handle,
@@ -948,7 +966,7 @@ export class SwarmOS implements SwarmOsApi {
 										branch: child.branch,
 										commitSha: wipSha ?? headSha,
 										score: bestChildFinding?.score,
-										summary: turnRes.finalText.slice(0, 800) || `Child ${child.agent.handle} finished (${turnRes.status}).`,
+										summary,
 									};
 								} catch (err) {
 									return {
@@ -1056,16 +1074,7 @@ export class SwarmOS implements SwarmOsApi {
 						// nested recursive Planners can NEVER deadlock even on a 1-slot driver pool!
 						const parentActive = this.activeHandles.get(ctx.agentId);
 						parentActive?.handle.selection.park?.();
-						let settled: Array<{
-							agentId: string;
-							handle: string;
-							role: Role;
-							status: string;
-							branch?: string;
-							commitSha?: string;
-							score?: number;
-							summary: string;
-						}> | "TIMED_OUT";
+						let settled: SpawnedChildOutcome[] | "TIMED_OUT";
 						try {
 							settled = mode === "any"
 								? await raceWithTimeout(Promise.race(targets.map((t) => t.promise)).then((r) => [r]))
@@ -1216,6 +1225,7 @@ export class SwarmOS implements SwarmOsApi {
 					artifacts: this.artifacts,
 					readOnly: opts.readOnly,
 					networkOff: this.networkOffWorkers,
+					allowDockerSocket: this.allowDockerSocket,
 					deniedReadPaths: opts.deniedReadPaths ?? this.runDeniedReadPaths,
 					editFormat: opts.editFormat,
 				}),

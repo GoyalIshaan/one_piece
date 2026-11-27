@@ -26,7 +26,7 @@ class SpyWorkerDriver implements WorkerDriver {
 	}
 
 	async healthCheck() {
-		return { ok: true, driverId: this.id, kind: this.kind, version: "spy-1.0" };
+		return { ok: true as const, driverId: this.id, kind: this.kind, version: "spy-1.0" };
 	}
 
 	async spawn(spec: WorkerSpawnSpec): Promise<WorkerSession> {
@@ -439,6 +439,92 @@ describe("v2 Harness Engineering: Static KV Prefixes, Scoped Tools, Skills, Code
 				if (transcriptPrompt) {
 					expect(transcriptPrompt).toContain("echo skipped");
 				}
+			} finally {
+				await os.dispose();
+				store.close();
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("wires read-only trace_* navigation tools and anchored transcript brief into transcript-audit lens for scattered long-horizon violations", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "op-he-trace-nav-"));
+		const seed = join(dir, "seed");
+		mkdirSync(seed, { recursive: true });
+		writeFileSync(join(seed, "app.ts"), "export const v = 1;\n", "utf8");
+
+		try {
+			const store = new SqliteStore(":memory:");
+			let sawTraceToolMenu: string[] = [];
+			let capturedPrompt = "";
+			const reviewerDriver = new SpyWorkerDriver("rev-nav", async (spec, prompt) => {
+				sawTraceToolMenu = [...(spec.mcp?.toolNames ?? [])];
+				capturedPrompt = prompt;
+				return {
+					status: "completed",
+					finalText: JSON.stringify({
+						verdict: "needs_work",
+						confidence: 0.92,
+						message: "Caught early scattered violation via anchored brief & trace nav tools",
+					}),
+				};
+			});
+			const authorDriver = new SpyWorkerDriver("author-nav", async () => ({
+				status: "completed",
+				finalText: "done",
+			}));
+
+			const router = new DriverQuotaRouter({
+				drivers: [
+					{ driver: authorDriver, config: { id: "author-nav", kind: "codex-exec" } },
+					{ driver: reviewerDriver, config: { id: "rev-nav", kind: "codex-exec" } },
+				],
+				roles: { default: ["author-nav", "rev-nav"], reviewer: ["rev-nav"] },
+			});
+
+			const os = await SwarmOS.create({
+				runDir: join(dir, "run"),
+				workspace: seed,
+				topology: "single",
+				goal: { title: "Long-Horizon Audit", text: "Catch early scattered failure outside last 30 events" },
+				reviewLenses: ["transcript-audit"],
+				store,
+				router,
+			});
+
+			try {
+				// Emit an early critical error at turn 3, followed by 55 mundane tool events (far outside old .slice(-30)!)
+				os.bus.emit(os.runId, "driver.tool_call", { tool: "bash", argsPreview: "pytest tests/critical.py" }, "agt-long");
+				os.bus.emit(
+					os.runId,
+					"driver.tool_result",
+					{ tool: "bash", isError: true, outputPreview: "EARLY_SCATTERED_CONSTRAINT_VIOLATION" },
+					"agt-long",
+				);
+				for (let i = 0; i < 55; i++) {
+					os.bus.emit(os.runId, "driver.tool_call", { tool: "read_file", argsPreview: `file_${i}.ts` }, "agt-long");
+				}
+
+				const finding = await os.trust.submitFinding({
+					agentId: "agt-long",
+					driverId: "author-nav",
+					workspace: seed,
+					claim: "All checks pass cleanly",
+					summary: "Done",
+					level: "empirical",
+				});
+
+				expect(finding.status).toBe("needs_work");
+				// Anchored brief MUST surface the early error even though >55 events followed it!
+				expect(capturedPrompt).toContain("EARLY_SCATTERED_CONSTRAINT_VIOLATION");
+				expect(capturedPrompt).toContain("trace_expand_window");
+				// Reviewer MUST receive all 5 read-only trace_* navigation tools on MCP!
+				expect(sawTraceToolMenu).toContain("trace_list_anchors");
+				expect(sawTraceToolMenu).toContain("trace_expand_window");
+				expect(sawTraceToolMenu).toContain("trace_search_events");
+				expect(sawTraceToolMenu).toContain("trace_get_peer_context");
+				expect(sawTraceToolMenu).toContain("trace_read_evidence");
 			} finally {
 				await os.dispose();
 				store.close();

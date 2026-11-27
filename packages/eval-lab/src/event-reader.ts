@@ -2,11 +2,33 @@ import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import type { AgentRoleCategory, CanonicalEvent } from "./contracts.ts";
 
+export interface AgentDocSummary {
+	id: string;
+	role: string;
+	depth?: number;
+	subtreeId?: string;
+	parentAgentId?: string;
+	driverId?: string;
+	spentTokens: number;
+}
+
+export interface PostDocSummary {
+	id: string;
+	authorAgentId: string;
+	subtreeId?: string;
+	visibility?: string;
+	parentIds?: string[];
+	supersededBy?: string;
+	labels?: Record<string, string>;
+}
+
 export interface ReadRunEventsResult {
 	events: CanonicalEvent[];
 	recordedLedgerTokens?: number;
 	driverIds: string[];
 	modelIds: string[];
+	agentDocs: AgentDocSummary[];
+	postDocs: PostDocSummary[];
 }
 
 function classifyRole(rawRole: unknown): AgentRoleCategory {
@@ -38,12 +60,12 @@ function tableExists(db: DatabaseSync, table: string): boolean {
  */
 export function readRunEvents(dbPath: string, runId: string, maxSeq?: number): ReadRunEventsResult {
 	if (!existsSync(dbPath)) {
-		return { events: [], driverIds: [], modelIds: [] };
+		return { events: [], driverIds: [], modelIds: [], agentDocs: [], postDocs: [] };
 	}
 	const db = new DatabaseSync(dbPath, { readOnly: true });
 	try {
 		if (!tableExists(db, "events")) {
-			return { events: [], driverIds: [], modelIds: [] };
+			return { events: [], driverIds: [], modelIds: [], agentDocs: [], postDocs: [] };
 		}
 		const hasCausal = hasColumn(db, "events", "causal_parents");
 		const hasIdem = hasColumn(db, "events", "idempotency_key");
@@ -69,6 +91,8 @@ export function readRunEvents(dbPath: string, runId: string, maxSeq?: number): R
 		const roleByAgent = new Map<string, AgentRoleCategory>();
 		const driverSet = new Set<string>();
 		const modelSet = new Set<string>();
+		const agentDocs: AgentDocSummary[] = [];
+		const postDocs: PostDocSummary[] = [];
 		let recordedLedgerTokens: number | undefined;
 
 		if (tableExists(db, "docs")) {
@@ -96,8 +120,50 @@ export function readRunEvents(dbPath: string, runId: string, maxSeq?: number): R
 						ledgerSum += spent.tokens;
 						sawSpend = true;
 					}
+					if (id) {
+						agentDocs.push({
+							id,
+							role: String(doc.role ?? "worker"),
+							depth: typeof doc.depth === "number" ? doc.depth : undefined,
+							subtreeId: typeof doc.subtreeId === "string" ? doc.subtreeId : undefined,
+							parentAgentId: typeof doc.parentAgentId === "string" ? doc.parentAgentId : undefined,
+							driverId: typeof doc.driverId === "string" ? doc.driverId : typeof doc.driver === "string" ? doc.driver : undefined,
+							spentTokens: typeof spent?.tokens === "number" ? spent.tokens : 0,
+						});
+					}
 				}
 				if (sawSpend) recordedLedgerTokens = (recordedLedgerTokens ?? 0) + ledgerSum;
+			}
+
+			const postRows = db
+				.prepare("SELECT data FROM docs WHERE collection = 'posts' AND run_id = ?")
+				.all(runId) as Array<{ data: string }>;
+			for (const row of postRows) {
+				const doc = JSON.parse(row.data) as Record<string, unknown>;
+				if (typeof doc.id !== "string") continue;
+				const citedIds = new Set<string>();
+				if (Array.isArray(doc.parentIds)) {
+					for (const x of doc.parentIds) if (typeof x === "string") citedIds.add(x);
+				}
+				if (typeof doc.parentPostId === "string" && doc.parentPostId) {
+					citedIds.add(doc.parentPostId);
+				}
+				if (Array.isArray(doc.references)) {
+					for (const r of doc.references) {
+						if (r && typeof r === "object" && typeof (r as { postId?: unknown }).postId === "string") {
+							citedIds.add((r as { postId: string }).postId);
+						}
+					}
+				}
+				postDocs.push({
+					id: doc.id,
+					authorAgentId: String(doc.authorAgentId ?? ""),
+					subtreeId: typeof doc.subtreeId === "string" ? doc.subtreeId : undefined,
+					visibility: typeof doc.visibility === "string" ? doc.visibility : undefined,
+					parentIds: citedIds.size ? [...citedIds] : undefined,
+					supersededBy: typeof doc.supersededBy === "string" ? doc.supersededBy : undefined,
+					labels: doc.labels && typeof doc.labels === "object" ? (doc.labels as Record<string, string>) : undefined,
+				});
 			}
 		}
 
@@ -144,6 +210,8 @@ export function readRunEvents(dbPath: string, runId: string, maxSeq?: number): R
 			recordedLedgerTokens,
 			driverIds: [...driverSet].sort(),
 			modelIds: [...modelSet].sort(),
+			agentDocs,
+			postDocs,
 		};
 	} finally {
 		db.close();

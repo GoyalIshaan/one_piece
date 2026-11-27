@@ -4,18 +4,28 @@ import {
 	type DecisionModelClient,
 	type DecisionQuestion,
 	type EventBus,
+	type Exclusive,
 	getNoulAnswer,
 } from "@one-piece/core";
 
-export interface TriageEvaluation {
+interface TriageScores {
 	readonly postId: string;
 	readonly isNovel: number;
 	readonly contradictsIncumbent: number;
 	readonly broadcastProb: number;
 	readonly crossoverProb: number;
 	readonly confidence: number;
-	readonly promoted: boolean;
 }
+
+/**
+ * Exhaustive Board v2 triage evaluation:
+ * - Promoted posts ALWAYS carry `visibility: "global"` and a concrete `promotionReason`.
+ * - Non-promoted posts ALWAYS remain `visibility: "subtree"` and never leak a promotion reason.
+ */
+export type TriageEvaluation = TriageScores & Exclusive<
+	| { readonly promoted: true; readonly visibility: "global"; readonly promotionReason: string }
+	| { readonly promoted: false; readonly visibility: "subtree" }
+>;
 
 export interface BoardTriageOptions {
 	readonly runId: string;
@@ -159,11 +169,12 @@ export class BoardTriageService {
 					labels["os:crossover_candidate"] = "true";
 				}
 
+				const promotionReason = `Jev triage: broadcast=${broadcast.p.toFixed(2)}, novelty=${novel.p.toFixed(2)}, contradict=${contradict.p.toFixed(2)}`;
 				if (shouldPromote && this.board.promote) {
 					this.board.promote(post.id, {
 						actorId: "triage-service",
 						labels,
-						reason: `Jev triage: broadcast=${broadcast.p.toFixed(2)}, novelty=${novel.p.toFixed(2)}, contradict=${contradict.p.toFixed(2)}`,
+						reason: promotionReason,
 					});
 				} else {
 					try {
@@ -173,15 +184,19 @@ export class BoardTriageService {
 					}
 				}
 
-				out.push({
+				const scores: TriageScores = {
 					postId: post.id,
 					isNovel: novel.p,
 					contradictsIncumbent: contradict.p,
 					broadcastProb: broadcast.p,
 					crossoverProb: crossover.p,
 					confidence: broadcast.confidence,
-					promoted: shouldPromote,
-				});
+				};
+				out.push(
+					shouldPromote
+						? { ...scores, promoted: true, visibility: "global", promotionReason }
+						: { ...scores, promoted: false, visibility: "subtree" },
+				);
 			}
 			return out;
 		} catch {
@@ -203,21 +218,24 @@ export class BoardTriageService {
 			"os:broadcast_prob": broadcastProb.toFixed(3),
 			"os:crossover_prob": crossoverProb.toFixed(3),
 		};
+		const promotionReason = `Heuristic promotion (kind=${post.kind ?? "update"})`;
 		if (promoted && this.board.promote) {
 			this.board.promote(post.id, {
 				actorId: "triage-service",
 				labels,
-				reason: `Heuristic promotion (kind=${post.kind ?? "update"})`,
+				reason: promotionReason,
 			});
 		}
-		return {
+		const scores: TriageScores = {
 			postId: post.id,
 			isNovel: novelty,
 			contradictsIncumbent: post.kind === "counterexample" ? 0.85 : 0.2,
 			broadcastProb,
 			crossoverProb,
 			confidence: 0.6,
-			promoted,
 		};
+		return promoted
+			? { ...scores, promoted: true, visibility: "global", promotionReason }
+			: { ...scores, promoted: false, visibility: "subtree" };
 	}
 }

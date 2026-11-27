@@ -1,6 +1,8 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative } from "node:path";
 import {
+	assertNever,
+	type Exclusive,
 	getChoiceAnswer,
 	getNoulAnswer,
 	type SwarmOsApi,
@@ -555,8 +557,7 @@ async function runDelegateTopology(
 				concurrency: scaledWidth,
 				enableSemanticRepair: opts.enableSemanticRepair,
 			}).run(os, input);
-		case "elastic-phase":
-		default: {
+		case "elastic-phase": {
 			const elasticOpts: ElasticPhaseOptions = {
 				peers: scaledWidth,
 				maxWorkers: scaledWidth,
@@ -566,6 +567,8 @@ async function runDelegateTopology(
 			};
 			return elasticPhaseTopology(elasticOpts).run(os, input);
 		}
+		default:
+			return assertNever(delegate, "Unhandled AdaptiveDelegateName");
 	}
 }
 
@@ -650,36 +653,49 @@ export function adaptiveTopology(opts: AdaptiveTopologyOptions = {}): TopologyPl
 					const pivotRec = getNoulAnswer(morphRes.answers, "should_widen_with_recursive_planners");
 					const minConf = opts.minDecisionConfidence ?? 0.55;
 
-					let morphTarget: AdaptiveDelegateName | undefined;
-					let morphConf = 0;
-					let morphReason = "";
+					type MidRunMorphDecision = Exclusive<
+						| { readonly morph: false }
+						| {
+							readonly morph: true;
+							readonly target: AdaptiveDelegateName;
+							readonly confidence: number;
+							readonly reason: string;
+						}
+					>;
+					let decision: MidRunMorphDecision = { morph: false };
 					if (plan.delegate !== "evolution" && pivotEvo && pivotEvo.p >= 0.72 && pivotEvo.confidence >= minConf) {
-						morphTarget = "evolution";
-						morphConf = pivotEvo.confidence;
-						morphReason = `Jev mid-run morph -> evolution (P=${pivotEvo.p.toFixed(2)}, conflicts=${conflicts}, semanticRegs=${semanticRegs})`;
+						decision = {
+							morph: true,
+							target: "evolution",
+							confidence: pivotEvo.confidence,
+							reason: `Jev mid-run morph -> evolution (P=${pivotEvo.p.toFixed(2)}, conflicts=${conflicts}, semanticRegs=${semanticRegs})`,
+						};
 					} else if (plan.delegate !== "recursive-planners" && pivotRec && pivotRec.p >= 0.72 && pivotRec.confidence >= minConf) {
-						morphTarget = "recursive-planners";
-						morphConf = pivotRec.confidence;
-						morphReason = `Jev mid-run morph -> recursive-planners (P=${pivotRec.p.toFixed(2)}, stalls=${stalls})`;
+						decision = {
+							morph: true,
+							target: "recursive-planners",
+							confidence: pivotRec.confidence,
+							reason: `Jev mid-run morph -> recursive-planners (P=${pivotRec.p.toFixed(2)}, stalls=${stalls})`,
+						};
 					}
 
-					if (morphTarget) {
+					if (decision.morph) {
 						os.bus.emit(os.runId, "adaptive.morphed", {
 							from: plan.delegate,
-							to: morphTarget,
-							reason: morphReason,
-							confidence: morphConf,
+							to: decision.target,
+							reason: decision.reason,
+							confidence: decision.confidence,
 						});
 						const morphedOut = await runDelegateTopology(
-							morphTarget,
+							decision.target,
 							os,
-							{ ...opts, generations: morphTarget === "evolution" ? 1 : opts.generations },
-							{ ...plan, delegate: morphTarget },
+							{ ...opts, generations: decision.target === "evolution" ? 1 : opts.generations },
+							{ ...plan, delegate: decision.target },
 							{ goal, rubric, signal, closeoutSignal },
 						);
 						return {
 							...morphedOut,
-							summary: `Adaptive[${plan.delegate} -> morphed:${morphTarget}]: ${morphedOut.summary}`,
+							summary: `Adaptive[${plan.delegate} -> morphed:${decision.target}]: ${morphedOut.summary}`,
 						};
 					}
 				} catch {

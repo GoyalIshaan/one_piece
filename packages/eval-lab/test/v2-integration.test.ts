@@ -40,7 +40,7 @@ class ScriptedV2Driver implements WorkerDriver {
 	}
 
 	async healthCheck() {
-		return { ok: true, driverId: this.id, kind: this.kind, version: "scripted-v2" };
+		return { ok: true as const, driverId: this.id, kind: this.kind, version: "scripted-v2" };
 	}
 
 	async spawn(spec: WorkerSpawnSpec): Promise<WorkerSession> {

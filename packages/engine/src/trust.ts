@@ -1,6 +1,7 @@
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import {
+	type ArtifactStore,
 	type EventBus,
 	type Finding,
 	type FindingSubmission,
@@ -14,12 +15,18 @@ import {
 	type TrustService,
 	type WorkerHandle,
 } from "@one-piece/core";
+import {
+	buildAnchoredTranscriptBrief,
+	createStoreTraceNavBackend,
+	createTraceNavTools,
+} from "./trace-nav-tools.ts";
 import { captureFrozenSnapshot, runExecutableCheck } from "./verification.ts";
 
 export interface TrustLayerOptions {
 	runId: string;
 	runDir: string;
 	bus: EventBus;
+	artifacts?: ArtifactStore;
 	verifier?: FindingVerifier;
 	/** Spawn a blind cross-provider reviewer when executable verification alone isn't enough. */
 	spawnReviewer?: (req: SpawnWorkerRequest) => Promise<WorkerHandle>;
@@ -40,6 +47,7 @@ export class TrustLayer implements TrustService {
 	private readonly runId: string;
 	private readonly runDir: string;
 	private readonly bus: EventBus;
+	private readonly artifacts?: ArtifactStore;
 	private readonly spawnReviewer?: (req: SpawnWorkerRequest) => Promise<WorkerHandle>;
 	private readonly enableBlindReview: boolean;
 	private readonly reviewLenses: ReviewLens[];
@@ -50,6 +58,7 @@ export class TrustLayer implements TrustService {
 		this.runId = opts.runId;
 		this.runDir = opts.runDir;
 		this.bus = opts.bus;
+		this.artifacts = opts.artifacts;
 		this.verifier = opts.verifier;
 		this.spawnReviewer = opts.spawnReviewer;
 		this.enableBlindReview = opts.enableBlindReview ?? false;
@@ -265,15 +274,26 @@ export class TrustLayer implements TrustService {
 				let outcome: LensOutcome;
 				try {
 					const isTranscriptLens = lens === "transcript-audit";
+					const traceNavTools = isTranscriptLens
+						? createTraceNavTools(
+								createStoreTraceNavBackend({
+									runId: currentFinding.runId,
+									store: this.bus.store,
+									artifacts: this.artifacts,
+								}),
+							)
+						: undefined;
 					const reviewer = await this.spawnReviewer({
 						role: "reviewer",
 						avoidDrivers: usedDrivers.size ? [...usedDrivers] : undefined,
 						workspace: submission.snapshotDir,
 						readOnly: true,
+						...(traceNavTools ? { tools: traceNavTools } : {}),
 						systemPrompt: isTranscriptLens
 							? [
 								"You are an independent transcript-audit reviewer.",
 								"Inspect the author's recorded tool/command trace and the frozen files to detect skipped tests, hardcoded/faked checks, or unverified claims.",
+								"If the initial anchored excerpt is insufficient to verify the claim or diagnose a discrepancy, call `trace_expand_window`, `trace_search_events`, `trace_get_peer_context`, or `trace_read_evidence` to inspect earlier turns and sibling peers before issuing your verdict.",
 								'Respond with JSON: {"verdict":"accepted"|"needs_work"|"rejected","confidence":0.0-1.0,"message":"concise rationale"}',
 							].join("\n")
 							: [
@@ -363,7 +383,7 @@ export class TrustLayer implements TrustService {
 	}
 
 	private summarizeAuthorTranscript(runId: string, authorAgentId: string): string {
-		const events = this.bus.store
+		const rawEvents = this.bus.store
 			.events(runId, { nodeId: authorAgentId })
 			.filter(
 				(ev) =>
@@ -372,12 +392,19 @@ export class TrustLayer implements TrustService {
 					ev.type === "mcp.tool_call" ||
 					ev.type === "mcp.tool_result" ||
 					ev.type === "agent.turn" ||
-					ev.type === "workspace.command",
+					ev.type === "workspace.command" ||
+					ev.type === "finding.verification" ||
+					ev.type === "finding.verdict" ||
+					ev.type === "board.promoted",
 			)
-			.slice(-30);
-		if (!events.length) return "(no tool or turn events recorded for author)";
-		const lines = events.map((ev) => `- [seq ${ev.seq}] ${ev.type}: ${JSON.stringify(ev.data).slice(0, 220)}`);
-		return lines.join("\n").slice(0, 4096);
+			.map((ev) => ({
+				seq: ev.seq,
+				ts: ev.ts,
+				type: ev.type,
+				agentId: ev.nodeId,
+				data: ev.data,
+			}));
+		return buildAnchoredTranscriptBrief(rawEvents, { authorAgentId, maxBytes: 4800 });
 	}
 
 	bestVerifiedFinding(runId: string): { finding: Finding; revision: number } | undefined {

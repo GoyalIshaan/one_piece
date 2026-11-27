@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { CanonicalEvent, EvalSandboxProfile, HarnessFault, HarnessRunReceipt } from "./contracts.ts";
 
@@ -30,7 +30,35 @@ export interface EvalCommandResult {
 	sandboxed: boolean;
 }
 
-const IGNORED_HASH_DIRS = new Set([".git", "__pycache__", ".pytest_cache", "node_modules", ".eval-tmp"]);
+const IGNORED_HASH_DIRS = new Set([
+	".git",
+	"__pycache__",
+	".pytest_cache",
+	"node_modules",
+	".eval-tmp",
+	".eval-exec",
+	".onepiece-eval.patch",
+	".onepiece-snapshot.json",
+]);
+
+function hashSingleFile(filePath: string, size: number): string {
+	const h = createHash("sha256");
+	if (size <= 8 * 1024 * 1024) {
+		h.update(readFileSync(filePath));
+		return h.digest("hex");
+	}
+	const fd = openSync(filePath, "r");
+	const buf = Buffer.allocUnsafe(1024 * 1024);
+	try {
+		let bytesRead = 0;
+		while ((bytesRead = readSync(fd, buf, 0, buf.length, null)) > 0) {
+			h.update(buf.subarray(0, bytesRead));
+		}
+	} finally {
+		closeSync(fd);
+	}
+	return h.digest("hex");
+}
 
 function real(path: string): string {
 	try {
@@ -45,8 +73,10 @@ function quoteSeatbeltPath(path: string): string {
 }
 
 /**
- * Deterministic recursive SHA-256 over relative paths + file contents.
+ * Deterministic recursive SHA-256 over relative paths + file contents + symlink targets.
  * Excludes VCS metadata and Python bytecode caches so identical workspaces hash identically.
+ * Uses streaming reads for files > 8 MiB (safe on multi-GB ML datasets) and hashes symlinks
+ * by target path without duplicating or reading multi-GB linked data directories.
  */
 export function sha256Dir(folder: string): string {
 	const hash = createHash("sha256");
@@ -57,11 +87,14 @@ export function sha256Dir(folder: string): string {
 			if (IGNORED_HASH_DIRS.has(entry.name)) continue;
 			const full = join(current, entry.name);
 			const rel = relative(folder, full).replace(/\\/g, "/");
-			if (entry.isDirectory()) {
+			if (entry.isSymbolicLink()) {
+				hash.update(`L:${rel}:${readlinkSync(full)}\n`);
+			} else if (entry.isDirectory()) {
 				hash.update(`D:${rel}\n`);
 				visit(full);
 			} else if (entry.isFile()) {
-				const contentHash = createHash("sha256").update(readFileSync(full)).digest("hex");
+				const st = lstatSync(full);
+				const contentHash = hashSingleFile(full, st.size);
 				hash.update(`F:${rel}:${contentHash}\n`);
 			}
 		}

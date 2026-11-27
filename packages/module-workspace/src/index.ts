@@ -363,6 +363,8 @@ export interface WorkspaceToolOptions {
 	maxInlineOutputBytes?: number;
 	readOnly?: boolean;
 	networkOff?: boolean;
+	/** Allow connecting ONLY to the local Docker daemon Unix socket (offline containers via `./.eval-exec`). */
+	allowDockerSocket?: boolean;
 	/** Per-worker immutable paths blocked from reading (Seatbelt + host-side workspace tools). */
 	deniedReadPaths?: readonly string[];
 	maxCommandSeconds?: number;
@@ -628,6 +630,7 @@ export function workspaceTools(opts: WorkspaceToolOptions): ToolDefinition[] {
 					cwd: ctx.workspace,
 					profile: "worker",
 					networkOff: opts.networkOff,
+					allowDockerSocket: opts.allowDockerSocket,
 					deniedReadPaths: opts.deniedReadPaths,
 					env,
 					timeoutMs,

@@ -1,20 +1,23 @@
 import { existsSync } from "node:fs";
-import type {
-	AgentRoleCategory,
-	AnytimePoint,
-	CanonicalEvent,
-	EvalTask,
-	GradeReport,
-	HarnessRunReceipt,
-	HarnessRunSpec,
-	LossDecomposition,
-	PreparedTask,
-	Scorecard,
-	SwarmDynamics,
-	TimeComputeBreakdown,
-	TokenBreakdown,
+import {
+	toScorecardFaultState,
+	type AgentRoleCategory,
+	type AnytimeMetrics,
+	type AnytimePoint,
+	type CanonicalEvent,
+	type EvalTask,
+	type GradeReport,
+	type HarnessRunReceipt,
+	type HarnessRunSpec,
+	type LossDecomposition,
+	type MechanismTelemetry,
+	type PreparedTask,
+	type Scorecard,
+	type SwarmDynamics,
+	type TimeComputeBreakdown,
+	type TokenBreakdown,
 } from "./contracts.ts";
-import { readRunEvents } from "./event-reader.ts";
+import { readRunEvents, type AgentDocSummary, type PostDocSummary } from "./event-reader.ts";
 import { detectHarnessFaults, gitReproducibility } from "./sandbox.ts";
 
 const COORDINATION_TOOLS = new Set([
@@ -142,6 +145,377 @@ function betterScore(a: number, b: number, higherIsBetter: boolean): boolean {
 	return higherIsBetter ? a > b : a < b;
 }
 
+function round4(x: number): number {
+	return Number.isFinite(x) ? Math.round(x * 10_000) / 10_000 : 0;
+}
+
+function clamp01(x: number): number {
+	if (!Number.isFinite(x)) return 0;
+	return Math.max(0, Math.min(1, x));
+}
+
+function computeStepAulc(
+	points: readonly { x: number; y: number }[],
+	horizon: number,
+): number {
+	if (!points.length || horizon <= 0) return 0;
+	const sorted = [...points].sort((a, b) => a.x - b.x);
+	let area = 0;
+	let prevX = 0;
+	let prevY = 0;
+	for (const pt of sorted) {
+		const cx = Math.max(prevX, Math.min(horizon, pt.x));
+		area += (cx - prevX) * prevY;
+		prevX = cx;
+		prevY = Math.max(prevY, clamp01(pt.y));
+	}
+	if (prevX < horizon) {
+		area += (horizon - prevX) * prevY;
+	}
+	return round4(clamp01(area / horizon));
+}
+
+function computeAnytimeMetrics(params: {
+	frontier: readonly AnytimePoint[];
+	spec: HarnessRunSpec;
+	prepared: PreparedTask;
+	higherIsBetter: boolean;
+	deliveredScore: number;
+	bestOfflineScore: number;
+	totalTokens: number;
+	wallClockMs: number;
+	estimatedUsd: number;
+}): AnytimeMetrics {
+	const { frontier, spec, prepared, higherIsBetter, deliveredScore, bestOfflineScore, totalTokens, wallClockMs, estimatedUsd } = params;
+	const floor = prepared.incumbentScore ?? 0;
+	const ceiling =
+		prepared.theoreticalCeiling ??
+		(prepared.incumbentScore !== undefined
+			? Math.max(floor + 1e-6, bestOfflineScore, deliveredScore)
+			: 1);
+	const span = Math.max(1e-6, Math.abs(ceiling - floor));
+	const norm = (score: number): number => {
+		if (!Number.isFinite(score)) return 0;
+		return higherIsBetter ? clamp01((score - floor) / span) : clamp01((floor - score) / span);
+	};
+
+	const tokenHorizon = Math.max(spec.budget.tokens ?? 0, totalTokens, 1);
+	const wallHorizon = Math.max(spec.budget.wallClockMs ?? 0, wallClockMs, 1);
+
+	const aulcTokens = computeStepAulc(
+		frontier.map((p) => ({ x: p.atTokens, y: norm(p.nominatedScore) })),
+		tokenHorizon,
+	);
+	const aulcBestOfflineTokens = computeStepAulc(
+		frontier.map((p) => ({ x: p.atTokens, y: norm(p.bestOfflineScore) })),
+		tokenHorizon,
+	);
+	const aulcWall = computeStepAulc(
+		frontier.map((p) => ({ x: p.atWallMs, y: norm(p.nominatedScore) })),
+		wallHorizon,
+	);
+	const scorePer100kTokens = round4(deliveredScore / Math.max(0.1, totalTokens / 100_000));
+	return {
+		aulcTokens,
+		aulcBestOfflineTokens,
+		anytimeNominationLag: round4(Math.max(0, aulcBestOfflineTokens - aulcTokens)),
+		aulcWall,
+		scorePer100kTokens,
+		...(estimatedUsd > 0 ? { scorePerUsd: round4(deliveredScore / estimatedUsd) } : {}),
+	};
+}
+
+function shannonEntropyBits(counts: Iterable<number>): number {
+	const vals = [...counts].filter((c) => c > 0);
+	const total = vals.reduce((s, c) => s + c, 0);
+	if (total <= 0 || vals.length <= 1) return 0;
+	let h = 0;
+	for (const c of vals) {
+		const p = c / total;
+		h -= p * Math.log2(p);
+	}
+	return round4(h);
+}
+
+function medianNumber(values: readonly number[]): number {
+	if (!values.length) return 0;
+	const sorted = [...values].sort((a, b) => a - b);
+	const mid = Math.floor(sorted.length / 2);
+	return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+function extractMechanismTelemetry(params: {
+	events: readonly CanonicalEvent[];
+	agentDocs: readonly AgentDocSummary[];
+	postDocs: readonly PostDocSummary[];
+	receipt: HarnessRunReceipt;
+	spec: HarnessRunSpec;
+	prepared: PreparedTask;
+	tokens: TokenBreakdown;
+	time: TimeComputeBreakdown;
+	dynamics: SwarmDynamics;
+}): MechanismTelemetry {
+	const { events, agentDocs, postDocs, receipt, spec, prepared, tokens, time, dynamics } = params;
+
+	// 1. Board v2 Epistemic Telemetry
+	const postEvents = events.filter((e) => e.type === "board.posted");
+	const promotedEvents = events.filter((e) => e.type === "board.promoted");
+	const postById = new Map<string, PostDocSummary>();
+	for (const p of postDocs) postById.set(p.id, p);
+
+	const postsTotal = Math.max(postDocs.length, postEvents.length);
+	let postsGlobal = 0;
+	let postsSubtree = 0;
+	let citationCount = 0;
+	let crossSubtreeCitations = 0;
+	let supersededCount = 0;
+
+	if (postDocs.length > 0) {
+		for (const p of postDocs) {
+			if (p.visibility === "subtree") postsSubtree++;
+			else postsGlobal++;
+			if (p.supersededBy) supersededCount++;
+			if (p.parentIds?.length) {
+				citationCount += p.parentIds.length;
+				for (const pid of p.parentIds) {
+					const parent = postById.get(pid);
+					if (
+						parent &&
+						((p.subtreeId && parent.subtreeId && p.subtreeId !== parent.subtreeId) ||
+							(p.authorAgentId && parent.authorAgentId && p.authorAgentId !== parent.authorAgentId))
+					) {
+						crossSubtreeCitations++;
+					}
+				}
+			}
+		}
+	} else {
+		postsGlobal = postEvents.length;
+		for (const e of postEvents) {
+			if (typeof e.data.supersedes === "string" && e.data.supersedes) supersededCount++;
+		}
+	}
+
+	const promotedCount = promotedEvents.length;
+	const novelties = promotedEvents.map((e) => Number(e.data.novelty)).filter(Number.isFinite);
+	const broadcastProbs = promotedEvents.map((e) => Number(e.data.broadcastProb)).filter(Number.isFinite);
+	const crossoverProbs = promotedEvents.map((e) => Number(e.data.crossoverProb)).filter(Number.isFinite);
+	const meanOf = (arr: readonly number[]) => (arr.length ? round4(arr.reduce((s, x) => s + x, 0) / arr.length) : undefined);
+
+	// 2. Recursive Forest & Straggler / KV Cache Geometry
+	let maxDepth = 0;
+	let plannerCount = 0;
+	let workerCount = 0;
+	let plannerTokens = 0;
+	if (agentDocs.length > 0) {
+		for (const ag of agentDocs) {
+			if (typeof ag.depth === "number" && ag.depth > maxDepth) maxDepth = ag.depth;
+			if (ag.role.toLowerCase().includes("plan") || ag.role === "coordinator") {
+				plannerCount++;
+				plannerTokens += ag.spentTokens;
+			} else if (ag.role === "worker") {
+				workerCount++;
+			}
+		}
+	} else {
+		for (const e of events) {
+			if (e.type === "agent.spawned") {
+				const r = String(e.data.role ?? "worker").toLowerCase();
+				if (r.includes("plan") || r === "coordinator") plannerCount++;
+				else if (r === "worker") workerCount++;
+			}
+		}
+		plannerTokens = tokens.byRole.coordinator;
+	}
+
+	// Straggler skew ratio across agents with recorded turn durations
+	const wallByAgent = new Map<string, number>();
+	const lastCacheHitByAgent = new Map<string, number>();
+	let kvCacheBustCount = 0;
+	const driverTurnCounts = new Map<string, number>();
+	for (const e of events) {
+		if (e.type === "agent.turn") {
+			if (e.agentId) {
+				const dur = Number(e.data.durationMs ?? 0);
+				if (dur > 0) wallByAgent.set(e.agentId, (wallByAgent.get(e.agentId) ?? 0) + dur);
+				if (typeof e.data.cacheHitRate === "number" && Number.isFinite(e.data.cacheHitRate)) {
+					const prev = lastCacheHitByAgent.get(e.agentId);
+					if (prev !== undefined && prev - e.data.cacheHitRate > 0.35) {
+						kvCacheBustCount++;
+					}
+					lastCacheHitByAgent.set(e.agentId, e.data.cacheHitRate);
+				}
+			}
+			const drv = typeof e.data.driverId === "string" ? e.data.driverId : undefined;
+			if (drv) driverTurnCounts.set(drv, (driverTurnCounts.get(drv) ?? 0) + 1);
+		} else if (e.type === "model.call") {
+			const drv = typeof e.data.driver === "string" ? e.data.driver : typeof e.data.provider === "string" ? e.data.provider : undefined;
+			if (drv) driverTurnCounts.set(drv, (driverTurnCounts.get(drv) ?? 0) + 1);
+		}
+	}
+	const agentWalls = [...wallByAgent.values()].filter((w) => w > 0);
+	const medWall = medianNumber(agentWalls);
+	const stragglerSkewRatio = agentWalls.length >= 2 && medWall > 0 ? round4(Math.max(...agentWalls) / medWall) : 1;
+
+	// 3. AIMD Physics Governor & Quota Dynamics
+	const scaleEvents = events.filter((e) => e.type === "governor.scaled");
+	let scaleUps = 0;
+	let scaleDowns = 0;
+	const windows: number[] = [];
+	const freeMems: number[] = [];
+	const cpuLoads: number[] = [];
+	for (const e of scaleEvents) {
+		const prevW = Number(e.data.prevWindow ?? 0);
+		const nextW = Number(e.data.nextWindow ?? 0);
+		if (nextW > prevW) scaleUps++;
+		else if (nextW < prevW) scaleDowns++;
+		if (nextW > 0) windows.push(nextW);
+		if (typeof e.data.freeMemMb === "number" && Number.isFinite(e.data.freeMemMb)) freeMems.push(e.data.freeMemMb);
+		if (typeof e.data.cpuLoadRatio === "number" && Number.isFinite(e.data.cpuLoadRatio)) cpuLoads.push(e.data.cpuLoadRatio);
+	}
+	const quotaRetries = events.filter((e) => e.type === "quota.retry").length;
+	const quotaCooldowns = events.filter((e) => e.type === "quota.cooldown").length;
+	const quotaDrainedCount = events.filter((e) => e.type === "quota.drained").length;
+
+	// 4. Integration & Semantic Repair Forensics
+	const peerConflictsDetected = events.filter((e) => e.type === "peer.conflict_detected").length;
+	const peerConflictsResolved = events.filter((e) => e.type === "peer.conflict_resolved").length;
+	const refineryConflictsResolved = events.filter((e) => e.type === "refinery.conflict_resolved").length;
+	const conflictsResolved = peerConflictsResolved + refineryConflictsResolved;
+	const conflictsDetected = Math.max(peerConflictsDetected + refineryConflictsResolved, conflictsResolved);
+
+	const semRegEvents = events.filter((e) => e.type === "refinery.semantic_regression");
+	const peerRepairEvents = events.filter((e) => e.type === "peer.trunk_repaired");
+	const semanticRegressionsDetected = semRegEvents.length + peerRepairEvents.length;
+	const semanticRepairsSucceeded =
+		semRegEvents.filter((e) => e.data.repaired === true).length +
+		peerRepairEvents.filter((e) => e.data.repaired === true).length;
+	const monotonicRollbacks = semRegEvents.filter((e) => e.data.rolledBack === true).length;
+
+	// 5. Search Diversity & Evolution
+	const totalCandidates = receipt.candidateSnapshots.length;
+	const uniqueDiffShas = new Set(receipt.candidateSnapshots.map((s) => s.sha256)).size;
+	const basinDiversityRatio = totalCandidates > 0 ? round4(uniqueDiffShas / totalCandidates) : 1;
+	const escalations = events.filter((e) => e.type === "agent.escalated").length;
+	const handoffs = events.filter((e) => e.type === "agent.handoff").length;
+
+	// 6. Meta-Control, Jev Decision Client & Bound Analyst Calibration
+	const decisionEvents = events.filter((e) => e.type === "decision.evaluated");
+	const decisionQuestions = decisionEvents.reduce((s, e) => s + Number(e.data.questionCount ?? 0), 0);
+	const decisionInputTokens = decisionEvents.reduce((s, e) => s + Number(e.data.inputTokens ?? 0), 0);
+	const meanDecisionLatencyMs = decisionEvents.length
+		? round4(decisionEvents.reduce((s, e) => s + Number(e.data.latencyMs ?? 0), 0) / decisionEvents.length)
+		: 0;
+
+	const morphEvents = events.filter((e) => e.type === "adaptive.morphed");
+	const phaseChanges = events.filter((e) => e.type === "phase.changed").length;
+	const initialTopology = spec.topology ?? spec.controlRung;
+	const finalTopology = morphEvents.length ? String(morphEvents.at(-1)!.data.to ?? initialTopology) : initialTopology;
+
+	const boundEvents = events.filter((e) => e.type === "bound.estimated");
+	let estimatedCeiling: number | null = null;
+	for (let i = boundEvents.length - 1; i >= 0; i--) {
+		const raw = boundEvents[i]!.data.estimatedCeiling;
+		if (typeof raw === "number" && Number.isFinite(raw)) {
+			estimatedCeiling = raw;
+			break;
+		}
+	}
+	const groundTruthCeiling = prepared.theoreticalCeiling;
+	const boundCalibrationError =
+		estimatedCeiling !== null && groundTruthCeiling !== undefined && groundTruthCeiling !== 0
+			? round4(Math.abs(estimatedCeiling - groundTruthCeiling) / Math.abs(groundTruthCeiling))
+			: undefined;
+
+	const checkpointEvents = events.filter((e) => e.type === "researcher.checkpoint");
+	const earlyStopDecisions = checkpointEvents.filter((e) => String(e.data.action ?? "") === "coalesce").length;
+
+	const fgEvents = events.filter((e) => e.type === "field_guide.updated");
+	const fieldGuideMaxBytes = fgEvents.reduce((m, e) => Math.max(m, Number(e.data.bytes ?? 0)), 0);
+
+	return {
+		board: {
+			postsTotal,
+			postsGlobal,
+			postsSubtree,
+			promotedCount,
+			promotionRate: postsSubtree + promotedCount > 0 ? round4(promotedCount / Math.max(1, postsSubtree + promotedCount)) : 0,
+			...(novelties.length ? { avgPromotedNovelty: meanOf(novelties) } : {}),
+			...(broadcastProbs.length ? { avgPromotedBroadcastProb: meanOf(broadcastProbs) } : {}),
+			...(crossoverProbs.length ? { avgPromotedCrossoverProb: meanOf(crossoverProbs) } : {}),
+			citationCount,
+			crossSubtreeCitations,
+			citationYield: promotedCount + postsGlobal > 0 ? round4(crossSubtreeCitations / Math.max(1, promotedCount || postsGlobal)) : 0,
+			supersededCount,
+		},
+		forest: {
+			maxDepth,
+			plannerCount,
+			workerCount,
+			plannerTokenShare: tokens.total > 0 ? round4(plannerTokens / tokens.total) : 0,
+			spawnBatchCalls: dynamics.toolCallsByName.spawn_agents ?? 0,
+			awaitCalls: dynamics.toolCallsByName.await_agents ?? 0,
+			steerOrCancelCalls: dynamics.toolCallsByName.steer_or_cancel_agent ?? 0,
+			stragglerSkewRatio,
+			kvCacheBustCount,
+		},
+		governor: {
+			scaleEvents: scaleEvents.length,
+			scaleUps,
+			scaleDowns,
+			...(windows.length
+				? {
+						minWindow: Math.min(...windows),
+						maxWindow: Math.max(...windows),
+						meanWindow: round4(windows.reduce((s, w) => s + w, 0) / windows.length),
+					}
+				: {}),
+			...(freeMems.length ? { minFreeMemMb: Math.min(...freeMems) } : {}),
+			...(cpuLoads.length ? { maxCpuLoadRatio: round4(Math.max(...cpuLoads)) } : {}),
+			quotaRetries,
+			quotaCooldowns,
+			quotaDrainedCount,
+			providerDiversityEntropy: shannonEntropyBits(driverTurnCounts.values()),
+			activeComputeFraction: time.llmWaitMs + time.quotaWaitMs > 0 ? round4(time.llmWaitMs / (time.llmWaitMs + time.quotaWaitMs)) : 1,
+		},
+		integration: {
+			conflictsDetected,
+			conflictsResolved,
+			conflictResolutionRate: conflictsDetected > 0 ? round4(conflictsResolved / conflictsDetected) : 1,
+			semanticRegressionsDetected,
+			semanticRepairsSucceeded,
+			semanticRepairRate: semanticRegressionsDetected > 0 ? round4(semanticRepairsSucceeded / semanticRegressionsDetected) : 1,
+			monotonicRollbacks,
+		},
+		search: {
+			totalCandidates,
+			uniqueDiffShas,
+			basinDiversityRatio,
+			duplicateWorkWaste: round4(Math.max(0, 1 - basinDiversityRatio)),
+			escalations,
+			handoffs,
+		},
+		meta: {
+			decisionCalls: decisionEvents.length,
+			decisionQuestions,
+			decisionInputTokens,
+			meanDecisionLatencyMs,
+			adaptiveMorphs: morphEvents.length,
+			phaseChanges,
+			initialTopology,
+			finalTopology,
+			boundEstimates: boundEvents.length,
+			estimatedCeiling,
+			...(groundTruthCeiling !== undefined ? { groundTruthCeiling } : {}),
+			...(boundCalibrationError !== undefined ? { boundCalibrationError } : {}),
+			checkpointsTriggered: checkpointEvents.length,
+			earlyStopDecisions,
+			fieldGuideUpdates: fgEvents.length,
+			fieldGuideMaxBytes,
+		},
+	};
+}
+
 export interface ExtractScorecardOptions {
 	task: EvalTask;
 	prepared: PreparedTask;
@@ -159,10 +533,30 @@ export interface ExtractScorecardOptions {
 export async function extractScorecard(options: ExtractScorecardOptions): Promise<Scorecard> {
 	const { task, prepared, spec, receipt, adapterName, armOrderIndex, repoRoot } = options;
 	const higherIsBetter = task.higherIsBetter ?? true;
-	const { events, recordedLedgerTokens, driverIds, modelIds } = readRunEvents(spec.dbPath, receipt.runId);
+	const { events, recordedLedgerTokens, driverIds, modelIds, agentDocs, postDocs } = readRunEvents(spec.dbPath, receipt.runId);
 	const faults = detectHarnessFaults(events, receipt, recordedLedgerTokens);
 
 	// 1. Grade the nominated artifact strictly offline (never fall back to un-nominated workspaces for deliveredScore).
+	// Memoize `task.grade()` by content `sha256` within this scorecard extraction so identical artifacts
+	// (e.g. nominatedArtifactDir + matching candidateSnapshot, or duplicate snapshots) NEVER spin up
+	// redundant Docker grading containers!
+	const gradeCacheBySha = new Map<string, GradeReport>();
+	const gradeArtifact = async (artifactDir: string, sha256?: string): Promise<GradeReport> => {
+		if (sha256) {
+			const cached = gradeCacheBySha.get(sha256);
+			if (cached) return cached;
+		}
+		const report = await task.grade({
+			artifactDir,
+			hiddenDir: prepared.hiddenDir,
+			seed: prepared.seed,
+			n: prepared.n,
+			options: prepared.options,
+		});
+		if (sha256) gradeCacheBySha.set(sha256, report);
+		return report;
+	};
+
 	const missingGrade: GradeReport = {
 		passed: false,
 		score: prepared.incumbentScore ?? 0,
@@ -171,13 +565,7 @@ export async function extractScorecard(options: ExtractScorecardOptions): Promis
 	};
 	const deliveredGrade: GradeReport =
 		receipt.nominatedArtifactDir && existsSync(receipt.nominatedArtifactDir)
-			? await task.grade({
-					artifactDir: receipt.nominatedArtifactDir,
-					hiddenDir: prepared.hiddenDir,
-					seed: prepared.seed,
-					n: prepared.n,
-					options: prepared.options,
-				})
+			? await gradeArtifact(receipt.nominatedArtifactDir, receipt.nominatedSha256)
 			: missingGrade;
 
 	// 2. Grade every persisted candidate snapshot chronologically to reconstruct Anytime Frontier + bestOffline.
@@ -199,13 +587,7 @@ export async function extractScorecard(options: ExtractScorecardOptions): Promis
 
 	for (const snap of sortedCandidates) {
 		if (!existsSync(snap.dir)) continue;
-		const grade = await task.grade({
-			artifactDir: snap.dir,
-			hiddenDir: prepared.hiddenDir,
-			seed: prepared.seed,
-			n: prepared.n,
-			options: prepared.options,
-		});
+		const grade = await gradeArtifact(snap.dir, snap.sha256);
 		if (snap.acceptedByVerifier) {
 			verifierAcceptedCount++;
 			if (!grade.passed) verifierFalseAcceptCount++;
@@ -533,9 +915,32 @@ export async function extractScorecard(options: ExtractScorecardOptions): Promis
 		stoppingWasteShare: totalTokens > 0 ? Math.round((postOptimumTokens / totalTokens) * 10000) / 10000 : 0,
 	};
 
+	const anytime = computeAnytimeMetrics({
+		frontier: anytimeFrontier,
+		spec,
+		prepared,
+		higherIsBetter,
+		deliveredScore: deliveredGrade.score,
+		bestOfflineScore,
+		totalTokens,
+		wallClockMs,
+		estimatedUsd: tokens.estimatedUsd,
+	});
+	const mechanisms = extractMechanismTelemetry({
+		events,
+		agentDocs,
+		postDocs,
+		receipt,
+		spec,
+		prepared,
+		tokens,
+		time,
+		dynamics,
+	});
+
 	const git = gitReproducibility(repoRoot);
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runId: receipt.runId,
 		taskId: task.id,
 		family: task.family,
@@ -546,13 +951,14 @@ export async function extractScorecard(options: ExtractScorecardOptions): Promis
 		bestOfflineScore,
 		autoNominated: receipt.autoNominated,
 		nominatedSha256: receipt.nominatedSha256,
-		harnessFaults: faults,
-		hasHarnessFault: faults.length > 0,
+		...toScorecardFaultState(faults),
 		losses,
 		tokens,
 		time,
 		dynamics,
 		anytimeFrontier,
+		anytime,
+		mechanisms,
 		reproducibility: {
 			harnessAdapter: adapterName,
 			topology: spec.topology ?? spec.controlRung,

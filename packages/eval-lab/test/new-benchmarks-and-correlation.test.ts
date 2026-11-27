@@ -224,9 +224,12 @@ describe("Cross-Benchmark Rank Correlation Engine (Proxy -> Long-Horizon Transfe
 			makeSyntheticCard({ taskId: "t-main", arm: "armC", topology: "c", n: 4, seed: 1, score: 0.1, passed: false, tokens: 200_000 }),
 		];
 		// Add a faulted run and a mixed-commit duplicate on armC
-		const faulted = makeSyntheticCard({ taskId: "t-main", arm: "armC", topology: "c", n: 4, seed: 2, score: 0.99, passed: true, tokens: 10_000 });
-		faulted.hasHarnessFault = true;
-		cards.push(faulted);
+		const baseFaulted = makeSyntheticCard({ taskId: "t-main", arm: "armC", topology: "c", n: 4, seed: 2, score: 0.99, passed: true, tokens: 10_000 });
+		cards.push({
+			...baseFaulted,
+			hasHarnessFault: true,
+			harnessFaults: [{ code: "RUNNER_CRASH", message: "synthetic fault" }],
+		});
 
 		const report = analyzeProxyToTargetCorrelation(cards, {
 			proxyTaskIds: ["p-easy", "p-sat"],

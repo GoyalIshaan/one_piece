@@ -15,6 +15,10 @@
 		"build:pi": "cd -P vendor/pi/packages/telemetry && npm run build && cd ../schema && npm run build && cd ../ai && npm run build && cd ../agent && npm run build",
 		"test": "vitest --run",
 		"typecheck": "tsc -p packages/tsconfig.json && node tools/typecheck-dashboard.mjs",
+		"verify:harness": "node packages/eval-lab/src/cli.ts verify",
+		"eval:observatory": "node packages/eval-lab/src/cli.ts observatory",
+		"eval:index": "node packages/eval-lab/src/cli.ts index",
+		"eval:diagnose": "node packages/eval-lab/src/cli.ts diagnose",
 		"one-piece": "node packages/cli/src/index.ts"
 	},
 	"engines": {

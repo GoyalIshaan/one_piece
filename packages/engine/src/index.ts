@@ -19,10 +19,23 @@ export {
 	writeFieldGuideFile,
 } from "./field-guide.ts";
 export { IntegrationPipeline } from "./integration.ts";
-export { SwarmOS, type SwarmOsConfig } from "./os.ts";
+export { SwarmOS, type SpawnedChildOutcome, type SwarmOsConfig } from "./os.ts";
 export { FileSkillRegistry, loadSkillTool } from "./skills.ts";
 export * from "./topologies/index.ts";
 export { BoardTriageService, type BoardTriageOptions, type TriageEvaluation } from "./triage.ts";
+export {
+	buildAnchoredTranscriptBrief,
+	createStoreTraceNavBackend,
+	createTraceNavTools,
+	formatCompactTraceEvent,
+	isAnchorTraceEvent,
+	type TraceNavAgent,
+	type TraceNavBackend,
+	type TraceNavEvent,
+	type TraceNavFinding,
+	type TraceNavPost,
+	type TraceNavScoreHint,
+} from "./trace-nav-tools.ts";
 export { TriggerEngine, type TriggerOptions } from "./triggers.ts";
 export { TrustLayer, type TrustLayerOptions } from "./trust.ts";
 export { captureFrozenSnapshot, runExecutableCheck } from "./verification.ts";

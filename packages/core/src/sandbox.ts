@@ -19,7 +19,7 @@ const DENY: Array<[RegExp, string]> = [
 ];
 
 /** Toolchain variables passed through to sandboxed commands (never secrets). */
-const PASSTHROUGH = ["SDKROOT", "DEVELOPER_DIR", "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS", "CPATH", "LIBRARY_PATH", "PKG_CONFIG_PATH", "RUSTUP_HOME", "CARGO_HOME", "JAVA_HOME", "GOROOT", "GOPATH", "VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONPATH", "CUDA_HOME"];
+const PASSTHROUGH = ["SDKROOT", "DEVELOPER_DIR", "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS", "CPATH", "LIBRARY_PATH", "PKG_CONFIG_PATH", "RUSTUP_HOME", "CARGO_HOME", "JAVA_HOME", "GOROOT", "GOPATH", "VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONPATH", "CUDA_HOME", "DOCKER_HOST", "DOCKER_CONTEXT"];
 
 function passthroughEnv(): Record<string, string> {
 	const out: Record<string, string> = {};
@@ -46,6 +46,8 @@ interface CommandOptions {
 	isolatedWrites?: boolean;
 	/** Explicitly block all outbound network even on the worker profile. */
 	networkOff?: boolean;
+	/** Allow connecting ONLY to the local Docker daemon Unix socket while keeping all TCP/UDP internet denied. */
+	allowDockerSocket?: boolean;
 	timeoutMs?: number;
 	signal?: AbortSignal;
 	maxOutput?: number;
@@ -154,6 +156,35 @@ export function isSandboxReadBlocked(path: string): boolean {
 	return isPathBlocked(path);
 }
 
+function dockerSocketAllowRules(): string {
+	const home = homedir();
+	const candidates = new Set<string>([
+		"/var/run/docker.sock",
+		"/private/var/run/docker.sock",
+		join(home, ".docker", "run", "docker.sock"),
+		join(home, ".orbstack", "run", "docker.sock"),
+		join(home, ".colima", "default", "docker.sock"),
+		join(home, ".rd", "docker.sock"),
+	]);
+	const dockerHost = process.env.DOCKER_HOST?.trim();
+	if (dockerHost?.startsWith("unix://")) {
+		const sock = dockerHost.slice("unix://".length);
+		if (sock) {
+			candidates.add(sock);
+			candidates.add(real(sock));
+		}
+	}
+	for (const c of [...candidates]) {
+		const r = real(c);
+		if (r) candidates.add(r);
+	}
+	const literals = [...candidates]
+		.map((p) => `(path-literal "${p.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}")`)
+		.join(" ");
+	// Strictly Unix-domain socket access to local Docker daemon only (zero TCP/UDP outbound network).
+	return `(allow network-outbound (remote unix-socket ${literals}))`;
+}
+
 function seatbeltProfile(
 	profile: SandboxProfile,
 	roots: string[],
@@ -162,15 +193,17 @@ function seatbeltProfile(
 	leasedMacGpu: boolean,
 	networkOff = false,
 	deniedReadPaths?: readonly string[],
+	allowDockerSocket = false,
 ): string {
 	const quote = (r: string) => `(subpath "${r.replace(/"/g, '\\"')}")`;
 	const privateArchive = archive ? `(deny file-read* file-write* ${quote(archive)})` : "";
+	const dockerAllow = allowDockerSocket ? dockerSocketAllowRules() : "";
 	const gpuPolicy = leasedMacGpu ? "" : [
 		"(deny iokit-open)",
 		'(deny process-exec (regex #"/(llama-bench|llama-cli|llama-server)$"))',
 		'(deny network-outbound (remote ip "localhost:*") (remote unix-socket))',
 		profile === "worker" && !networkOff ? '(allow network-outbound (remote unix-socket (path-literal "/private/var/run/mDNSResponder")))' : "",
-	].join("\n");
+	].filter(Boolean).join("\n");
 	const combinedDenied = new Set<string>(deniedReadCounts.keys());
 	for (const raw of deniedReadPaths ?? []) {
 		if (!raw) continue;
@@ -178,7 +211,7 @@ function seatbeltProfile(
 		combinedDenied.add(real(raw));
 	}
 	const privateReads = combinedDenied.size ? `(deny file-read* ${[...combinedDenied].map(quote).join(" ")})` : "";
-	if (unrestricted && profile !== "isolated") return ["(version 1)", "(allow default)", privateReads, privateArchive, gpuPolicy].join("\n");
+	if (unrestricted && profile !== "isolated") return ["(version 1)", "(allow default)", privateReads, privateArchive, gpuPolicy, dockerAllow].filter(Boolean).join("\n");
 	const writes = roots.map(quote).join(" ");
 	const isolatedReads = profile === "isolated" ? [
 		"(deny process-info*)",
@@ -202,7 +235,8 @@ function seatbeltProfile(
 		privateArchive,
 		netPolicy,
 		gpuPolicy,
-	].join("");
+		dockerAllow,
+	].filter(Boolean).join("\n");
 }
 
 /**
@@ -233,7 +267,7 @@ export function seatbeltReadDenyCommand(command: string[], deniedPaths: readonly
 /** Apply the same OS restrictions to shell tools and native subprocesses such as workspace Git. */
 export function sandboxCommand(
 	command: string[],
-	options: Pick<CommandOptions, "cwd" | "profile" | "isolatedWrites" | "writeRoots" | "networkOff" | "deniedReadPaths"> & Admission,
+	options: Pick<CommandOptions, "cwd" | "profile" | "isolatedWrites" | "writeRoots" | "networkOff" | "allowDockerSocket" | "deniedReadPaths"> & Admission,
 ): string[] {
 	if (options.leasedMacGpu && (!options.commandPrefix?.length || !Number.isFinite(options.readyTimeoutMs) ||
 		options.readyTimeoutMs <= 0 || typeof options.admissionCheck !== "function")) {
@@ -253,6 +287,7 @@ export function sandboxCommand(
 		options.leasedMacGpu === true,
 		options.networkOff === true,
 		options.deniedReadPaths,
+		options.allowDockerSocket === true,
 	);
 	return ["/usr/bin/sandbox-exec", "-p", rules, ...command];
 }

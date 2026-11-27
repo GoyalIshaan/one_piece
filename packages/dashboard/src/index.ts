@@ -1,6 +1,7 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Store } from "@one-piece/core";
 
@@ -26,7 +27,11 @@ export interface DashboardHandle {
  * Lightweight local-only (127.0.0.1) v2 telemetry dashboard.
  * Reads normalized SQLite WAL collections directly with zero dual tree/peer branching.
  */
-export async function startDashboard(store: Store, opts: { port?: number } = {}): Promise<DashboardHandle> {
+export async function startDashboard(
+	store: Store,
+	opts: { port?: number; evalObservatoryDir?: string } = {},
+): Promise<DashboardHandle> {
+	const obsDir = resolve(opts.evalObservatoryDir ?? join(process.cwd(), ".one_piece", "eval-lab", "observatory"));
 	const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
 		const url = new URL(req.url ?? "/", "http://127.0.0.1");
 
@@ -34,6 +39,29 @@ export async function startDashboard(store: Store, opts: { port?: number } = {})
 			const html = readFileSync(HTML_PATH, "utf8");
 			res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
 			res.end(html);
+			return;
+		}
+
+		if (url.pathname === "/evals" || url.pathname === "/evals/") {
+			const obsHtml = join(obsDir, "observatory.html");
+			if (!existsSync(obsHtml)) {
+				res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+				res.end(`<html><body style="background:#0b0e14;color:#e6edf3;font-family:sans-serif;padding:24px"><h2>Eval Observatory not generated yet</h2><p>Run <code>npm run eval:observatory</code> to backfill your ledger and build plots.</p></body></html>`);
+				return;
+			}
+			res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+			res.end(readFileSync(obsHtml, "utf8"));
+			return;
+		}
+
+		if (url.pathname === "/api/evals/trajectory") {
+			const trajJson = join(obsDir, "trajectory.json");
+			if (!existsSync(trajJson)) {
+				sendJson(res, 404, { error: "Trajectory report not generated yet. Run `npm run eval:observatory`." });
+				return;
+			}
+			res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+			res.end(readFileSync(trajJson, "utf8"));
 			return;
 		}
 

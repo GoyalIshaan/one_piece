@@ -558,6 +558,7 @@ if __name__ == "__main__":
 			workspaceDir: workDir,
 			hiddenDir,
 			incumbentScore: 1.0,
+			theoreticalCeiling: 20.0,
 			goal: "Optimize build_kernel(batch_size, depth, tree_len) in kernel.py for minimum VLIW cycles with bit-exact generality across unseen (batch_size, depth) shapes.",
 			rubric: "Score is geometric-mean speedup over the scalar incumbent (1.0x) across public + unseen transfer shapes. Must be 100% bit-exact with zero VLIW hazards.",
 			fixtureSha256: sha256Dir(workDir),

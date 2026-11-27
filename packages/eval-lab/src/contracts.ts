@@ -68,6 +68,12 @@ export interface PreparedTask {
 	fixtureSha256: string;
 	graderSha256: string;
 	incumbentScore?: number;
+	/** Optional known analytical / theoretical optimum ceiling for grading Bound Analyst calibration (never exposed to agents). */
+	theoreticalCeiling?: number;
+	/** Additional kernel-denied read paths beyond `hiddenDir` (e.g. canonical MLE-bench `prepared/private/` source dir). */
+	extraDeniedReadPaths?: readonly string[];
+	/** Allow workers to talk to the local Docker daemon Unix socket for offline container execution (`./.eval-exec`). */
+	allowDockerSocket?: boolean;
 	sandboxProfile: EvalSandboxProfile;
 }
 
@@ -93,6 +99,8 @@ export interface EvalTask {
 	readonly supportedN: readonly number[];
 	readonly defaultOptions?: Record<string, string>;
 	readonly higherIsBetter?: boolean;
+	/** True for strict Docker-only external benchmarks (skips redundant 8-container mock auto-calibration during `runCampaign`). */
+	readonly requiresDocker?: boolean;
 
 	prepare(ctx: {
 		seed: number;
@@ -199,6 +207,8 @@ export interface HarnessRunSpec {
 	/** Total seat count of the prepared task instance (may exceed swarmSize for solo arms). */
 	totalSeats?: number;
 	hiddenDenyPaths: readonly string[];
+	/** Allow workers to talk to the local Docker daemon Unix socket for offline container execution (`./.eval-exec`). */
+	allowDockerSocket?: boolean;
 	controlRung: ControlRung;
 	topology?: string;
 	swarmSize: number;
@@ -336,8 +346,144 @@ export interface ReproducibilityEnvelope {
 	modelIds: readonly string[];
 }
 
-export interface Scorecard {
-	schemaVersion: 1;
+export interface AnytimeMetrics {
+	/** Normalized Area Under the Learning Curve (nominated score integrated over token budget, [0, 1]). */
+	aulcTokens: number;
+	/** Normalized Area Under the Learning Curve (best-offline score integrated over token budget, [0, 1]). */
+	aulcBestOfflineTokens: number;
+	/** Anytime Nomination Lag = max(0, aulcBestOfflineTokens - aulcTokens). */
+	anytimeNominationLag: number;
+	/** Normalized Area Under the Learning Curve (nominated score integrated over wall-clock budget, [0, 1]). */
+	aulcWall: number;
+	/** Cost-adjusted delivered efficiency: deliveredScore / max(0.1, tokens / 100_000). */
+	scorePer100kTokens: number;
+	/** Dollar-adjusted efficiency when estimatedUsd > 0. */
+	scorePerUsd?: number;
+}
+
+export interface BoardMechanismTelemetry {
+	postsTotal: number;
+	postsGlobal: number;
+	postsSubtree: number;
+	promotedCount: number;
+	promotionRate: number;
+	avgPromotedNovelty?: number;
+	avgPromotedBroadcastProb?: number;
+	avgPromotedCrossoverProb?: number;
+	citationCount: number;
+	crossSubtreeCitations: number;
+	/** Fraction of global/promoted posts later cited by another subtree or peer. */
+	citationYield: number;
+	supersededCount: number;
+}
+
+export interface ForestMechanismTelemetry {
+	maxDepth: number;
+	plannerCount: number;
+	workerCount: number;
+	plannerTokenShare: number;
+	spawnBatchCalls: number;
+	awaitCalls: number;
+	steerOrCancelCalls: number;
+	/** max(agentActiveMs) / median(agentActiveMs) across >=2 agents; 1.0 if single agent. */
+	stragglerSkewRatio: number;
+	/** Consecutive same-agent turns where cacheHitRate dropped by > 0.35. */
+	kvCacheBustCount: number;
+}
+
+export interface GovernorMechanismTelemetry {
+	scaleEvents: number;
+	scaleUps: number;
+	scaleDowns: number;
+	minWindow?: number;
+	maxWindow?: number;
+	meanWindow?: number;
+	minFreeMemMb?: number;
+	maxCpuLoadRatio?: number;
+	quotaRetries: number;
+	quotaCooldowns: number;
+	quotaDrainedCount: number;
+	/** Shannon entropy (bits) of turn distribution across drivers. */
+	providerDiversityEntropy: number;
+	/** Active LLM compute share vs quota wait: llmWaitMs / max(1, llmWaitMs + quotaWaitMs). */
+	activeComputeFraction: number;
+}
+
+export interface IntegrationMechanismTelemetry {
+	conflictsDetected: number;
+	conflictsResolved: number;
+	conflictResolutionRate: number;
+	semanticRegressionsDetected: number;
+	semanticRepairsSucceeded: number;
+	semanticRepairRate: number;
+	monotonicRollbacks: number;
+}
+
+export interface SearchMechanismTelemetry {
+	totalCandidates: number;
+	uniqueDiffShas: number;
+	/** uniqueDiffShas / max(1, totalCandidates). */
+	basinDiversityRatio: number;
+	/** 1 - basinDiversityRatio (fraction of redundant/duplicate candidate snapshots). */
+	duplicateWorkWaste: number;
+	escalations: number;
+	handoffs: number;
+}
+
+export interface MetaControlTelemetry {
+	decisionCalls: number;
+	decisionQuestions: number;
+	decisionInputTokens: number;
+	meanDecisionLatencyMs: number;
+	adaptiveMorphs: number;
+	phaseChanges: number;
+	initialTopology: string;
+	finalTopology: string;
+	boundEstimates: number;
+	estimatedCeiling: number | null;
+	groundTruthCeiling?: number;
+	/** Relative ceiling error |estimated - groundTruth| / groundTruth when both exist. */
+	boundCalibrationError?: number;
+	checkpointsTriggered: number;
+	earlyStopDecisions: number;
+	fieldGuideUpdates: number;
+	fieldGuideMaxBytes: number;
+}
+
+export interface MechanismTelemetry {
+	board: BoardMechanismTelemetry;
+	forest: ForestMechanismTelemetry;
+	governor: GovernorMechanismTelemetry;
+	integration: IntegrationMechanismTelemetry;
+	search: SearchMechanismTelemetry;
+	meta: MetaControlTelemetry;
+}
+
+/**
+ * Exhaustive Scorecard fault state:
+ * - Makes `{ hasHarnessFault: true, harnessFaults: [] }` and `{ hasHarnessFault: false, harnessFaults: [f] }` unrepresentable!
+ */
+export type ScorecardFaultState =
+	| { readonly hasHarnessFault: false; readonly harnessFaults: readonly [] }
+	| { readonly hasHarnessFault: true; readonly harnessFaults: readonly [HarnessFault, ...HarnessFault[]] };
+
+export function toScorecardFaultState(faults: readonly HarnessFault[]): ScorecardFaultState {
+	if (faults.length === 0) {
+		return { hasHarnessFault: false, harnessFaults: [] };
+	}
+	return { hasHarnessFault: true, harnessFaults: [faults[0]!, ...faults.slice(1)] };
+}
+
+/**
+ * Exhaustive Scorecard schema version discriminator:
+ * - `schemaVersion: 2` GUARANTEES `anytime` and `mechanisms` are populated.
+ * - `schemaVersion: 1` retains backward compatibility with historical pre-v3 runs.
+ */
+export type ScorecardVersioned =
+	| { readonly schemaVersion: 1; readonly anytime?: AnytimeMetrics; readonly mechanisms?: MechanismTelemetry }
+	| { readonly schemaVersion: 2; readonly anytime: AnytimeMetrics; readonly mechanisms: MechanismTelemetry };
+
+export type Scorecard = {
 	runId: string;
 	taskId: string;
 	family: TaskFamily;
@@ -348,8 +494,6 @@ export interface Scorecard {
 	bestOfflineScore: number;
 	autoNominated: boolean;
 	nominatedSha256?: string;
-	harnessFaults: readonly HarnessFault[];
-	hasHarnessFault: boolean;
 	losses: LossDecomposition;
 	tokens: TokenBreakdown;
 	time: TimeComputeBreakdown;
@@ -358,7 +502,7 @@ export interface Scorecard {
 	reproducibility: ReproducibilityEnvelope;
 	customMetrics: Record<string, number | string | boolean>;
 	gradeDetails: string;
-}
+} & ScorecardFaultState & ScorecardVersioned;
 
 export interface PromotionBar {
 	minSeeds: number;

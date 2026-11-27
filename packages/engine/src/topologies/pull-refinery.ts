@@ -211,27 +211,39 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 						continue;
 					}
 					// Claim the atomic SQLite lease BEFORE spawning a worker so losing slots never spawn idle CLIs/worktrees.
-					let claimedTarget: TaskRecord | undefined;
-					let claimedLeaseOwner: string | undefined;
-					let claimedFencingToken = 0;
-					let claimedExpiresAt = 0;
+					type LeasedTicketSlot =
+						| { readonly state: "unclaimed" }
+						| {
+							readonly state: "leased";
+							readonly task: TaskRecord;
+							readonly owner: string;
+							readonly fencingToken: number;
+							readonly expiresAt: number;
+						};
+					let lease: LeasedTicketSlot = { state: "unclaimed" };
 					for (const candidate of ready) {
 						const holderId = `slot-${slotIdx}-${newId("lse")}`;
 						const attempt = os.store.claimTaskLease(os.runId, candidate.id, holderId, leaseTtlMs);
-						if (attempt.claimed && attempt.task) {
-							claimedTarget = attempt.task;
-							claimedLeaseOwner = holderId;
-							claimedFencingToken = attempt.task.fencingToken;
-							claimedExpiresAt = attempt.task.leaseExpiresAt!;
+						if (attempt.claimed) {
+							lease = {
+								state: "leased",
+								task: attempt.task,
+								owner: holderId,
+								fencingToken: attempt.task.fencingToken,
+								expiresAt: attempt.task.leaseExpiresAt,
+							};
 							break;
 						}
 					}
-					if (!claimedTarget || !claimedLeaseOwner) {
+					if (lease.state === "unclaimed") {
 						await waitForTaskEvent(os, signal, 2_000);
 						continue;
 					}
 
-					const target = claimedTarget;
+					const target = lease.task;
+					const claimedLeaseOwner = lease.owner;
+					const claimedFencingToken = lease.fencingToken;
+					const claimedExpiresAt = lease.expiresAt;
 					const branchBaseRef = integration.bestGreenSha;
 					const avoidedDrivers = avoidDriversByTask.get(target.id);
 					let worker;
@@ -345,18 +357,27 @@ export function pullRefineryTopology(opts: PullRefineryOptions = {}): TopologyPl
 }
 
 function waitForTaskEvent(os: SwarmOsApi, signal: AbortSignal, maxWaitMs: number): Promise<void> {
+	if (signal.aborted) return Promise.resolve();
+	type WaiterState =
+		| { readonly phase: "waiting"; readonly timer: ReturnType<typeof setTimeout>; readonly unsub: () => void }
+		| { readonly phase: "settled" };
 	return new Promise((resolve) => {
-		let unsub: (() => void) | undefined;
-		const timer = setTimeout(done, maxWaitMs);
-		function done() {
-			clearTimeout(timer);
-			unsub?.();
-			signal.removeEventListener("abort", done);
+		let state: WaiterState | undefined;
+		function settle() {
+			if (!state || state.phase === "settled") return;
+			const prev = state;
+			state = { phase: "settled" };
+			clearTimeout(prev.timer);
+			prev.unsub();
+			signal.removeEventListener("abort", settle);
 			resolve();
 		}
-		signal.addEventListener("abort", done, { once: true });
-		unsub = os.bus.on((ev) => {
-			if (ev.runId === os.runId && (ev.type === "task.ready" || ev.type === "task.status")) done();
+		const timer = setTimeout(settle, maxWaitMs);
+		timer.unref?.();
+		const unsub = os.bus.on((ev) => {
+			if (ev.runId === os.runId && (ev.type === "task.ready" || ev.type === "task.status")) settle();
 		});
+		state = { phase: "waiting", timer, unsub };
+		signal.addEventListener("abort", settle, { once: true });
 	});
 }

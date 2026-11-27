@@ -1,4 +1,5 @@
-import { appendFileSync, cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { runTaskCalibration } from "./calibration.ts";
 import type {
@@ -63,6 +64,39 @@ function splitBudget(total: RunBudget, count: number): RunBudget {
 	};
 }
 
+function cloneWorkspaceForSeat(srcWorkspace: string, dstWorkspace: string): void {
+	if (existsSync(join(srcWorkspace, ".git"))) {
+		try {
+			execFileSync("git", ["clone", "--quiet", "--local", "--shared", srcWorkspace, dstWorkspace], {
+				stdio: "ignore",
+				timeout: 60_000,
+			});
+			// Mirror top-level gitignored symlinks (e.g. MLE-bench `data -> publicSrc`) & `.eval-exec` helper with 0 copy waste.
+			for (const name of readdirSync(srcWorkspace)) {
+				if (name === ".git" || name === ".swarm" || name === ".one_piece") continue;
+				const src = join(srcWorkspace, name);
+				const dst = join(dstWorkspace, name);
+				if (existsSync(dst)) continue;
+				const st = lstatSync(src);
+				if (st.isSymbolicLink()) {
+					symlinkSync(readlinkSync(src), dst);
+				} else if (name === ".eval-exec" && st.isFile()) {
+					copyFileSync(src, dst);
+					try {
+						chmodSync(dst, 0o755);
+					} catch {
+						// Ignore chmod errors.
+					}
+				}
+			}
+			return;
+		} catch {
+			// Fall through to recursive copy on non-standard git layouts.
+		}
+	}
+	cpSync(srcWorkspace, dstWorkspace, { recursive: true });
+}
+
 /**
  * Execute `silent_bon`: N completely isolated single-agent runs each receiving `1/N` of the
  * aggregate token/compute budget, with zero shared board or messaging, followed by a
@@ -95,7 +129,7 @@ async function runSilentBestOfN(
 			const subDir = join(spec.runDir, `silent-seat-${i}`);
 			const subWorkspace = join(subDir, "workspace");
 			mkdirSync(subDir, { recursive: true });
-			cpSync(spec.workspaceDir, subWorkspace, { recursive: true });
+			cloneWorkspaceForSeat(spec.workspaceDir, subWorkspace);
 			const subDbPath = join(subDir, "trace.db");
 			const subRunId = `${spec.runId}-seat-${i}`;
 
@@ -326,8 +360,8 @@ export function renderCampaignReport(
 		"",
 		`Family: \`${task.family}\` · Runs: ${scorecards.length}`,
 		"",
-		"| Arm | Rung | N | Delivered Pass | Mean Delivered Score | Mean Best Offline | Mean Nomination Loss | Mean Tokens | Coord Share | Mean Wall (ms) | Faults |",
-		"| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+		"| Arm | Rung | N | Delivered Pass | Mean Score | Mean AULC | Mean Best Offline | Mean NomLoss | Mean Tokens | Coord Share | KV Hit | Mean Wall (ms) | Faults |",
+		"| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
 	];
 	for (const arm of arms) {
 		const rows = scorecards.filter(
@@ -342,7 +376,7 @@ export function renderCampaignReport(
 		const passCount = rows.filter((r) => r.deliveredPass).length;
 		const faultCount = rows.filter((r) => r.hasHarnessFault).length;
 		lines.push(
-			`| ${arm.id} | ${arm.controlRung} | ${arm.swarmSize} | ${passCount}/${rows.length} | ${avg((r) => r.deliveredScore).toFixed(3)} | ${avg((r) => r.bestOfflineScore).toFixed(3)} | ${avg((r) => r.losses.nominationLoss).toFixed(3)} | ${Math.round(avg((r) => r.tokens.total)).toLocaleString()} | ${(avg((r) => r.tokens.coordinationTokenShare) * 100).toFixed(1)}% | ${Math.round(avg((r) => r.time.wallClockMs)).toLocaleString()} | ${faultCount} |`,
+			`| ${arm.id} | ${arm.controlRung} | ${arm.swarmSize} | ${passCount}/${rows.length} | ${avg((r) => r.deliveredScore).toFixed(3)} | ${avg((r) => r.anytime?.aulcTokens ?? 0).toFixed(3)} | ${avg((r) => r.bestOfflineScore).toFixed(3)} | ${avg((r) => r.losses.nominationLoss).toFixed(3)} | ${Math.round(avg((r) => r.tokens.total)).toLocaleString()} | ${(avg((r) => r.tokens.coordinationTokenShare) * 100).toFixed(1)}% | ${(avg((r) => r.tokens.cacheHitRate ?? 0) * 100).toFixed(1)}% | ${Math.round(avg((r) => r.time.wallClockMs)).toLocaleString()} | ${faultCount} |`,
 		);
 	}
 	lines.push("", "## Summary JSON", "", "```json", JSON.stringify(summary, null, 2), "```", "");
@@ -363,7 +397,7 @@ export async function runCampaign(options: CampaignOptions): Promise<CampaignRes
 	mkdirSync(join(outDir, "scorecards"), { recursive: true });
 	const git = gitReproducibility(repoRoot);
 	let calibrationReport: { passed: boolean; checksPassed: number; checksTotal: number } | null = null;
-	if (!options.skipCalibration && task.buildReferenceArtifact) {
+	if (!options.skipCalibration && !task.requiresDocker && task.buildReferenceArtifact) {
 		const cal = await runTaskCalibration(task, {
 			seed: seeds[0] ?? 7,
 			repoRoot,
@@ -443,7 +477,8 @@ export async function runCampaign(options: CampaignOptions): Promise<CampaignRes
 				soloSeatPrompts: prepared.soloSeatPrompts,
 				seatIndex: arm.controlRung === "solo" ? 0 : undefined,
 				totalSeats: prepared.n,
-				hiddenDenyPaths: [hiddenDir, dbPath, `${dbPath}-wal`, `${dbPath}-shm`],
+				hiddenDenyPaths: [...new Set([hiddenDir, dbPath, `${dbPath}-wal`, `${dbPath}-shm`, ...(prepared.extraDeniedReadPaths ?? [])])],
+				allowDockerSocket: prepared.allowDockerSocket,
 				controlRung: arm.controlRung,
 				topology: arm.topology ?? arm.controlRung,
 				swarmSize: arm.swarmSize,

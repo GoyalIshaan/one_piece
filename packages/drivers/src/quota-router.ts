@@ -1,10 +1,12 @@
 import {
+	assertNever,
 	type DriverConfig,
 	type DriverHealth,
 	type DriverPoolSelection,
 	type DriverTier,
 	type EventBus,
 	type ProviderQuotaRecord,
+	type QuotaDriverStatus,
 	type QuotaErrorClass,
 	type QuotaPoolRouter,
 	type Role,
@@ -357,7 +359,7 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 		this.dispatchWaiters();
 	}
 
-	status() {
+	status(): QuotaDriverStatus[] {
 		const waitingByDriver = new Map<string, number>();
 		for (const waiter of this.waiters) {
 			try {
@@ -368,18 +370,26 @@ export class DriverQuotaRouter implements QuotaPoolRouter {
 				// Ignore waiters with no currently healthy drivers.
 			}
 		}
-		return [...this.driverMap.entries()].map(([driverId, entry]) => {
+		return [...this.driverMap.entries()].map(([driverId, entry]): QuotaDriverStatus => {
 			this.isHealthy(driverId);
 			const rec = this.states.get(driverId)!;
-			return {
+			const base = {
 				driverId,
 				kind: entry.driver.kind,
-				state: rec.state,
-				cooldownUntil: rec.cooldownUntil,
 				running: entry.running,
 				waiting: waitingByDriver.get(driverId) ?? 0,
 				effectiveLimit: this.governor.effectiveLimit(driverId, entry.running),
 			};
+			switch (rec.state) {
+				case "healthy":
+					return { ...base, state: "healthy" };
+				case "cooldown":
+					return { ...base, state: "cooldown", cooldownUntil: rec.cooldownUntil };
+				case "drained":
+					return { ...base, state: "drained" };
+				default:
+					return assertNever(rec, "Unhandled ProviderQuotaRecord state");
+			}
 		});
 	}
 

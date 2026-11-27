@@ -27,7 +27,7 @@ class MockWorkerDriver implements WorkerDriver {
 	}
 
 	async healthCheck() {
-		return { ok: true, driverId: this.id, kind: this.kind, version: "mock-1.0" };
+		return { ok: true as const, driverId: this.id, kind: this.kind, version: "mock-1.0" };
 	}
 
 	async spawn(spec: WorkerSpawnSpec): Promise<WorkerSession> {

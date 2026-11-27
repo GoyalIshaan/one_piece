@@ -205,6 +205,7 @@ export const miniOptPackTask: EvalTask = {
 			fixtureSha256: sha256Dir(workDir),
 			graderSha256: sha256Dir(hiddenDir),
 			incumbentScore: INCUMBENT_SUM,
+			theoreticalCeiling: 2.636,
 			sandboxProfile: "eval-offline",
 		};
 	},

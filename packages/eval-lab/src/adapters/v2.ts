@@ -119,6 +119,7 @@ export function createV2Adapter(options: V2AdapterOptions): HarnessAdapter {
 					enableFieldGuide: options.enableFieldGuide ?? true,
 					decisionClient: options.decisionClient,
 					networkOffWorkers: true,
+					allowDockerSocket: spec.allowDockerSocket ?? false,
 					rawConfig: {
 						evalLab: {
 							taskId: spec.taskId,

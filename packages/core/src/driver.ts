@@ -140,14 +140,39 @@ export interface WorkerSession {
 	close(): Promise<void>;
 }
 
-export interface DriverHealth {
-	ok: boolean;
-	driverId: string;
-	kind: DriverKind;
-	version?: string;
-	binaryPath?: string;
-	detail?: string;
+interface DriverHealthBase {
+	readonly driverId: string;
+	readonly kind: DriverKind;
+	readonly version?: string;
+	readonly binaryPath?: string;
 }
+
+/**
+ * Exhaustive driver health check result:
+ * - Unhealthy (`ok: false`) drivers MUST always provide a non-empty diagnostic `detail`.
+ */
+export type DriverHealth = DriverHealthBase & Exclusive<
+	| { readonly ok: true; readonly detail?: string }
+	| { readonly ok: false; readonly detail: string }
+>;
+
+interface QuotaDriverStatusBase {
+	readonly driverId: string;
+	readonly kind: DriverKind;
+	readonly running: number;
+	readonly waiting: number;
+	readonly effectiveLimit?: number;
+}
+
+/**
+ * Exhaustive runtime quota status snapshot per driver:
+ * - ONLY `state: "cooldown"` carries `cooldownUntil`; `healthy` and `drained` cannot leak stale timestamps.
+ */
+export type QuotaDriverStatus = QuotaDriverStatusBase & Exclusive<
+	| { readonly state: "healthy" }
+	| { readonly state: "cooldown"; readonly cooldownUntil: number }
+	| { readonly state: "drained" }
+>;
 
 export interface WorkerDriver {
 	readonly id: string;
@@ -224,5 +249,5 @@ export interface QuotaPoolRouter {
 	/** Clear cooldown state after a successful turn. */
 	reportSuccess(driverId: string): void;
 	/** Current quota/cooldown status snapshot for all registered drivers. */
-	status(): Array<{ driverId: string; kind: DriverKind; state: "healthy" | "cooldown" | "drained"; cooldownUntil?: number; running: number; waiting: number; effectiveLimit?: number }>;
+	status(): QuotaDriverStatus[];
 }

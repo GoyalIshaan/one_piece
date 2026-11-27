@@ -254,3 +254,159 @@ export function evaluatePromotionBar(comparison: PairedComparison, bar: Promotio
 		reason: `Met promotion bar across ${comparison.pairs} paired seeds (pass gain ${(comparison.passRateGain * 100).toFixed(1)}pp, score gain ${comparison.scoreGain.mean.toFixed(4)}, 0 integrity faults).`,
 	};
 }
+
+export interface ScalingPoint {
+	readonly n: number;
+	readonly runs: number;
+	readonly passRate: number;
+	readonly meanScore: number;
+	readonly meanAulcTokens: number;
+	readonly meanTokens: number;
+	readonly meanWallClockMs: number;
+	/** Speedup S(N) = T(1) / T(N) relative to smallest N baseline. */
+	readonly speedupS: number;
+	/** Parallel efficiency E(N) = S(N) / (N / N_base). */
+	readonly parallelEfficiencyE: number;
+	/** Karp-Flatt empirical serial fraction f = (1/S - 1/N) / (1 - 1/N) for N > 1. */
+	readonly karpFlattSerialFraction?: number;
+}
+
+/**
+ * Compute empirical parallel scaling curves across swarm sizes `N ∈ {1, 2, 4, 8, ...}`:
+ * Speedup S(N), Parallel Efficiency E(N), and Karp-Flatt serial fraction f.
+ */
+export function computeScalingLaws(scorecards: readonly Scorecard[]): ScalingPoint[] {
+	const byN = new Map<number, Scorecard[]>();
+	for (const s of scorecards) {
+		if (s.hasHarnessFault) continue;
+		const n = Math.max(1, s.dynamics.swarmSize);
+		const arr = byN.get(n) ?? [];
+		arr.push(s);
+		byN.set(n, arr);
+	}
+	const ns = [...byN.keys()].sort((a, b) => a - b);
+	if (!ns.length) return [];
+	const baseN = ns[0]!;
+	const baseRows = byN.get(baseN)!;
+	const baseWall = baseRows.reduce((acc, r) => acc + r.time.wallClockMs, 0) / baseRows.length;
+
+	return ns.map((n) => {
+		const rows = byN.get(n)!;
+		const avg = (fn: (s: Scorecard) => number) => rows.reduce((acc, r) => acc + fn(r), 0) / rows.length;
+		const meanWallClockMs = avg((r) => r.time.wallClockMs);
+		const speedupS = meanWallClockMs > 0 && baseWall > 0 ? Math.round((baseWall / meanWallClockMs) * 1000) / 1000 : 1;
+		const relN = n / baseN;
+		const parallelEfficiencyE = relN > 0 ? Math.round((speedupS / relN) * 1000) / 1000 : 1;
+		const karpFlattSerialFraction =
+			relN > 1 && speedupS > 0
+				? Math.round((((1 / speedupS) - (1 / relN)) / (1 - 1 / relN)) * 10000) / 10000
+				: undefined;
+		return {
+			n,
+			runs: rows.length,
+			passRate: Math.round((rows.filter((r) => r.deliveredPass).length / rows.length) * 10000) / 10000,
+			meanScore: Math.round(avg((r) => r.deliveredScore) * 10000) / 10000,
+			meanAulcTokens: Math.round(avg((r) => r.anytime?.aulcTokens ?? 0) * 10000) / 10000,
+			meanTokens: Math.round(avg((r) => r.tokens.total)),
+			meanWallClockMs: Math.round(meanWallClockMs),
+			speedupS,
+			parallelEfficiencyE,
+			...(karpFlattSerialFraction !== undefined ? { karpFlattSerialFraction } : {}),
+		};
+	});
+}
+
+export interface RouterRegretTaskRow {
+	readonly taskId: string;
+	readonly adaptiveScore: number;
+	readonly oracleScore: number;
+	readonly oracleTopology: string;
+	readonly regret: number;
+	readonly normalizedRegret: number;
+}
+
+export interface RouterRegretReport {
+	readonly adaptiveTopology: string;
+	readonly tasksEvaluated: number;
+	readonly meanRegret: number;
+	readonly meanNormalizedRegret: number;
+	readonly maxRegret: number;
+	readonly perTask: readonly RouterRegretTaskRow[];
+}
+
+/**
+ * Compute Adaptive Meta-Router Oracle Regret across tasks:
+ * `regret(task) = max_{t in staticTopologies} meanScore(t) - meanScore(adaptive)`.
+ */
+export function computeRouterRegret(
+	scorecards: readonly Scorecard[],
+	adaptiveTopology = "adaptive",
+): RouterRegretReport {
+	const byTask = new Map<string, Map<string, number[]>>();
+	for (const s of scorecards) {
+		if (s.hasHarnessFault) continue;
+		const topo = s.reproducibility.topology;
+		const taskMap = byTask.get(s.taskId) ?? new Map<string, number[]>();
+		const list = taskMap.get(topo) ?? [];
+		list.push(s.deliveredScore);
+		taskMap.set(topo, list);
+		byTask.set(s.taskId, taskMap);
+	}
+
+	const perTask: RouterRegretTaskRow[] = [];
+	for (const [taskId, topoMap] of [...byTask.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+		const adaptiveScores = topoMap.get(adaptiveTopology);
+		if (!adaptiveScores?.length) continue;
+		const adaptiveMean = adaptiveScores.reduce((s, x) => s + x, 0) / adaptiveScores.length;
+		let oracleScore = adaptiveMean;
+		let oracleTopology = adaptiveTopology;
+		for (const [topo, vals] of topoMap.entries()) {
+			if (!vals.length) continue;
+			const m = vals.reduce((s, x) => s + x, 0) / vals.length;
+			if (m > oracleScore) {
+				oracleScore = m;
+				oracleTopology = topo;
+			}
+		}
+		const regret = Math.max(0, Math.round((oracleScore - adaptiveMean) * 1e6) / 1e6);
+		const normalizedRegret = oracleScore > 0 ? Math.round((regret / oracleScore) * 1e4) / 1e4 : 0;
+		perTask.push({
+			taskId,
+			adaptiveScore: Math.round(adaptiveMean * 1e4) / 1e4,
+			oracleScore: Math.round(oracleScore * 1e4) / 1e4,
+			oracleTopology,
+			regret,
+			normalizedRegret,
+		});
+	}
+
+	const n = perTask.length;
+	return {
+		adaptiveTopology,
+		tasksEvaluated: n,
+		meanRegret: n ? Math.round((perTask.reduce((s, r) => s + r.regret, 0) / n) * 1e6) / 1e6 : 0,
+		meanNormalizedRegret: n ? Math.round((perTask.reduce((s, r) => s + r.normalizedRegret, 0) / n) * 1e4) / 1e4 : 0,
+		maxRegret: n ? Math.max(...perTask.map((r) => r.regret)) : 0,
+		perTask,
+	};
+}
+
+/**
+ * Exact Benjamini-Hochberg False Discovery Rate (FDR) step-up p-value adjustment.
+ * Preserves input ordering and clamps q-values to [0, 1].
+ */
+export function benjaminiHochberg(pValues: readonly number[]): number[] {
+	const m = pValues.length;
+	if (m === 0) return [];
+	const indexed = pValues.map((p, i) => ({ i, p: Math.max(0, Math.min(1, Number.isFinite(p) ? p : 1)) }));
+	indexed.sort((a, b) => a.p - b.p);
+	const adjusted = new Array<number>(m);
+	let runningMin = 1;
+	for (let rank = m; rank >= 1; rank--) {
+		const item = indexed[rank - 1]!;
+		const q = Math.min(runningMin, (item.p * m) / rank);
+		runningMin = q;
+		adjusted[item.i] = Math.round(Math.min(1, q) * 1e6) / 1e6;
+	}
+	return adjusted;
+}
